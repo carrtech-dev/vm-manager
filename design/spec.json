@@ -1,0 +1,813 @@
+{
+  "meta": {
+    "product": "CarrTech VM Manager",
+    "host": "ctlnxdbn001 (192.168.8.235)",
+    "hypervisors": ["Incus", "libvirt"],
+    "style": "Proxmox-inspired dense operational console, dark navy/slate, restrained orange accent",
+    "canvas": {
+      "pageWidth": 1440,
+      "pageHeight": 960,
+      "gridGap": 100,
+      "gridOrigin": { "x": 100, "y": 100 },
+      "columns": 4
+    }
+  },
+
+  "tokens": {
+    "color": {
+      "bg": {
+        "canvas": "#10141A",
+        "base": "#171C24",
+        "surface": "#1C222C",
+        "surfaceAlt": "#232A35",
+        "surfaceRaised": "#262E3A",
+        "sidebar": "#141921",
+        "header": "#161C25",
+        "rowHover": "#212834",
+        "rowSelected": "#26303F",
+        "inputBg": "#141921",
+        "taskLog": "#121620"
+      },
+      "border": {
+        "default": "#2A3240",
+        "subtle": "#222934",
+        "strong": "#3A4556",
+        "focus": "#E07B22"
+      },
+      "text": {
+        "primary": "#E8EBF1",
+        "secondary": "#9CA8BA",
+        "muted": "#6B7586",
+        "disabled": "#4B5562",
+        "inverse": "#15191F",
+        "link": "#5FA8E0"
+      },
+      "accent": {
+        "orange": "#E07B22",
+        "orangeHover": "#F08D34",
+        "orangeMuted": "#8A5323",
+        "orangeBg": "#2E2013"
+      },
+      "state": {
+        "green": "#4EBD6B",
+        "greenBg": "#17301F",
+        "greenBorder": "#28492F",
+        "red": "#E25A5A",
+        "redBg": "#331D1D",
+        "redBorder": "#4A2A2A",
+        "amber": "#D7A23B",
+        "amberBg": "#332A16",
+        "amberBorder": "#4A3C20",
+        "blue": "#5B9BD5",
+        "blueBg": "#1B2733",
+        "blueBorder": "#2A3C4D",
+        "gray": "#8A93A3",
+        "grayBg": "#262C35"
+      }
+    },
+
+    "typography": {
+      "fontFamily": "Inter",
+      "weights": {
+        "regular": "Regular",
+        "medium": "Medium",
+        "semibold": "Semi Bold",
+        "bold": "Bold"
+      },
+      "scale": {
+        "pageTitle": { "size": 20, "weight": "semibold", "lineHeight": 26 },
+        "h1": { "size": 17, "weight": "semibold", "lineHeight": 23 },
+        "h2": { "size": 14, "weight": "semibold", "lineHeight": 19 },
+        "body": { "size": 13, "weight": "regular", "lineHeight": 18 },
+        "bodyMedium": { "size": 13, "weight": "medium", "lineHeight": 18 },
+        "small": { "size": 12, "weight": "regular", "lineHeight": 16 },
+        "smallMedium": { "size": 12, "weight": "medium", "lineHeight": 16 },
+        "micro": { "size": 11, "weight": "medium", "lineHeight": 14 },
+        "mono": { "size": 12, "weight": "regular", "lineHeight": 16 }
+      }
+    },
+
+    "spacing": {
+      "xs": 4,
+      "sm": 8,
+      "md": 12,
+      "lg": 16,
+      "xl": 20,
+      "xxl": 24,
+      "xxxl": 32
+    },
+    "radius": { "sm": 3, "md": 5, "lg": 8, "pill": 999 },
+    "borderWidth": { "hairline": 1 },
+
+    "layout": {
+      "sidebarWidth": 224,
+      "headerHeight": 56,
+      "taskLogHeight": 176,
+      "taskLogCollapsedLabelHeight": 28,
+      "rowHeight": 36,
+      "hardwareRowHeight": 44
+    }
+  },
+
+  "sharedComponents": {
+    "Sidebar": {
+      "name": "Sidebar / Resource Tree",
+      "width": 224,
+      "description": "Persistent left resource tree: Datacenter root, host ctlnxdbn001, hypervisor groups (Incus, libvirt), VM leaves with green/red status dot, Storage and Networks sub-groups. Search box at top, section labels in micro uppercase muted text.",
+      "sections": [
+        {
+          "label": "Search",
+          "type": "search-input",
+          "placeholder": "Search resources"
+        },
+        {
+          "label": "Datacenter",
+          "type": "tree",
+          "items": [
+            {
+              "label": "ctlnxdbn001",
+              "icon": "server",
+              "indent": 0,
+              "expanded": true,
+              "badge": "192.168.8.235"
+            },
+            {
+              "label": "Incus",
+              "icon": "layer",
+              "indent": 1,
+              "expanded": true
+            },
+            {
+              "label": "vm-web-01",
+              "icon": "vm",
+              "indent": 2,
+              "status": "running"
+            },
+            {
+              "label": "vm-web-02",
+              "icon": "vm",
+              "indent": 2,
+              "status": "running"
+            },
+            {
+              "label": "vm-build-ci",
+              "icon": "vm",
+              "indent": 2,
+              "status": "stopped"
+            },
+            {
+              "label": "libvirt",
+              "icon": "layer",
+              "indent": 1,
+              "expanded": true
+            },
+            {
+              "label": "vm-db-primary",
+              "icon": "vm",
+              "indent": 2,
+              "status": "running"
+            },
+            {
+              "label": "vm-win-test",
+              "icon": "vm",
+              "indent": 2,
+              "status": "paused"
+            },
+            { "label": "Storage", "icon": "disk", "indent": 0 },
+            { "label": "Networks", "icon": "network", "indent": 0 },
+            { "label": "ISO Library", "icon": "iso", "indent": 0 },
+            { "label": "Access Control", "icon": "lock", "indent": 0 }
+          ]
+        }
+      ]
+    },
+
+    "Header": {
+      "name": "Header / Top Bar",
+      "height": 56,
+      "description": "Breadcrumb at left (Datacenter > ctlnxdbn001 > current view), global search centered-left, right cluster: create-VM primary orange button, notifications bell, user menu with avatar + role chip.",
+      "left": { "type": "breadcrumb" },
+      "right": [
+        { "type": "button", "variant": "primary", "label": "Create VM" },
+        { "type": "icon-button", "icon": "bell", "badge": 2 },
+        { "type": "icon-button", "icon": "help" },
+        { "type": "user-menu", "name": "Simon Carr", "role": "Administrator" }
+      ]
+    },
+
+    "TaskLogPanel": {
+      "name": "Task Log / Bottom Panel",
+      "height": 176,
+      "description": "Persistent bottom panel docked below content, tab row (Task Log, Cluster Log) plus columns Start Time, End Time, Node, User, Description, Status; collapsible with chevron control at top-right.",
+      "columns": ["Start Time", "Node", "User", "Description", "Status"],
+      "rows": [
+        {
+          "start": "23:41:02",
+          "node": "ctlnxdbn001",
+          "user": "simon@pam",
+          "description": "VM vm-web-02 — Start",
+          "status": "ok"
+        },
+        {
+          "start": "23:38:47",
+          "node": "ctlnxdbn001",
+          "user": "simon@pam",
+          "description": "Create VM vm-build-ci",
+          "status": "ok"
+        },
+        {
+          "start": "22:55:10",
+          "node": "ctlnxdbn001",
+          "user": "operator@pam",
+          "description": "VM vm-db-primary — Snapshot",
+          "status": "running"
+        },
+        {
+          "start": "21:12:33",
+          "node": "ctlnxdbn001",
+          "user": "simon@pam",
+          "description": "ISO upload ubuntu-24.04.3-live-server-amd64.iso",
+          "status": "ok"
+        },
+        {
+          "start": "20:04:18",
+          "node": "ctlnxdbn001",
+          "user": "simon@pam",
+          "description": "VM vm-win-test — Pause",
+          "status": "warning"
+        }
+      ]
+    },
+
+    "ResourceCard": {
+      "name": "Resource Summary Card",
+      "description": "Dense stat card: micro-label, large value, secondary caption, optional horizontal usage bar (orange fill on track)."
+    },
+
+    "StatusBadge": {
+      "name": "Status Badge",
+      "description": "Pill badge: green/running, red/stopped, amber/paused or warning, blue/info, gray/unknown. Dot + label."
+    },
+
+    "DataTable": {
+      "name": "Data Table",
+      "description": "Dense operational table: 36px rows, hairline row dividers, sortable column headers in small-medium muted text, right-aligned numeric/action columns, zebra-free with hover highlight."
+    }
+  },
+
+  "pages": [
+    {
+      "key": "login",
+      "name": "Login",
+      "grid": { "col": 0, "row": 0 },
+      "usesSidebar": false,
+      "usesHeader": false,
+      "usesTaskLog": false,
+      "background": "canvas",
+      "layout": "Centered 400px card on dark canvas with subtle vignette panel behind it. Card contains product mark (CarrTech VM Manager wordmark + small server glyph), 'Sign in to ctlnxdbn001' subtitle, Username field, Password field, Realm select (PAM / PVE-style), orange primary 'Sign In' button full width, muted footer text with host address and version.",
+      "sections": [
+        {
+          "type": "brand",
+          "title": "CarrTech VM Manager",
+          "subtitle": "Virtual Machine Management Console"
+        },
+        {
+          "type": "form",
+          "fields": [
+            { "label": "Username", "placeholder": "simon" },
+            { "label": "Password", "placeholder": "••••••••", "secure": true },
+            { "label": "Realm", "placeholder": "Linux PAM", "type": "select" }
+          ]
+        },
+        {
+          "type": "button",
+          "label": "Sign In",
+          "variant": "primary",
+          "fullWidth": true
+        },
+        {
+          "type": "footer",
+          "text": "ctlnxdbn001 · 192.168.8.235 · VM Manager v1.0"
+        }
+      ]
+    },
+
+    {
+      "key": "overview",
+      "name": "Overview",
+      "grid": { "col": 1, "row": 0 },
+      "usesSidebar": true,
+      "usesHeader": true,
+      "usesTaskLog": true,
+      "layout": "Header breadcrumb 'Datacenter / ctlnxdbn001 / Overview'. Below: row of 4 resource cards (CPU, Memory, Storage, VMs running vs total) each with usage bar. Then two-column area: left 'Virtual Machines' quick table (name, status, cpu%, mem), right 'Host Summary' panel with uptime, kernel, load average, Incus/libvirt version rows. Bottom: persistent Task Log.",
+      "sections": [
+        {
+          "type": "resource-card-row",
+          "cards": [
+            {
+              "label": "CPU Usage",
+              "value": "18%",
+              "caption": "8 cores · ctlnxdbn001",
+              "usage": 0.18
+            },
+            {
+              "label": "Memory",
+              "value": "41.2 / 64 GiB",
+              "caption": "64.4% used",
+              "usage": 0.644
+            },
+            {
+              "label": "Storage",
+              "value": "612 / 1850 GiB",
+              "caption": "local-lvm + nfs-backup",
+              "usage": 0.33
+            },
+            {
+              "label": "Virtual Machines",
+              "value": "4 / 5",
+              "caption": "running / total",
+              "usage": 0.8
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "title": "Virtual Machines",
+          "columns": ["Name", "Hypervisor", "Status", "CPU", "Memory"],
+          "rows": [
+            {
+              "name": "vm-web-01",
+              "hypervisor": "Incus",
+              "status": "running",
+              "cpu": "6%",
+              "memory": "1.1 / 4 GiB"
+            },
+            {
+              "name": "vm-web-02",
+              "hypervisor": "Incus",
+              "status": "running",
+              "cpu": "4%",
+              "memory": "0.9 / 4 GiB"
+            },
+            {
+              "name": "vm-build-ci",
+              "hypervisor": "Incus",
+              "status": "stopped",
+              "cpu": "—",
+              "memory": "— / 8 GiB"
+            },
+            {
+              "name": "vm-db-primary",
+              "hypervisor": "libvirt",
+              "status": "running",
+              "cpu": "22%",
+              "memory": "11.8 / 16 GiB"
+            },
+            {
+              "name": "vm-win-test",
+              "hypervisor": "libvirt",
+              "status": "paused",
+              "cpu": "—",
+              "memory": "4.0 / 8 GiB"
+            }
+          ]
+        },
+        {
+          "type": "panel",
+          "title": "Host Summary",
+          "rows": [
+            { "label": "Hostname", "value": "ctlnxdbn001" },
+            { "label": "Address", "value": "192.168.8.235" },
+            { "label": "Uptime", "value": "14d 6h 22m" },
+            { "label": "Load Average", "value": "0.42, 0.51, 0.47" },
+            { "label": "Kernel", "value": "Linux 6.8.0-45-generic" },
+            { "label": "Incus", "value": "v6.3" },
+            { "label": "libvirt", "value": "v10.0.0" }
+          ]
+        }
+      ]
+    },
+
+    {
+      "key": "vm-list",
+      "name": "Virtual Machines List",
+      "grid": { "col": 2, "row": 0 },
+      "usesSidebar": true,
+      "usesHeader": true,
+      "usesTaskLog": true,
+      "layout": "Header breadcrumb 'Datacenter / ctlnxdbn001 / Virtual Machines'. Toolbar row: search input, hypervisor filter chip group (All/Incus/libvirt), status filter chips (All/Running/Stopped/Paused), 'Create VM' orange button at right. Full-width dense DataTable with columns Status, Name, Hypervisor, CPU, Memory, Disk, IP Address, Uptime, Actions (icon buttons: console, start/stop, edit).",
+      "sections": [
+        {
+          "type": "toolbar",
+          "search": "Search virtual machines",
+          "filters": ["All hypervisors", "Incus", "libvirt"],
+          "statusFilters": ["All", "Running", "Stopped", "Paused"]
+        },
+        {
+          "type": "table",
+          "title": "Virtual Machines",
+          "columns": [
+            "Status",
+            "Name",
+            "Hypervisor",
+            "CPU",
+            "Memory",
+            "Disk",
+            "IP Address",
+            "Uptime",
+            "Actions"
+          ],
+          "rows": [
+            {
+              "status": "running",
+              "name": "vm-web-01",
+              "hypervisor": "Incus",
+              "cpu": "6%",
+              "memory": "1.1 / 4 GiB",
+              "disk": "12 / 40 GiB",
+              "ip": "192.168.8.41",
+              "uptime": "6d 2h"
+            },
+            {
+              "status": "running",
+              "name": "vm-web-02",
+              "hypervisor": "Incus",
+              "cpu": "4%",
+              "memory": "0.9 / 4 GiB",
+              "disk": "11 / 40 GiB",
+              "ip": "192.168.8.42",
+              "uptime": "6d 2h"
+            },
+            {
+              "status": "stopped",
+              "name": "vm-build-ci",
+              "hypervisor": "Incus",
+              "cpu": "—",
+              "memory": "— / 8 GiB",
+              "disk": "30 / 80 GiB",
+              "ip": "—",
+              "uptime": "—"
+            },
+            {
+              "status": "running",
+              "name": "vm-db-primary",
+              "hypervisor": "libvirt",
+              "cpu": "22%",
+              "memory": "11.8 / 16 GiB",
+              "disk": "210 / 500 GiB",
+              "ip": "192.168.8.51",
+              "uptime": "14d 5h"
+            },
+            {
+              "status": "paused",
+              "name": "vm-win-test",
+              "hypervisor": "libvirt",
+              "cpu": "—",
+              "memory": "4.0 / 8 GiB",
+              "disk": "58 / 120 GiB",
+              "ip": "192.168.8.60",
+              "uptime": "2h 10m"
+            }
+          ]
+        }
+      ]
+    },
+
+    {
+      "key": "vm-detail-hardware",
+      "name": "VM Detail — Hardware",
+      "grid": { "col": 3, "row": 0 },
+      "usesSidebar": true,
+      "usesHeader": true,
+      "usesTaskLog": true,
+      "layout": "Header breadcrumb 'Datacenter / ctlnxdbn001 / vm-db-primary'. Title row: VM name + running status badge + action buttons (Console, Start/Stop/Reboot, Migrate, Remove). Tab bar: Hardware (active), Console, Options, Snapshots, Backup, Permissions. Hardware tab body: dense property-row list mimicking Proxmox hardware panel — Memory, Processors, BIOS, Display, SCSI Controller, Hard Disk (scsi0), CD/DVD Drive (ISO), Network Device (net0), each row with icon, label, value, and an Edit affordance.",
+      "sections": [
+        {
+          "type": "title-bar",
+          "name": "vm-db-primary",
+          "status": "running",
+          "actions": ["Console", "Shutdown", "Reboot", "Migrate", "Remove"]
+        },
+        {
+          "type": "tabs",
+          "items": [
+            "Hardware",
+            "Console",
+            "Options",
+            "Snapshots",
+            "Backup",
+            "Permissions"
+          ],
+          "active": "Hardware"
+        },
+        {
+          "type": "hardware-rows",
+          "rows": [
+            { "label": "Memory", "value": "16384 MiB" },
+            {
+              "label": "Processors",
+              "value": "4 vCPU (1 socket, 4 cores) [host]"
+            },
+            { "label": "BIOS", "value": "OVMF (UEFI), Secure Boot enabled" },
+            { "label": "Display", "value": "VirtIO GPU" },
+            { "label": "SCSI Controller", "value": "VirtIO SCSI single" },
+            {
+              "label": "Hard Disk (scsi0)",
+              "value": "local-lvm:vm-db-primary-disk-0, 500 GiB, ssd"
+            },
+            {
+              "label": "CD/DVD Drive (ide2)",
+              "value": "local:iso/ubuntu-24.04.3-live-server-amd64.iso"
+            },
+            {
+              "label": "Network Device (net0)",
+              "value": "virtio, bridge vmbr0, firewall on"
+            }
+          ]
+        }
+      ]
+    },
+
+    {
+      "key": "create-vm-wizard",
+      "name": "Create VM Wizard",
+      "grid": { "col": 0, "row": 1 },
+      "usesSidebar": true,
+      "usesHeader": true,
+      "usesTaskLog": false,
+      "layout": "Modal dialog (920x760) centered over dimmed Virtual Machines list background. Dialog has left step rail (General, Hardware, Network, Confirm) and right form body matching current step (shown as General+Hardware combined single-step form for density). Footer: Back / Next / Cancel / Create buttons.",
+      "sections": [
+        {
+          "type": "dialog",
+          "title": "Create: Virtual Machine",
+          "width": 920,
+          "height": 760
+        },
+        {
+          "type": "step-rail",
+          "steps": ["General", "Hardware", "Network", "Confirm"],
+          "active": "General"
+        },
+        {
+          "type": "form-section",
+          "title": "General",
+          "fields": [
+            { "label": "Node", "value": "ctlnxdbn001", "type": "select" },
+            {
+              "label": "VM Name",
+              "value": "",
+              "placeholder": "vm-app-03",
+              "type": "text"
+            },
+            {
+              "label": "Hypervisor",
+              "value": "Incus",
+              "type": "select",
+              "options": ["Incus", "libvirt"]
+            }
+          ]
+        },
+        {
+          "type": "form-section",
+          "title": "Hardware",
+          "fields": [
+            { "label": "CPU (cores)", "value": "2", "type": "number" },
+            { "label": "Memory (MiB)", "value": "4096", "type": "number" },
+            { "label": "Storage Pool", "value": "local-lvm", "type": "select" },
+            {
+              "label": "Root Disk Size (GiB)",
+              "value": "32",
+              "type": "number"
+            },
+            {
+              "label": "ISO Image",
+              "value": "ubuntu-24.04.3-live-server-amd64.iso",
+              "type": "select",
+              "optional": true
+            },
+            {
+              "label": "Extra Disk",
+              "value": "none",
+              "type": "select",
+              "optional": true
+            },
+            { "label": "Secure Boot", "value": true, "type": "toggle" }
+          ]
+        },
+        {
+          "type": "form-section",
+          "title": "Network",
+          "fields": [
+            { "label": "Network", "value": "vmbr0 (NAT)", "type": "select" },
+            { "label": "MAC Address", "value": "auto", "type": "text" }
+          ]
+        },
+        {
+          "type": "footer-buttons",
+          "buttons": ["Cancel", "Back", "Next", "Create VM"]
+        }
+      ]
+    },
+
+    {
+      "key": "networks",
+      "name": "Networks",
+      "grid": { "col": 1, "row": 1 },
+      "usesSidebar": true,
+      "usesHeader": true,
+      "usesTaskLog": true,
+      "layout": "Header breadcrumb 'Datacenter / ctlnxdbn001 / Networks'. Toolbar with 'Create Network' orange button. Table of networks (Name, Type badge NAT/Isolated, Bridge, Subnet, DHCP state, Attached VMs count). Below: detail panel for selected network 'vmbr0' showing DHCP settings (range, lease time, DNS) as property rows.",
+      "sections": [
+        { "type": "toolbar", "actions": ["Create Network"] },
+        {
+          "type": "table",
+          "title": "Networks",
+          "columns": [
+            "Name",
+            "Type",
+            "Bridge",
+            "Subnet",
+            "DHCP",
+            "Attached VMs"
+          ],
+          "rows": [
+            {
+              "name": "vmbr0",
+              "type": "NAT",
+              "bridge": "vmbr0",
+              "subnet": "192.168.8.0/24",
+              "dhcp": "Enabled",
+              "vms": 4
+            },
+            {
+              "name": "vmbr1-isolated",
+              "type": "Isolated",
+              "bridge": "vmbr1",
+              "subnet": "10.20.30.0/24",
+              "dhcp": "Enabled",
+              "vms": 1
+            },
+            {
+              "name": "vmbr2-storage",
+              "type": "Isolated",
+              "bridge": "vmbr2",
+              "subnet": "10.20.40.0/24",
+              "dhcp": "Disabled",
+              "vms": 0
+            }
+          ]
+        },
+        {
+          "type": "panel",
+          "title": "vmbr0 — DHCP Settings",
+          "rows": [
+            { "label": "Range Start", "value": "192.168.8.100" },
+            { "label": "Range End", "value": "192.168.8.199" },
+            { "label": "Lease Time", "value": "12h" },
+            { "label": "Gateway", "value": "192.168.8.1" },
+            { "label": "DNS Servers", "value": "192.168.8.1, 1.1.1.1" }
+          ]
+        }
+      ]
+    },
+
+    {
+      "key": "iso-library",
+      "name": "ISO Library",
+      "grid": { "col": 2, "row": 1 },
+      "usesSidebar": true,
+      "usesHeader": true,
+      "usesTaskLog": true,
+      "layout": "Header breadcrumb 'Datacenter / ctlnxdbn001 / ISO Library'. Large dashed drag-and-drop upload zone at top ('Drag ISO files here or click to browse'). Below: storage usage bar for ISO pool. Table of ISO images (Name, Size, Storage, Uploaded, Used By count badge, Actions).",
+      "sections": [
+        {
+          "type": "dropzone",
+          "title": "Drag ISO files here or click to browse",
+          "caption": "Supported: .iso — stored on local:iso"
+        },
+        {
+          "type": "usage-bar",
+          "label": "ISO Storage",
+          "value": "48.2 / 200 GiB",
+          "usage": 0.241
+        },
+        {
+          "type": "table",
+          "title": "ISO Images",
+          "columns": [
+            "Name",
+            "Size",
+            "Storage",
+            "Uploaded",
+            "Used By",
+            "Actions"
+          ],
+          "rows": [
+            {
+              "name": "ubuntu-24.04.3-live-server-amd64.iso",
+              "size": "2.6 GiB",
+              "storage": "local",
+              "uploaded": "2026-09-02",
+              "usedBy": 2
+            },
+            {
+              "name": "debian-12.7.0-amd64-netinst.iso",
+              "size": "0.7 GiB",
+              "storage": "local",
+              "uploaded": "2026-08-14",
+              "usedBy": 0
+            },
+            {
+              "name": "win11-24h2-enterprise.iso",
+              "size": "5.8 GiB",
+              "storage": "local",
+              "uploaded": "2026-07-29",
+              "usedBy": 1
+            },
+            {
+              "name": "alpine-3.20.3-x86_64.iso",
+              "size": "0.1 GiB",
+              "storage": "local",
+              "uploaded": "2026-06-11",
+              "usedBy": 0
+            }
+          ]
+        }
+      ]
+    },
+
+    {
+      "key": "access-control",
+      "name": "Access Control",
+      "grid": { "col": 3, "row": 1 },
+      "usesSidebar": true,
+      "usesHeader": true,
+      "usesTaskLog": true,
+      "layout": "Header breadcrumb 'Datacenter / ctlnxdbn001 / Access Control'. Two-column layout: left Users table (Name, Realm, Role badge, Status), right Roles & Permissions panel listing three role cards (Administrator, Operator, Viewer) each with description and a bullet permission list.",
+      "sections": [
+        {
+          "type": "table",
+          "title": "Users",
+          "columns": ["User", "Realm", "Role", "Status"],
+          "rows": [
+            {
+              "user": "simon@pam",
+              "realm": "PAM",
+              "role": "Administrator",
+              "status": "active"
+            },
+            {
+              "user": "operator@pam",
+              "realm": "PAM",
+              "role": "Operator",
+              "status": "active"
+            },
+            {
+              "user": "auditor@pam",
+              "realm": "PAM",
+              "role": "Viewer",
+              "status": "disabled"
+            }
+          ]
+        },
+        {
+          "type": "role-cards",
+          "roles": [
+            {
+              "name": "Administrator",
+              "description": "Full control of host, VMs, networks, storage, ISOs, and user access.",
+              "permissions": [
+                "Create, edit, delete VMs",
+                "Manage networks and storage pools",
+                "Manage ISO library",
+                "Manage users and roles",
+                "Access console on any VM"
+              ]
+            },
+            {
+              "name": "Operator",
+              "description": "Day-to-day VM operations without destructive or access-control changes.",
+              "permissions": [
+                "Start, stop, reboot VMs",
+                "Create VMs from approved templates",
+                "Upload ISO images",
+                "Access console on assigned VMs",
+                "View networks and storage"
+              ]
+            },
+            {
+              "name": "Viewer",
+              "description": "Read-only visibility across the datacenter for monitoring and audit.",
+              "permissions": [
+                "View VM status and metrics",
+                "View networks, storage, ISOs",
+                "View task and cluster logs",
+                "No console or edit access"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

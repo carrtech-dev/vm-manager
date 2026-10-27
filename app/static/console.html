@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>VM Console · CarrTech</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='8' fill='%23f97316'/%3E%3Cpath d='M10 12h20v7H10zm0 10h20v7H10z' fill='%230f172a'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/console.css" />
+    <script type="module" src="/static/console.js"></script>
+  </head>
+  <body class="console-page">
+    <header class="console-toolbar">
+      <strong id="console-title">VM console</strong
+      ><span id="console-status">Connecting…</span
+      ><button id="reconnect">Reconnect</button
+      ><button id="send-keys">Ctrl + Alt + Del</button
+      ><button id="fullscreen">Full screen</button>
+    </header>
+    <main id="console-screen"><div id="spice-screen"></div></main>
+    <div id="spice-message" hidden></div>
+    <div id="spice-debug" hidden></div>
+  </body>
+</html>
