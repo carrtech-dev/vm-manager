@@ -1,0 +1,14 @@
+{
+  "name": "carrtech-vm-manager",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "check": "node --check app/static/app.js && node --check app/static/core.js && node --check app/static/console.js"
+  },
+  "dependencies": {
+    "@novnc/novnc": "1.7.0"
+  },
+  "devDependencies": {
+    "@playwright/cli": "0.1.22"
+  }
+}

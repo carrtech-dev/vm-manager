@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+data/
+*.pem
+*.key
+.env
+.DS_Store
+playwright-report/
+test-results/
+design/claude-result.json
+.playwright*/
+output/playwright/

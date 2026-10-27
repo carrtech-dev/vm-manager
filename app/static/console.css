@@ -1,0 +1,50 @@
+.console-page {
+  margin: 0;
+  background: #0b1019;
+  color: #dce4ee;
+  font:
+    13px Inter,
+    system-ui,
+    sans-serif;
+}
+.console-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 18px;
+  border-bottom: 1px solid #2a3344;
+  background: #131b28;
+}
+.console-toolbar strong {
+  margin-right: 12px;
+}
+.console-toolbar span {
+  flex: 1;
+  color: #9caac0;
+}
+.console-toolbar button {
+  cursor: pointer;
+  padding: 7px 12px;
+  border: 1px solid #344155;
+  border-radius: 5px;
+  color: #dce4ee;
+  background: #1c2839;
+}
+#console-screen {
+  height: calc(100vh - 61px);
+  overflow: auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+#spice-screen {
+  position: relative;
+  margin: auto;
+}
+#spice-screen canvas {
+  max-width: 100%;
+  height: auto;
+}
+#console-status.error {
+  color: #f07878;
+}

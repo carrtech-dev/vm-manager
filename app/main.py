@@ -1,0 +1,1369 @@
+"""CarrTech VM Manager: authenticated local hypervisor control plane."""
+
+import asyncio
+import hashlib
+import ipaddress
+import json
+import logging
+import os
+import secrets
+import shutil
+import socket
+import threading
+import time
+import uuid
+from types import SimpleNamespace
+from websockets.asyncio.client import unix_connect
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from urllib.parse import quote, urlparse, urlsplit
+
+import psutil
+from fastapi import (
+    FastAPI,
+    Request,
+    Response,
+    HTTPException,
+    Depends,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, field_validator
+
+from .hypervisor import Incus, Libvirt, HypervisorError, name, run, bytes_size
+from .security import Store, ROLES, hash_password, verify_password, token_hash
+
+DATA = Path(os.environ.get("VM_MANAGER_DATA", "data")).resolve()
+DATA.mkdir(parents=True, exist_ok=True)
+ISOS = DATA / "isos"
+ISOS.mkdir(exist_ok=True)
+store = Store(DATA)
+store.bootstrap(DATA)
+incus, libvirt = Incus(), Libvirt()
+app = FastAPI(
+    title="CarrTech VM Manager", docs_url=None, redoc_url=None, openapi_url=None
+)
+executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hypervisor")
+DUMMY_PASSWORD_HASH = hash_password("dummy-password-for-timing-only")
+cache_lock = threading.Lock()
+cache = {"at": 0, "data": None}
+
+
+def invalidate():
+    cache["at"] = 0
+
+
+def task(user, action, resource, fn):
+    task_id = uuid.uuid4().hex
+    with store.db() as db:
+        db.execute(
+            "INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?)",
+            (
+                task_id,
+                action,
+                resource,
+                user["username"],
+                "queued",
+                time.time(),
+                None,
+                "",
+            ),
+        )
+
+    def execute():
+        with store.db() as db:
+            db.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
+        try:
+            if action.startswith("vm.") and ":" in resource:
+                provider, vm_name = vm_ref(resource)
+                backups = DATA / "config-backups"
+                backups.mkdir(mode=0o700, exist_ok=True)
+                original = (
+                    json.dumps(incus.vm(vm_name), indent=2)
+                    if provider == "incus"
+                    else libvirt.cli("dumpxml", vm_name, "--inactive")
+                )
+                backup = backups / (
+                    task_id + (".json" if provider == "incus" else ".xml")
+                )
+                backup.write_text(original)
+                backup.chmod(0o600)
+            fn()
+            status, message = "completed", "Completed successfully"
+        except Exception as error:
+            logging.exception("Task %s failed for %s", action, resource)
+            status, message = "failed", str(error)[:2000]
+        invalidate()
+        with store.db() as db:
+            db.execute(
+                "UPDATE tasks SET status=?,message=?,finished=? WHERE id=?",
+                (status, message, time.time(), task_id),
+            )
+        store.audit(user["username"], action, resource, status + ": " + message)
+
+    executor.submit(execute)
+    return {"task_id": task_id}
+
+
+def session(request):
+    raw = request.cookies.get("vmm_session", "")
+    with store.db() as db:
+        row = db.execute(
+            "SELECT u.id,u.username,u.role,s.csrf,s.token FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>? AND u.enabled=1",
+            (token_hash(raw), time.time()),
+        ).fetchone()
+    if not row:
+        raise HTTPException(401, "Sign in to continue")
+    return dict(row)
+
+
+def require(permission="read"):
+    def check(request: Request):
+        user = session(request)
+        if permission not in ROLES.get(user["role"], set()):
+            raise HTTPException(403, "Your role does not permit this action")
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            if not secrets.compare_digest(
+                request.headers.get("X-CSRF-Token", ""), user["csrf"]
+            ):
+                raise HTTPException(
+                    403, "Session validation failed; refresh and try again"
+                )
+        return user
+
+    return check
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("origin")
+        if origin and origin != str(request.base_url).rstrip("/"):
+            return JSONResponse(
+                {"detail": "Cross-origin request rejected"}, status_code=403
+            )
+    if request.url.path.startswith("/api/") and request.url.path != "/api/login":
+        try:
+            user = session(request)
+            if request.method not in ("GET", "HEAD", "OPTIONS"):
+                if not secrets.compare_digest(
+                    request.headers.get("X-CSRF-Token", ""), user["csrf"]
+                ):
+                    raise HTTPException(
+                        403, "Session validation failed; refresh and try again"
+                    )
+                if request.url.path == "/api/isos" and "operate" not in ROLES.get(
+                    user["role"], set()
+                ):
+                    raise HTTPException(403, "Your role does not permit ISO uploads")
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' wss:; font-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
+    )
+    if request.url.path.startswith("/api"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.exception_handler(HypervisorError)
+async def hypervisor_error(request, exc):
+    return JSONResponse({"detail": str(exc)}, status_code=409)
+
+
+class Login(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+@app.get("/health")
+def health():
+    revision = Path(__file__).resolve().parents[1] / "REVISION"
+    return {
+        "status": "ok",
+        "service": "vm-manager",
+        "revision": revision.read_text().strip()
+        if revision.exists()
+        else "development",
+    }
+
+
+@app.post("/api/login")
+def login(body: Login, request: Request, response: Response):
+    peer = request.client.host
+    now = time.time()
+    with store.db() as db:
+        db.execute("DELETE FROM attempts WHERE at<?", (now - 900,))
+        if (
+            db.execute(
+                "SELECT count(*) FROM attempts WHERE peer=?", (peer,)
+            ).fetchone()[0]
+            >= 12
+        ):
+            raise HTTPException(429, "Too many attempts. Try again in 15 minutes.")
+        row = db.execute(
+            "SELECT * FROM users WHERE username=?", (body.username,)
+        ).fetchone()
+        valid = verify_password(
+            body.password, row["password"] if row else DUMMY_PASSWORD_HASH
+        )
+        failed = not row or not row["enabled"] or not valid
+        if failed:
+            db.execute("INSERT INTO attempts VALUES(?,?)", (peer, now))
+        else:
+            raw, csrf = secrets.token_urlsafe(48), secrets.token_urlsafe(32)
+            db.execute(
+                "INSERT INTO sessions VALUES(?,?,?,?)",
+                (token_hash(raw), row["id"], csrf, now + 43200),
+            )
+            db.execute("DELETE FROM sessions WHERE expires<?", (now,))
+            db.execute("DELETE FROM attempts WHERE peer=?", (peer,))
+    if failed:
+        store.audit(body.username, "login.failed", peer)
+        raise HTTPException(401, "Invalid username or password")
+    response.set_cookie(
+        "vmm_session",
+        raw,
+        max_age=43200,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+        path="/",
+    )
+    store.audit(row["username"], "login", peer)
+    return {"username": row["username"], "role": row["role"], "csrf": csrf}
+
+
+@app.get("/api/me")
+def me(user=Depends(require())):
+    return {k: user[k] for k in ("id", "username", "role", "csrf")}
+
+
+@app.post("/api/logout")
+def logout(response: Response, user=Depends(require())):
+    with store.db() as db:
+        db.execute("DELETE FROM sessions WHERE token=?", (user["token"],))
+    response.delete_cookie("vmm_session")
+    return {"ok": True}
+
+
+class Password(BaseModel):
+    current: str = Field(max_length=256)
+    password: str = Field(min_length=12, max_length=256)
+
+
+@app.put("/api/password")
+def password(body: Password, user=Depends(require())):
+    with store.db() as db:
+        row = db.execute(
+            "SELECT password FROM users WHERE id=?", (user["id"],)
+        ).fetchone()
+        if not verify_password(body.current, row["password"]):
+            raise HTTPException(400, "Current password is incorrect")
+        db.execute(
+            "UPDATE users SET password=? WHERE id=?",
+            (hash_password(body.password), user["id"]),
+        )
+        db.execute(
+            "DELETE FROM sessions WHERE user_id=? AND token<>?",
+            (user["id"], user["token"]),
+        )
+    (DATA / "initial-admin.txt").unlink(missing_ok=True)
+    store.audit(user["username"], "password.changed")
+    return {"ok": True}
+
+
+def inventory():
+    with cache_lock:
+        if cache["data"] and time.monotonic() - cache["at"] < 5:
+            return cache["data"]
+        vms, nets, pools, isos, warnings = [], [], [], [], []
+        for label, fn, destination in [
+            ("Incus VMs", incus.vms, vms),
+            ("libvirt VMs", libvirt.vms, vms),
+            ("Incus networks", incus.networks, nets),
+            ("libvirt networks", libvirt.networks, nets),
+            ("Storage", incus.pools, pools),
+            ("ISO volumes", incus.isos, isos),
+        ]:
+            try:
+                destination.extend(fn())
+            except Exception as exc:
+                warnings.append(label + ": " + str(exc)[:300])
+        for net in nets:
+            if net["provider"] == "libvirt":
+                net["used_by"] = [
+                    vm["id"]
+                    for vm in vms
+                    if vm["provider"] == "libvirt"
+                    and any(
+                        d.get("network") == net["name"] for d in vm["devices"].values()
+                    )
+                ]
+        for iso in local_isos():
+            iso["used_by"] = [
+                vm["id"]
+                for vm in vms
+                if any(d.get("source") == iso["path"] for d in vm["devices"].values())
+            ]
+            isos.append(iso)
+        memory = psutil.virtual_memory()
+        disk = shutil.disk_usage(DATA)
+        cache["data"] = {
+            "vms": vms,
+            "networks": nets,
+            "pools": pools,
+            "isos": isos,
+            "warnings": warnings,
+            "host": {
+                "name": socket.gethostname(),
+                "address": os.environ.get("VM_MANAGER_HOST", "192.168.8.235"),
+                "cpu_count": psutil.cpu_count(),
+                "cpu_percent": psutil.cpu_percent(interval=0.1),
+                "memory_total": memory.total,
+                "memory_used": memory.total - memory.available,
+                "memory_percent": memory.percent,
+                "load": list(os.getloadavg()),
+                "disk_total": disk.total,
+                "disk_free": disk.free,
+                "uptime": time.time() - psutil.boot_time(),
+            },
+            "updated": time.time(),
+        }
+        cache["at"] = time.monotonic()
+        return cache["data"]
+
+
+def local_isos():
+    with store.db() as db:
+        return [
+            dict(r, source="upload", pool=None)
+            for r in db.execute("SELECT * FROM isos ORDER BY created DESC")
+        ]
+
+
+def get_iso(iso_id):
+    if not iso_id:
+        return None
+    for iso in inventory()["isos"]:
+        if iso["id"] == iso_id:
+            return iso
+    raise HTTPException(404, "ISO not found")
+
+
+def vm_ref(vm_id):
+    provider, sep, vm_name = vm_id.partition(":")
+    if not sep or provider not in ("incus", "libvirt"):
+        raise HTTPException(400, "Invalid VM reference")
+    name(vm_name)
+    return provider, vm_name
+
+
+def ensure_stopped(provider, vm_name):
+    if provider == "libvirt":
+        libvirt.stopped(vm_name)
+    elif incus.vm(vm_name)["status"].lower() != "stopped":
+        raise HypervisorError("Shut down the VM before editing its hardware.")
+
+
+@app.get("/api/inventory")
+def get_inventory(user=Depends(require())):
+    return inventory()
+
+
+class VMCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=63)
+    cpu: int = Field(ge=1, le=128, default=2)
+    memory_gib: float = Field(ge=0.5, le=256, default=4)
+    disk_gib: int = Field(ge=4, le=4096, default=32)
+    pool: str = Field(min_length=1, max_length=63)
+    network: str = Field(min_length=1, max_length=63)
+    iso_id: str = Field(default="", max_length=256)
+    secure_boot: bool = False
+    autostart: bool = False
+    description: str = Field(default="", max_length=1000)
+    extra_disks: list[int] = Field(default_factory=list, max_length=8)
+
+    @field_validator("extra_disks")
+    @classmethod
+    def disks_valid(cls, values):
+        if any(v < 1 or v > 4096 for v in values):
+            raise ValueError("Extra disks must be between 1 and 4096 GiB")
+        return values
+
+    @field_validator("name", "pool", "network")
+    @classmethod
+    def valid_name(cls, value):
+        try:
+            return name(value)
+        except HypervisorError as e:
+            raise ValueError(str(e)) from e
+
+
+@app.post("/api/vms")
+def create_vm(body: VMCreate, user=Depends(require("operate"))):
+    iso = get_iso(body.iso_id)
+
+    def create():
+        inv = inventory()
+        if any(v["name"] == body.name for v in inv["vms"]):
+            raise HypervisorError("A VM with this name already exists")
+        if body.pool not in [p["name"] for p in inv["pools"]]:
+            raise HypervisorError("Storage pool not found")
+        if body.network not in [
+            n["name"] for n in inv["networks"] if n["provider"] == "incus"
+        ]:
+            raise HypervisorError("Managed network not found")
+        if body.memory_gib * 1024**3 > psutil.virtual_memory().available:
+            raise HypervisorError("Not enough available host memory")
+        incus.create(body.model_dump(), iso)
+
+    return task(user, "vm.create", body.name, create)
+
+
+class VMEdit(BaseModel):
+    cpu: int = Field(ge=1, le=128)
+    memory_gib: float = Field(ge=0.5, le=256)
+    description: str = Field(default="", max_length=1000)
+    secure_boot: bool = False
+    autostart: bool = False
+
+
+@app.put("/api/vms/{vm_id}")
+def edit_vm(vm_id: str, body: VMEdit, user=Depends(require("operate"))):
+    provider, vm_name = vm_ref(vm_id)
+
+    def edit():
+        ensure_stopped(provider, vm_name)
+        if provider == "libvirt":
+            libvirt.edit_resources(vm_name, body.cpu, body.memory_gib, body.description)
+        else:
+
+            def transform(vm):
+                vm["config"].update(
+                    {
+                        "limits.cpu": str(body.cpu),
+                        "limits.memory": str(int(body.memory_gib * 1024**3)),
+                        "security.secureboot": str(body.secure_boot).lower(),
+                        "boot.autostart": str(body.autostart).lower(),
+                    }
+                )
+                vm["description"] = body.description
+
+            incus.update(vm_name, transform)
+
+    return task(user, "vm.hardware.edit", vm_id, edit)
+
+
+class Action(BaseModel):
+    action: str
+    confirm_name: str = ""
+
+
+@app.post("/api/vms/{vm_id}/action")
+def vm_action(vm_id: str, body: Action, user=Depends(require("operate"))):
+    provider, vm_name = vm_ref(vm_id)
+    if body.action not in ("start", "shutdown", "restart", "stop"):
+        raise HTTPException(400, "Invalid power action")
+    if body.action == "stop" and body.confirm_name != vm_name:
+        raise HTTPException(400, "Type the VM name to confirm force stop")
+    return task(
+        user,
+        "vm." + body.action,
+        vm_id,
+        lambda: (incus if provider == "incus" else libvirt).action(
+            vm_name, body.action
+        ),
+    )
+
+
+class Confirm(BaseModel):
+    confirm_name: str
+
+
+@app.delete("/api/vms/{vm_id}")
+def delete_vm(vm_id: str, body: Confirm, user=Depends(require("operate"))):
+    provider, vm_name = vm_ref(vm_id)
+    if body.confirm_name != vm_name:
+        raise HTTPException(400, "Type the VM name to confirm deletion")
+
+    def delete():
+        ensure_stopped(provider, vm_name)
+        if provider == "incus":
+            incus.delete(vm_name)
+        else:
+            # Existing VM storage is preserved; undefine never deletes a disk.
+            libvirt.cli("undefine", vm_name, "--nvram")
+
+    return task(user, "vm.delete", vm_id, delete)
+
+
+class Disk(BaseModel):
+    size_gib: int = Field(ge=1, le=4096)
+    pool: str = Field(min_length=1, max_length=63)
+
+
+@app.post("/api/vms/{vm_id}/disks")
+def add_disk(vm_id: str, body: Disk, user=Depends(require("operate"))):
+    provider, vm_name = vm_ref(vm_id)
+    name(body.pool)
+
+    def add():
+        ensure_stopped(provider, vm_name)
+        disk_id = "disk" + uuid.uuid4().hex[:8]
+        if provider == "incus":
+            volume = "vmm-" + vm_name + "-" + disk_id
+            incus.request(
+                "POST",
+                f"/1.0/storage-pools/{quote(body.pool)}/volumes/custom",
+                {
+                    "name": volume,
+                    "type": "custom",
+                    "content_type": "block",
+                    "config": {"size": str(body.size_gib) + "GiB"},
+                },
+            )
+            try:
+                incus.update(
+                    vm_name,
+                    lambda vm: vm["devices"].update(
+                        {disk_id: {"type": "disk", "pool": body.pool, "source": volume}}
+                    ),
+                )
+            except Exception:
+                incus.request(
+                    "DELETE",
+                    f"/1.0/storage-pools/{quote(body.pool)}/volumes/custom/{volume}",
+                )
+                raise
+        else:
+            directory = DATA / "disks"
+            directory.mkdir(exist_ok=True)
+            path = directory / f"{vm_name}-{disk_id}.qcow2"
+            run(
+                "qemu-img", "create", "-f", "qcow2", str(path), str(body.size_gib) + "G"
+            )
+            root = libvirt.xml(vm_name)
+            used = {n.get("dev") for n in root.findall("./devices/disk/target")}
+            target = next(
+                ("vd" + chr(c) for c in range(98, 123) if "vd" + chr(c) not in used),
+                None,
+            )
+            if not target:
+                path.unlink()
+                raise HypervisorError("No available disk slots")
+            disk = ET.SubElement(
+                root.find("devices"), "disk", {"type": "file", "device": "disk"}
+            )
+            ET.SubElement(disk, "driver", {"name": "qemu", "type": "qcow2"})
+            ET.SubElement(disk, "source", {"file": str(path)})
+            ET.SubElement(disk, "target", {"dev": target, "bus": "virtio"})
+            try:
+                libvirt.define(root)
+            except Exception:
+                path.unlink(missing_ok=True)
+                raise
+
+    return task(user, "vm.disk.add", vm_id, add)
+
+
+class DiskResize(BaseModel):
+    size_gib: int = Field(ge=1, le=4096)
+
+
+@app.put("/api/vms/{vm_id}/disks/{device}")
+def resize_disk(
+    vm_id: str, device: str, body: DiskResize, user=Depends(require("operate"))
+):
+    provider, vm_name = vm_ref(vm_id)
+    name(device)
+
+    def resize():
+        ensure_stopped(provider, vm_name)
+        if provider != "incus":
+            raise HypervisorError(
+                "Resizing existing libvirt disks is not supported; add a disk instead"
+            )
+        vm = incus.vm(vm_name)
+        d = vm.get("expanded_devices", vm["devices"]).get(device)
+        if not d or d.get("type") != "disk" or d.get("readonly") == "true":
+            raise HypervisorError("Writable disk not found")
+        if d.get("path") == "/":
+            volume = incus.get(
+                f"/1.0/storage-pools/{quote(d['pool'])}/volumes/virtual-machine/{quote(vm_name)}"
+            )
+            previous = bytes_size(
+                volume.get("config", {}).get("size", d.get("size", "0"))
+            )
+            if body.size_gib * 1024**3 <= previous:
+                raise HypervisorError(
+                    "Disks can only be expanded. Choose a larger size."
+                )
+            incus.update(
+                vm_name,
+                lambda v: v["devices"].update(
+                    {device: {**d, "size": str(body.size_gib) + "GiB"}}
+                ),
+            )
+        elif d.get("pool") and d.get("source"):
+            current = incus.get(
+                f"/1.0/storage-pools/{quote(d['pool'])}/volumes/custom/{quote(d['source'])}"
+            )
+            if body.size_gib * 1024**3 <= bytes_size(
+                current.get("config", {}).get("size", "0")
+            ):
+                raise HypervisorError(
+                    "Disks can only be expanded. Choose a larger size."
+                )
+            current["config"]["size"] = str(body.size_gib) + "GiB"
+            incus.request(
+                "PUT",
+                f"/1.0/storage-pools/{quote(d['pool'])}/volumes/custom/{quote(d['source'])}",
+                {
+                    "config": current["config"],
+                    "description": current.get("description", ""),
+                },
+            )
+        else:
+            raise HypervisorError("This disk cannot be resized from the app")
+
+    return task(user, "vm.disk.resize", vm_id, resize)
+
+
+@app.delete("/api/vms/{vm_id}/devices/{device}")
+def detach_device(
+    vm_id: str, device: str, body: Confirm, user=Depends(require("operate"))
+):
+    provider, vm_name = vm_ref(vm_id)
+    name(device)
+    if body.confirm_name != device:
+        raise HTTPException(400, "Type the device name to confirm detaching it")
+
+    def detach():
+        ensure_stopped(provider, vm_name)
+        if provider == "incus":
+
+            def change(vm):
+                d = vm.get("expanded_devices", vm["devices"]).get(device)
+                if not d or d.get("path") == "/":
+                    raise HypervisorError("The root disk cannot be detached")
+                if d.get("type") not in ("disk", "nic"):
+                    raise HypervisorError(
+                        "Only disks and network adapters can be detached"
+                    )
+                if device in vm["devices"]:
+                    del vm["devices"][device]
+                else:
+                    vm["devices"][device] = {"type": "none"}
+
+            incus.update(vm_name, change)
+        else:
+            root = libvirt.xml(vm_name)
+            devices = root.find("devices")
+            if device.startswith("nic"):
+                selected = devices.findall("interface")[int(device[3:])]
+            else:
+                selected = next(
+                    (
+                        d
+                        for d in devices.findall("disk")
+                        if d.find("target") is not None
+                        and d.find("target").get("dev") == device
+                    ),
+                    None,
+                )
+                if selected is None or selected is next(
+                    (d for d in devices.findall("disk") if d.get("device") == "disk"),
+                    None,
+                ):
+                    raise HypervisorError("Disk not found or is the root disk")
+            devices.remove(selected)
+            libvirt.define(root)
+
+    return task(user, "vm.device.detach", vm_id, detach)
+
+
+class NIC(BaseModel):
+    network: str = Field(min_length=1, max_length=63)
+    device: str = Field(default="", max_length=63)
+
+
+@app.post("/api/vms/{vm_id}/nics")
+def edit_nic(vm_id: str, body: NIC, user=Depends(require("operate"))):
+    provider, vm_name = vm_ref(vm_id)
+    name(body.network)
+    if body.device:
+        name(body.device)
+
+    def attach():
+        ensure_stopped(provider, vm_name)
+        networks = incus.networks()
+        if body.network not in [n["name"] for n in networks]:
+            raise HypervisorError("Incus network not found")
+        if provider == "incus":
+
+            def change(vm):
+                key = body.device or "nic" + uuid.uuid4().hex[:8]
+                if (
+                    body.device
+                    and vm.get("expanded_devices", vm["devices"])
+                    .get(key, {})
+                    .get("type")
+                    != "nic"
+                ):
+                    raise HypervisorError("Network adapter not found")
+                if any(
+                    k != key
+                    and d.get("type") == "nic"
+                    and d.get("network") == body.network
+                    for k, d in vm.get("expanded_devices", vm["devices"]).items()
+                ):
+                    raise HypervisorError(
+                        "This VM already has an adapter on that network. Choose a different network or edit the existing adapter."
+                    )
+                vm["devices"][key] = {
+                    "type": "nic",
+                    "network": body.network,
+                    "name": key,
+                }
+
+            incus.update(vm_name, change)
+        else:
+            root = libvirt.xml(vm_name)
+            nics = root.findall("./devices/interface")
+            if body.device:
+                index = int(body.device.removeprefix("nic"))
+                if index >= len(nics):
+                    raise HypervisorError("Network adapter not found")
+                nic = nics[index]
+                for child in list(nic):
+                    if child.tag in ("source", "virtualport", "filterref"):
+                        nic.remove(child)
+                nic.set("type", "bridge")
+            else:
+                nic = ET.SubElement(
+                    root.find("devices"), "interface", {"type": "bridge"}
+                )
+                ET.SubElement(nic, "model", {"type": "virtio"})
+            ET.SubElement(nic, "source", {"bridge": body.network})
+            libvirt.define(root)
+
+    return task(user, "vm.network.attach", vm_id, attach)
+
+
+class CDROM(BaseModel):
+    iso_id: str = Field(default="", max_length=256)
+    boot: bool = True
+
+
+@app.put("/api/vms/{vm_id}/cdrom")
+def cdrom(vm_id: str, body: CDROM, user=Depends(require("operate"))):
+    provider, vm_name = vm_ref(vm_id)
+    iso = get_iso(body.iso_id)
+
+    def mount():
+        ensure_stopped(provider, vm_name)
+        if provider == "incus":
+
+            def change(vm):
+                # Eject all CD-ROMs visible to this VM, including inherited ISO devices.
+                for key, device in list(
+                    vm.get("expanded_devices", vm["devices"]).items()
+                ):
+                    if device.get("type") == "disk" and (
+                        key == "cdrom"
+                        or device.get("source", "").lower().endswith(".iso")
+                        or any(
+                            i.get("pool") == device.get("pool")
+                            and i["name"] == device.get("source")
+                            for i in inventory()["isos"]
+                            if i.get("source") == "incus"
+                        )
+                    ):
+                        if key in vm["devices"]:
+                            del vm["devices"][key]
+                        else:
+                            vm["devices"][key] = {"type": "none"}
+                if iso:
+                    vm["devices"]["cdrom"] = incus.cdrom(iso, body.boot)
+                    if body.boot:
+                        priorities = [
+                            int(d.get("boot.priority", "0"))
+                            for d in vm.get("expanded_devices", vm["devices"]).values()
+                            if d.get("boot.priority", "0").lstrip("-").isdigit()
+                        ]
+                        vm["devices"]["cdrom"]["boot.priority"] = str(
+                            max([0, *priorities]) + 10
+                        )
+
+            incus.update(vm_name, change)
+        else:
+            if iso and iso.get("source") != "upload":
+                raise HypervisorError(
+                    "Upload the ISO to the library to attach it to a libvirt VM"
+                )
+            root = libvirt.xml(vm_name)
+            devices = root.find("devices")
+            for old in list(devices.findall("disk")):
+                if old.get("device") == "cdrom":
+                    devices.remove(old)
+            # Use OS boot ordering; remove per-device boot order to avoid mixed schema modes.
+            for parent in devices.findall("disk") + devices.findall("interface"):
+                for boot in list(parent.findall("boot")):
+                    parent.remove(boot)
+            os_node = root.find("os")
+            for boot in list(os_node.findall("boot")):
+                os_node.remove(boot)
+            if iso:
+                disk = ET.SubElement(
+                    devices, "disk", {"type": "file", "device": "cdrom"}
+                )
+                ET.SubElement(disk, "driver", {"name": "qemu", "type": "raw"})
+                ET.SubElement(disk, "source", {"file": iso["path"]})
+                used = {n.get("dev") for n in devices.findall("disk/target")}
+                target = next(
+                    (
+                        "sd" + chr(c)
+                        for c in range(97, 123)
+                        if "sd" + chr(c) not in used
+                    ),
+                    None,
+                )
+                if not target:
+                    raise HypervisorError("No available CD-ROM slots")
+                ET.SubElement(disk, "target", {"dev": target, "bus": "sata"})
+                ET.SubElement(disk, "readonly")
+                if body.boot:
+                    ET.SubElement(os_node, "boot", {"dev": "cdrom"})
+            ET.SubElement(os_node, "boot", {"dev": "hd"})
+            libvirt.define(root)
+
+    return task(user, "vm.cdrom.mount" if iso else "vm.cdrom.eject", vm_id, mount)
+
+
+class Network(BaseModel):
+    name: str = Field(min_length=1, max_length=15)
+    cidr: str = Field(default="auto", max_length=32)
+    nat: bool = True
+    dhcp: bool = True
+    description: str = Field(default="", max_length=500)
+
+    @field_validator("name")
+    @classmethod
+    def valid_network(cls, value):
+        try:
+            return name(value)
+        except HypervisorError as e:
+            raise ValueError(str(e)) from e
+
+
+def network_config(body, exclude=""):
+    existing = []
+    for net in inventory()["networks"]:
+        if net["id"] == "incus:" + exclude:
+            continue
+        try:
+            existing.append(
+                ipaddress.ip_network(
+                    net["config"].get("ipv4.address", "none"), strict=False
+                )
+            )
+        except ValueError:
+            pass
+    for iface, addresses in psutil.net_if_addrs().items():
+        if iface == exclude:
+            continue
+        for address in addresses:
+            if address.family == socket.AF_INET and address.netmask:
+                existing.append(
+                    ipaddress.ip_network(
+                        address.address + "/" + address.netmask, strict=False
+                    )
+                )
+    cidr = body.cidr
+    if cidr == "auto":
+        cidr = next(
+            (
+                f"10.200.{i}.1/24"
+                for i in range(1, 255)
+                if not any(
+                    ipaddress.ip_network(f"10.200.{i}.0/24").overlaps(n)
+                    for n in existing
+                )
+            ),
+            None,
+        )
+        if not cidr:
+            raise HypervisorError("No free subnet found; specify one manually")
+    try:
+        interface = ipaddress.ip_interface(cidr)
+    except ValueError as exc:
+        raise HypervisorError(
+            "Enter an IPv4 gateway and prefix, for example 10.200.10.1/24"
+        ) from exc
+    if (
+        interface.version != 4
+        or not any(
+            interface.ip in ipaddress.ip_network(c)
+            for c in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+        )
+        or interface.network.prefixlen < 16
+        or interface.network.prefixlen > 29
+        or interface.ip
+        in (interface.network.network_address, interface.network.broadcast_address)
+    ):
+        raise HypervisorError("Use a private IPv4 gateway with a /16 to /29 prefix")
+    if any(interface.network.overlaps(n) for n in existing):
+        raise HypervisorError("This subnet overlaps an existing host or VM network")
+    return {
+        "ipv4.address": str(interface),
+        "ipv4.nat": str(body.nat).lower(),
+        "ipv4.dhcp": str(body.dhcp).lower(),
+        "ipv6.address": "none",
+        "ipv4.routing": str(body.nat).lower(),
+    }
+
+
+@app.post("/api/networks")
+def create_network(body: Network, user=Depends(require("operate"))):
+    def create():
+        incus.request(
+            "POST",
+            "/1.0/networks",
+            {
+                "name": body.name,
+                "type": "bridge",
+                "description": body.description,
+                "config": network_config(body),
+            },
+        )
+
+    return task(user, "network.create", body.name, create)
+
+
+@app.put("/api/networks/{net_name}")
+def edit_network(net_name: str, body: Network, user=Depends(require("operate"))):
+    name(net_name)
+
+    def edit():
+        net = incus.get("/1.0/networks/" + quote(net_name))
+        if net.get("used_by"):
+            raise HypervisorError(
+                "Detach VMs and profiles before changing this network"
+            )
+        incus.request(
+            "PUT",
+            "/1.0/networks/" + quote(net_name),
+            {
+                "description": body.description,
+                "config": {**net["config"], **network_config(body, net_name)},
+            },
+        )
+
+    return task(user, "network.edit", net_name, edit)
+
+
+@app.delete("/api/networks/{net_name}")
+def delete_network(net_name: str, body: Confirm, user=Depends(require("operate"))):
+    name(net_name)
+    if body.confirm_name != net_name:
+        raise HTTPException(400, "Type the network name to confirm deletion")
+
+    def delete():
+        if incus.get("/1.0/networks/" + quote(net_name)).get("used_by"):
+            raise HypervisorError(
+                "Network is in use. Detach its VMs and profiles first."
+            )
+        incus.request("DELETE", "/1.0/networks/" + quote(net_name))
+
+    return task(user, "network.delete", net_name, delete)
+
+
+@app.post("/api/isos")
+def upload_iso(file: UploadFile, user=Depends(require("operate"))):
+    filename = Path(file.filename or "").name
+    if not filename.lower().endswith(".iso") or len(filename) > 180:
+        raise HTTPException(400, "Choose an .iso file with a name under 180 characters")
+    with store.db() as db:
+        if db.execute("SELECT 1 FROM isos WHERE name=?", (filename,)).fetchone():
+            raise HTTPException(409, "An ISO with this name already exists")
+    iso_id = uuid.uuid4().hex
+    partial = ISOS / (iso_id + ".part")
+    destination = ISOS / (iso_id + ".iso")
+    size, digest = 0, hashlib.sha256()
+    try:
+        with partial.open("xb") as stream:
+            while chunk := file.file.read(1024 * 1024):
+                size += len(chunk)
+                if size > 32 * 1024**3 or shutil.disk_usage(ISOS).free < 2 * 1024**3:
+                    raise HTTPException(
+                        413, "ISO exceeds the 32 GiB limit or host storage reserve"
+                    )
+                digest.update(chunk)
+                stream.write(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+        with partial.open("rb") as stream:
+            stream.seek(32768)
+            descriptors = stream.read(256 * 1024)
+        if not any(
+            signature in descriptors for signature in (b"CD001", b"NSR02", b"NSR03")
+        ):
+            raise HTTPException(
+                400, "This file does not contain an ISO9660 or UDF filesystem"
+            )
+        partial.rename(destination)
+        destination.chmod(0o644)
+        with store.db() as db:
+            db.execute(
+                "INSERT INTO isos VALUES(?,?,?,?,?,?)",
+                (
+                    iso_id,
+                    filename,
+                    str(destination),
+                    size,
+                    digest.hexdigest(),
+                    time.time(),
+                ),
+            )
+    except Exception:
+        partial.unlink(missing_ok=True)
+        destination.unlink(missing_ok=True)
+        raise
+    finally:
+        file.file.close()
+    invalidate()
+    store.audit(
+        user["username"],
+        "iso.upload",
+        filename,
+        f"{size} bytes; SHA256 {digest.hexdigest()}",
+    )
+    return {"id": iso_id, "name": filename, "size": size, "sha256": digest.hexdigest()}
+
+
+@app.delete("/api/isos/{iso_id:path}")
+def delete_iso(iso_id: str, body: Confirm, user=Depends(require("operate"))):
+    iso = get_iso(iso_id)
+    if body.confirm_name != iso["name"]:
+        raise HTTPException(400, "Type the ISO name to confirm deletion")
+
+    def delete():
+        invalidate()
+        inv = inventory()
+        if inv["warnings"]:
+            raise HypervisorError(
+                "Cannot verify ISO usage while a hypervisor is unavailable"
+            )
+        current = next((i for i in inv["isos"] if i["id"] == iso_id), None)
+        if not current:
+            raise HypervisorError("ISO no longer exists")
+        if current.get("used_by"):
+            raise HypervisorError("ISO is attached to a VM. Eject it first.")
+        if iso["source"] == "incus":
+            incus.request(
+                "DELETE",
+                f"/1.0/storage-pools/{quote(iso['pool'])}/volumes/custom/{quote(iso['name'])}",
+            )
+        else:
+            Path(iso["path"]).unlink()
+            with store.db() as db:
+                db.execute("DELETE FROM isos WHERE id=?", (iso_id,))
+
+    return task(user, "iso.delete", iso["name"], delete)
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=2, max_length=64, pattern=r"^[a-zA-Z0-9_.@-]+$")
+    password: str = Field(min_length=12, max_length=256)
+    role: str
+
+    @field_validator("role")
+    @classmethod
+    def role_valid(cls, value):
+        if value not in ROLES:
+            raise ValueError("Choose administrator, operator or viewer")
+        return value
+
+
+@app.get("/api/users")
+def users(user=Depends(require("users"))):
+    with store.db() as db:
+        return [
+            dict(r)
+            for r in db.execute(
+                "SELECT id,username,role,enabled,created FROM users ORDER BY username"
+            )
+        ]
+
+
+@app.post("/api/users")
+def create_user(body: UserCreate, user=Depends(require("users"))):
+    import sqlite3
+
+    try:
+        with store.db() as db:
+            db.execute(
+                "INSERT INTO users(username,password,role,created) VALUES(?,?,?,?)",
+                (body.username, hash_password(body.password), body.role, time.time()),
+            )
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "Username already exists")
+    store.audit(user["username"], "user.create", body.username, body.role)
+    return {"ok": True}
+
+
+class UserEdit(BaseModel):
+    role: str
+    enabled: bool = True
+    password: str = Field(default="", max_length=256)
+
+
+@app.put("/api/users/{user_id}")
+def edit_user(user_id: int, body: UserEdit, user=Depends(require("users"))):
+    if body.role not in ROLES or body.password and len(body.password) < 12:
+        raise HTTPException(400, "Invalid role or password shorter than 12 characters")
+    with store.db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        target = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if not target:
+            raise HTTPException(404, "User not found")
+        if user_id == user["id"] and (not body.enabled or body.role != "administrator"):
+            raise HTTPException(
+                400, "You cannot disable or demote your own administrator account"
+            )
+        admins = db.execute(
+            "SELECT count(*) FROM users WHERE enabled=1 AND role='administrator'"
+        ).fetchone()[0]
+        if (
+            target["role"] == "administrator"
+            and target["enabled"]
+            and admins <= 1
+            and (body.role != "administrator" or not body.enabled)
+        ):
+            raise HTTPException(400, "Keep at least one enabled administrator")
+        db.execute(
+            "UPDATE users SET role=?,enabled=? WHERE id=?",
+            (body.role, int(body.enabled), user_id),
+        )
+        if body.password:
+            db.execute(
+                "UPDATE users SET password=? WHERE id=?",
+                (hash_password(body.password), user_id),
+            )
+        db.execute(
+            "DELETE FROM sessions WHERE user_id=? AND token<>?",
+            (user_id, user["token"]),
+        )
+    store.audit(
+        user["username"],
+        "user.edit",
+        target["username"],
+        f"role={body.role}, enabled={body.enabled}",
+    )
+    return {"ok": True}
+
+
+@app.get("/api/tasks")
+def tasks(user=Depends(require())):
+    with store.db() as db:
+        return [
+            dict(r)
+            for r in db.execute("SELECT * FROM tasks ORDER BY started DESC LIMIT 100")
+        ]
+
+
+@app.get("/api/audit")
+def audit(user=Depends(require("users"))):
+    with store.db() as db:
+        return [
+            dict(r)
+            for r in db.execute("SELECT * FROM audit ORDER BY at DESC LIMIT 200")
+        ]
+
+
+console_groups = {}
+console_lock = asyncio.Lock()
+
+
+async def incus_console_group(user, vm_name):
+    key = (user["token"], vm_name)
+    async with console_lock:
+        group = console_groups.get(key)
+        if not group:
+            operation = await asyncio.to_thread(
+                incus.request,
+                "POST",
+                "/1.0/instances/" + quote(vm_name) + "/console",
+                {"type": "vga"},
+                False,
+            )
+            operation_url = urlsplit(operation["operation"])
+            base = "ws://incus" + operation_url.path + "/websocket?"
+            suffix = "&" + operation_url.query if operation_url.query else ""
+            fds = operation["metadata"]["metadata"]["fds"]
+            try:
+                control = await unix_connect(
+                    incus.socket,
+                    uri=base + "secret=" + fds["control"] + suffix,
+                    max_size=None,
+                )
+            except Exception:
+                await asyncio.to_thread(
+                    incus.request, "DELETE", operation["operation"], None, False
+                )
+                raise
+            group = {
+                "operation": operation,
+                "control": control,
+                "uri": base + "secret=" + fds["0"] + suffix,
+                "refs": 0,
+            }
+            console_groups[key] = group
+        group["refs"] += 1
+        return key, group
+
+
+async def release_console_group(key, group):
+    async with console_lock:
+        group["refs"] -= 1
+        if group["refs"] <= 0 and console_groups.get(key) is group:
+            del console_groups[key]
+            await group["control"].close()
+            try:
+                await asyncio.to_thread(
+                    incus.request,
+                    "DELETE",
+                    group["operation"]["operation"],
+                    None,
+                    False,
+                )
+            except Exception:
+                pass
+
+
+@app.websocket("/api/console/{vm_id}")
+async def console(ws: WebSocket, vm_id: str):
+    group = None
+    remote = None
+    writer = None
+    pending = []
+    try:
+        user = session(ws)
+        if "operate" not in ROLES.get(user["role"], set()):
+            await ws.close(code=4403)
+            return
+        origin = ws.headers.get("origin", "")
+        expected = (
+            ("https" if ws.url.scheme == "wss" else "http")
+            + "://"
+            + ws.headers.get("host", "")
+        )
+        if origin != expected or not secrets.compare_digest(
+            ws.query_params.get("csrf", ""), user["csrf"]
+        ):
+            await ws.close(code=4403)
+            return
+        provider, vm_name = vm_ref(vm_id)
+        if provider == "incus":
+            # All SPICE channels share one Incus operation and control connection.
+            key, group = await incus_console_group(user, vm_name)
+            remote = await unix_connect(incus.socket, uri=group["uri"], max_size=None)
+        else:
+            display = await asyncio.to_thread(libvirt.cli, "domdisplay", vm_name)
+            url = urlparse(display)
+            if url.scheme != "vnc" or url.hostname not in (
+                "127.0.0.1",
+                "localhost",
+                "::1",
+            ):
+                raise HypervisorError("This VM needs a local VNC display configured")
+            reader, writer = await asyncio.open_connection(
+                url.hostname, 5900 + (url.port or 0)
+            )
+        await ws.accept(
+            subprotocol="binary"
+            if "binary" in ws.headers.get("sec-websocket-protocol", "")
+            else None
+        )
+        store.audit(user["username"], "console.open", vm_id)
+
+        async def browser_to_vm():
+            while True:
+                session(ws)
+                data = await asyncio.wait_for(ws.receive_bytes(), timeout=900)
+                if remote:
+                    await remote.send(data)
+                else:
+                    writer.write(data)
+                    await writer.drain()
+
+        async def vm_to_browser():
+            while True:
+                session(ws)
+                chunk = await remote.recv() if remote else await reader.read(65536)
+                if not chunk:
+                    return
+                await ws.send_bytes(chunk)
+
+        pending = [
+            asyncio.create_task(browser_to_vm()),
+            asyncio.create_task(vm_to_browser()),
+        ]
+        done, remaining = await asyncio.wait(
+            pending, return_when=asyncio.FIRST_COMPLETED
+        )
+        for completed in done:
+            completed.result()
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        pass
+    except Exception as exc:
+        logging.info("Console unavailable for %s: %s", vm_id, type(exc).__name__)
+        try:
+            await ws.close(
+                code=1011,
+                reason="Console unavailable. Check VM power, active console connections and session.",
+            )
+        except RuntimeError:
+            pass
+    finally:
+        for future in pending:
+            future.cancel()
+        if remote:
+            await remote.close()
+        if writer:
+            writer.close()
+            await writer.wait_closed()
+        if group:
+            await release_console_group(key, group)
+
+
+STATIC = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=STATIC), name="static")
+if Path("/usr/share/spice-html5").exists():
+    app.mount(
+        "/vendor/spice", StaticFiles(directory="/usr/share/spice-html5"), name="spice"
+    )
+
+
+@app.get("/")
+def index():
+    return FileResponse(STATIC / "index.html")
+
+
+@app.get("/console")
+def console_page(user=Depends(require("operate"))):
+    return FileResponse(STATIC / "console.html")
+
+
+from .limits import BodyLimit
+
+app.add_middleware(BodyLimit)
