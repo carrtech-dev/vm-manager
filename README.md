@@ -31,6 +31,14 @@ Normal shutdown asks the guest to power off. Force stop is separately confirmed 
 
 Networks and ISO media that are still referenced cannot be deleted. Existing libvirt networks are listed for visibility; new networks are managed by Incus and can also be attached to libvirt VMs as bridges. Existing Incus ISO volumes can be used directly by Incus VMs; libvirt VMs use uploaded ISO files. The app does not modify host physical interfaces.
 
+## Projects and tags
+
+Open **Projects & tags** to create, rename or delete projects and tags. Each VM and network can belong to one project and carry multiple tags, including existing Incus and libvirt resources. Use **Assign project & tags** on a VM's Summary tab or **Organize** in the Networks list. Assignments can be changed while VMs are running and networks are in use.
+
+The **Project** and **Tag** filters above each page combine to narrow VM and network lists, overview resource counts, and the resource tree. **View resources** on a project or tag opens a combined view of its VMs and networks. **Unassigned resources** and **Untagged resources** help find resources to organize; **Clear filters** restores the full view. Host CPU, memory and storage metrics always describe the whole host.
+
+Projects are inventory groups within VM Manager, independent of Incus projects and user permissions. Assigning a VM does not assign its attached networks automatically; shared networks can remain unassigned or belong to a different project. Metadata is kept in the existing SQLite database and included in deployment backups. Deleting a project or tag removes its assignments and retains the VMs, networks and data. Administrators and operators can manage assignments; viewers can browse and filter them. Changes are audited.
+
 ## Permissions
 
 | Role | Inventory and tasks | VM, network and ISO operations | User administration and audit |
@@ -51,6 +59,7 @@ python3.13 -m venv .venv
 npm ci
 .venv/bin/python -m pytest
 npm run check
+npm test
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8088
 ```
 

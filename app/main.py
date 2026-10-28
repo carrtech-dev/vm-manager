@@ -9,6 +9,7 @@ import os
 import secrets
 import shutil
 import socket
+import sqlite3
 import threading
 import time
 import uuid
@@ -36,6 +37,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from .hypervisor import Incus, Libvirt, HypervisorError, name, run, bytes_size
 from .security import Store, ROLES, hash_password, verify_password, token_hash
+from . import organization
 
 DATA = Path(os.environ.get("VM_MANAGER_DATA", "data")).resolve()
 DATA.mkdir(parents=True, exist_ok=True)
@@ -402,7 +404,79 @@ def ensure_stopped(provider, vm_name):
 
 @app.get("/api/inventory")
 def get_inventory(user=Depends(require())):
-    return inventory()
+    return organization.decorate(store, inventory())
+
+
+@app.get("/api/collections")
+def get_collections(user=Depends(require())):
+    return organization.collections(store)
+
+
+@app.post("/api/collections/{kind}")
+def create_collection(
+    kind: organization.Collection,
+    body: organization.CollectionName,
+    user=Depends(require("operate")),
+):
+    result = organization.create_collection(store, kind, body)
+    store.audit(user["username"], kind + ".create", result["id"], result["name"])
+    return result
+
+
+@app.put("/api/collections/{kind}/{collection_id}")
+def rename_collection(
+    kind: organization.Collection,
+    collection_id: str,
+    body: organization.CollectionName,
+    user=Depends(require("operate")),
+):
+    # Check and update under one transaction so a concurrent delete cannot recreate it.
+    with store.db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        if not db.execute(
+            f"SELECT 1 FROM {kind} WHERE id=?", (collection_id,)
+        ).fetchone():
+            raise HTTPException(404, "Item not found")
+        try:
+            db.execute(
+                f"UPDATE {kind} SET name=?,name_key=? WHERE id=?",
+                (body.name, body.name.casefold(), collection_id),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(409, "A name like this already exists") from exc
+    store.audit(user["username"], kind + ".rename", collection_id, body.name)
+    return {"id": collection_id, "name": body.name}
+
+
+@app.delete("/api/collections/{kind}/{collection_id}")
+def delete_collection(
+    kind: organization.Collection, collection_id: str, user=Depends(require("operate"))
+):
+    with store.db() as db:
+        if not db.execute(f"DELETE FROM {kind} WHERE id=?", (collection_id,)).rowcount:
+            raise HTTPException(404, "Item not found")
+    store.audit(user["username"], kind + ".delete", collection_id)
+    return {"ok": True}
+
+
+@app.put("/api/organization/{kind}/{resource_id}")
+def assign_resource(
+    kind: organization.ResourceKind,
+    resource_id: str,
+    body: organization.Assignment,
+    user=Depends(require("operate")),
+):
+    key = "vms" if kind == "vm" else "networks"
+    if not any(r["id"] == resource_id for r in inventory()[key]):
+        raise HTTPException(404, "Resource not found")
+    organization.assign(store, kind, resource_id, body)
+    store.audit(
+        user["username"],
+        "organization.assign",
+        kind + ":" + resource_id,
+        body.model_dump_json(),
+    )
+    return {"ok": True}
 
 
 class VMCreate(BaseModel):
@@ -530,6 +604,7 @@ def delete_vm(vm_id: str, body: Confirm, user=Depends(require("operate"))):
             libvirt.cli("undefine", vm_name, "--nvram")
         with store.db() as db:
             db.execute("DELETE FROM pending_hardware WHERE vm_id=?", (vm_id,))
+            organization.clear(store, "vm", vm_id, db=db)
 
     return task(user, "vm.delete", vm_id, delete)
 
@@ -1285,6 +1360,7 @@ def delete_network(net_name: str, body: Confirm, user=Depends(require("operate")
                 "Network is in use. Detach its VMs and profiles first."
             )
         incus.request("DELETE", "/1.0/networks/" + quote(net_name))
+        organization.clear(store, "network", "incus:" + net_name)
 
     return task(user, "network.delete", net_name, delete)
 

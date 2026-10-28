@@ -711,3 +711,343 @@ def test_idle_console_stays_writable_and_revocation_closes_it(client, monkeypatc
             db.execute("UPDATE users SET role='viewer' WHERE username='admin'")
         with pytest.raises(Exception):
             ws.receive_bytes()
+
+
+@pytest.fixture
+def organized_inventory(client, monkeypatch):
+    with store.db() as db:
+        db.execute("DELETE FROM resource_projects")
+        db.execute("DELETE FROM resource_tags")
+        db.execute("DELETE FROM projects")
+        db.execute("DELETE FROM tags")
+    monkeypatch.setattr(
+        incus,
+        "vms",
+        lambda: [
+            {
+                "id": "incus:shared",
+                "name": "shared",
+                "provider": "incus",
+                "devices": {},
+            },
+            {"id": "incus:other", "name": "other", "provider": "incus", "devices": {}},
+        ],
+    )
+    monkeypatch.setattr(
+        libvirt,
+        "vms",
+        lambda: [
+            {
+                "id": "libvirt:shared",
+                "name": "shared",
+                "provider": "libvirt",
+                "devices": {},
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        incus,
+        "networks",
+        lambda: [
+            {"id": "incus:shared", "name": "shared", "provider": "incus", "config": {}},
+        ],
+    )
+    monkeypatch.setattr(
+        libvirt,
+        "networks",
+        lambda: [
+            {
+                "id": "libvirt:shared",
+                "name": "shared",
+                "provider": "libvirt",
+                "config": {},
+            },
+        ],
+    )
+    invalidate()
+    return client
+
+
+def create_label(client, headers, kind, name):
+    response = client.post(
+        f"/api/collections/{kind}", json={"name": name}, headers=headers
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["id"]
+
+
+@pytest.mark.parametrize("kind", ["projects", "tags"])
+def test_collection_validation_and_rename(organized_inventory, kind):
+    client = organized_inventory
+    headers = login(client, "operator")
+    item_id = create_label(client, headers, kind, "  Production  ")
+    assert client.get("/api/collections").json()[kind] == [
+        {"id": item_id, "name": "Production"}
+    ]
+    for duplicate in ["production", " PRODUCTION "]:
+        assert (
+            client.post(
+                f"/api/collections/{kind}", json={"name": duplicate}, headers=headers
+            ).status_code
+            == 409
+        )
+    for invalid in ["", "   ", "x" * 65, "bad\nname", "bad\x00name"]:
+        assert (
+            client.post(
+                f"/api/collections/{kind}", json={"name": invalid}, headers=headers
+            ).status_code
+            == 422
+        )
+    other = create_label(client, headers, kind, "Other")
+    assert (
+        client.put(
+            f"/api/collections/{kind}/{other}",
+            json={"name": "production"},
+            headers=headers,
+        ).status_code
+        == 409
+    )
+    assert (
+        client.put(
+            f"/api/collections/{kind}/{item_id}", json={"name": "Live"}, headers=headers
+        ).status_code
+        == 200
+    )
+    assert (
+        client.put(
+            f"/api/collections/{kind}/missing",
+            json={"name": "Missing"},
+            headers=headers,
+        ).status_code
+        == 404
+    )
+    assert (
+        client.delete(f"/api/collections/{kind}/{item_id}", headers=headers).status_code
+        == 200
+    )
+    assert (
+        client.delete(f"/api/collections/{kind}/{item_id}", headers=headers).status_code
+        == 404
+    )
+
+
+def test_assignments_are_distinct_persistent_and_replaceable(organized_inventory):
+    from app import organization
+    from app.security import Store
+
+    client = organized_inventory
+    headers = login(client)
+    project = create_label(client, headers, "projects", "App")
+    tag_a = create_label(client, headers, "tags", "Production")
+    tag_b = create_label(client, headers, "tags", "Database")
+    body = {"project_id": project, "tag_ids": [tag_a, tag_b, tag_a]}
+    # Warm the hypervisor cache; manager metadata must appear immediately.
+    client.get("/api/inventory")
+    for kind, resource_id in [
+        ("vm", "incus:shared"),
+        ("vm", "libvirt:shared"),
+        ("network", "incus:shared"),
+        ("network", "libvirt:shared"),
+    ]:
+        assert (
+            client.put(
+                f"/api/organization/{kind}/{resource_id}", json=body, headers=headers
+            ).status_code
+            == 200
+        )
+    inventory_data = client.get("/api/inventory").json()
+    for resource in inventory_data["vms"] + inventory_data["networks"]:
+        if resource["name"] == "shared":
+            assert resource["project_id"] == project
+            assert set(resource["tag_ids"]) == {tag_a, tag_b}
+        else:
+            assert resource["project_id"] is None and resource["tag_ids"] == []
+    reopened = Store(store.path.parent)
+    assert organization.decorate(reopened, inventory())["vms"] == inventory_data["vms"]
+    assert (
+        client.put(
+            "/api/organization/vm/incus:shared",
+            json={"project_id": None, "tag_ids": [tag_b]},
+            headers=headers,
+        ).status_code
+        == 200
+    )
+    updated = client.get("/api/inventory").json()
+    incus_vm = next(v for v in updated["vms"] if v["id"] == "incus:shared")
+    assert incus_vm["project_id"] is None and incus_vm["tag_ids"] == [tag_b]
+    assert updated["networks"][0]["project_id"] == project
+    assert (
+        next(v for v in updated["vms"] if v["id"] == "libvirt:shared")["project_id"]
+        == project
+    )
+    assert any(
+        a["action"] == "organization.assign" for a in client.get("/api/audit").json()
+    )
+
+
+def test_invalid_assignment_is_atomic(organized_inventory):
+    client = organized_inventory
+    headers = login(client)
+    project = create_label(client, headers, "projects", "App")
+    tag = create_label(client, headers, "tags", "Test")
+    route = "/api/organization/vm/incus:shared"
+    assert (
+        client.put(
+            route, json={"project_id": project, "tag_ids": [tag]}, headers=headers
+        ).status_code
+        == 200
+    )
+    for invalid in [
+        {"project_id": "missing"},
+        {"tag_ids": ["missing"]},
+        {"tag_ids": [project]},
+    ]:
+        assert client.put(route, json=invalid, headers=headers).status_code == 404
+        vm = client.get("/api/inventory").json()["vms"][0]
+        assert vm["project_id"] == project and vm["tag_ids"] == [tag]
+    assert (
+        client.put(
+            "/api/organization/vm/incus:missing", json={}, headers=headers
+        ).status_code
+        == 404
+    )
+    assert (
+        client.put(
+            "/api/organization/disk/incus:shared", json={}, headers=headers
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            "/api/collections/users", json={"name": "Bad"}, headers=headers
+        ).status_code
+        == 422
+    )
+
+
+def test_deleting_labels_retains_resources_and_clears_only_assignments(
+    organized_inventory,
+):
+    client = organized_inventory
+    headers = login(client)
+    project = create_label(client, headers, "projects", "App")
+    tag = create_label(client, headers, "tags", "Test")
+    other_tag = create_label(client, headers, "tags", "Keep")
+    for kind in ["vm", "network"]:
+        client.put(
+            f"/api/organization/{kind}/incus:shared",
+            json={"project_id": project, "tag_ids": [tag, other_tag]},
+            headers=headers,
+        )
+    client.delete(f"/api/collections/tags/{tag}", headers=headers)
+    client.delete(f"/api/collections/projects/{project}", headers=headers)
+    result = client.get("/api/inventory").json()
+    assert len(result["vms"]) == 3 and len(result["networks"]) == 2
+    for resources in [result["vms"], result["networks"]]:
+        resource = next(r for r in resources if r["id"] == "incus:shared")
+        assert resource["project_id"] is None and resource["tag_ids"] == [other_tag]
+
+
+def test_organization_enforces_auth_csrf_and_viewer_role(organized_inventory):
+    client = organized_inventory
+    assert client.get("/api/collections").status_code == 401
+    assert client.post("/api/collections/tags", json={"name": "No"}).status_code == 401
+    headers = login(client, "viewer")
+    assert client.get("/api/collections").status_code == 200
+    for method, path, body in [
+        ("POST", "/api/collections/tags", {"name": "No"}),
+        ("PUT", "/api/collections/projects/missing", {"name": "No"}),
+        ("DELETE", "/api/collections/tags/missing", None),
+        ("PUT", "/api/organization/network/incus:shared", {}),
+    ]:
+        assert (
+            client.request(method, path, json=body, headers=headers).status_code == 403
+        )
+    login(client)
+    assert client.post("/api/collections/tags", json={"name": "No"}).status_code == 403
+
+
+@pytest.mark.parametrize("kind", ["vm", "network"])
+def test_resource_deletion_clears_organization_after_success(
+    organized_inventory, monkeypatch, kind
+):
+    client = organized_inventory
+    headers = login(client)
+    project = create_label(client, headers, "projects", "App")
+    tag = create_label(client, headers, "tags", "Test")
+    client.put(
+        f"/api/organization/{kind}/incus:shared",
+        json={"project_id": project, "tag_ids": [tag]},
+        headers=headers,
+    )
+    monkeypatch.setattr(
+        "app.main.task", lambda user, action, resource, fn: fn() or {"task_id": "test"}
+    )
+    monkeypatch.setattr("app.main.ensure_stopped", lambda *args: None)
+    monkeypatch.setattr(incus, "get", lambda *args: {})
+    monkeypatch.setattr(incus, "delete", lambda *args: None)
+    monkeypatch.setattr(incus, "request", lambda *args: None)
+    route = "/api/vms/incus:shared" if kind == "vm" else "/api/networks/shared"
+    assert (
+        client.request(
+            "DELETE", route, json={"confirm_name": "shared"}, headers=headers
+        ).status_code
+        == 200
+    )
+    with store.db() as db:
+        assert not db.execute(
+            "SELECT 1 FROM resource_projects WHERE kind=?", (kind,)
+        ).fetchone()
+        assert not db.execute(
+            "SELECT 1 FROM resource_tags WHERE kind=?", (kind,)
+        ).fetchone()
+
+
+def test_organization_schema_upgrades_existing_store_without_losing_data(tmp_path):
+    import sqlite3
+    from app.security import Store
+
+    with sqlite3.connect(tmp_path / "manager.sqlite3") as db:
+        db.execute(
+            "CREATE TABLE isos(id TEXT PRIMARY KEY, name TEXT UNIQUE, path TEXT, size INTEGER, sha256 TEXT, created REAL)"
+        )
+        db.execute(
+            "INSERT INTO isos VALUES('retained','retained.iso','/data/retained.iso',40000,'hash',0)"
+        )
+    upgraded = Store(tmp_path)
+    with upgraded.db() as db:
+        assert (
+            db.execute("SELECT name FROM isos WHERE id='retained'").fetchone()[0]
+            == "retained.iso"
+        )
+        assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert db.execute("SELECT count(*) FROM projects").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM tags").fetchone()[0] == 0
+
+
+def test_failed_resource_delete_preserves_assignments(organized_inventory, monkeypatch):
+    client = organized_inventory
+    headers = login(client)
+    tag = create_label(client, headers, "tags", "Keep")
+    client.put(
+        "/api/organization/vm/incus:shared", json={"tag_ids": [tag]}, headers=headers
+    )
+    monkeypatch.setattr(
+        "app.main.task", lambda user, action, resource, fn: fn() or {"task_id": "test"}
+    )
+
+    def fail(*args):
+        raise HypervisorError("VM is running")
+
+    monkeypatch.setattr("app.main.ensure_stopped", fail)
+    assert (
+        client.request(
+            "DELETE",
+            "/api/vms/incus:shared",
+            json={"confirm_name": "shared"},
+            headers=headers,
+        ).status_code
+        == 409
+    )
+    assert client.get("/api/inventory").json()["vms"][0]["tag_ids"] == [tag]

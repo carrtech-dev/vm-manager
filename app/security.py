@@ -58,6 +58,20 @@ class Store:
                     vm_id TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL,
                     device TEXT NOT NULL DEFAULT '', created REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS attempts(peer TEXT, at REAL);
+                CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL, name_key TEXT UNIQUE NOT NULL);
+                CREATE TABLE IF NOT EXISTS tags(id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL, name_key TEXT UNIQUE NOT NULL);
+                CREATE TABLE IF NOT EXISTS resource_projects(
+                    kind TEXT NOT NULL CHECK(kind IN ('vm','network')),
+                    resource_id TEXT NOT NULL,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    PRIMARY KEY(kind,resource_id));
+                CREATE TABLE IF NOT EXISTS resource_tags(
+                    kind TEXT NOT NULL CHECK(kind IN ('vm','network')),
+                    resource_id TEXT NOT NULL,
+                    tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                    PRIMARY KEY(kind,resource_id,tag_id));
             """)
             db.execute(
                 "UPDATE tasks SET status='interrupted', finished=?, message='Service restarted. Inspect the resource before retrying.' WHERE status IN ('queued','running')",
@@ -69,6 +83,7 @@ class Store:
     def db(self):
         db = sqlite3.connect(self.path, timeout=30)
         db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys=ON")
         try:
             with db:
                 yield db

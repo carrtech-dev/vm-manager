@@ -1,9 +1,11 @@
 {
   "name": "carrtech-vm-manager",
   "private": true,
+  "type": "module",
   "version": "1.0.0",
   "scripts": {
-    "check": "node --check app/static/app.js && node --check app/static/core.js && node --check app/static/console.js"
+    "check": "node --check app/static/app.js && node --check app/static/core.js && node --check app/static/console.js",
+    "test": "node --test tests/test_filters.mjs"
   },
   "dependencies": {
     "@novnc/novnc": "1.7.0"

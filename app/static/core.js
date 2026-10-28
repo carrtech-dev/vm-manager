@@ -10,9 +10,20 @@ export const state = {
   search: "",
   status: "all",
   provider: "all",
+  project: "all",
+  tag: "all",
   samples: [],
   taskFilter: "all",
 };
+export const matchesOrganization = (resource) =>
+  (state.project === "all" ||
+    (state.project === "unassigned"
+      ? !resource.project_id
+      : resource.project_id === state.project)) &&
+  (state.tag === "all" ||
+    (state.tag === "untagged"
+      ? !resource.tag_ids?.length
+      : resource.tag_ids?.includes(state.tag)));
 export const $ = (selector, root = document) => root.querySelector(selector);
 export const $$ = (selector, root = document) => [
   ...root.querySelectorAll(selector),

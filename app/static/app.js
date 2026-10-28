@@ -16,11 +16,14 @@ import {
   textarea,
   confirmAction,
   queue,
+  matchesOrganization,
 } from "./core.js";
 const pageNames = {
   overview: "Overview",
   vms: "Virtual machines",
   networks: "Networks",
+  organization: "Projects & tags",
+  resources: "Resource view",
   isos: "ISO library",
   storage: "Storage",
   users: "Access control",
@@ -33,6 +36,7 @@ const navItems = [
   ["overview", "▦", "Overview"],
   ["vms", "▣", "Virtual machines"],
   ["networks", "◇", "Networks"],
+  ["organization", "◈", "Projects & tags"],
   ["isos", "◉", "ISO library"],
   ["storage", "▤", "Storage"],
   ["users", "♧", "Access control"],
@@ -90,6 +94,156 @@ const currentVM = (id) =>
   state.inventory?.vms.find((v) => v.id === (id || state.vm));
 const smallAction = (label, action, id, disabled = false) =>
   btn(label, action, id, "small link", disabled);
+function normalizeOrganizationFilters() {
+  if (
+    ![
+      "all",
+      "unassigned",
+      ...state.inventory.projects.map((p) => p.id),
+    ].includes(state.project)
+  )
+    state.project = "all";
+  if (
+    !["all", "untagged", ...state.inventory.tags.map((t) => t.id)].includes(
+      state.tag,
+    )
+  )
+    state.tag = "all";
+}
+function renderOrganizationFilters() {
+  const inv = state.inventory;
+  return `<div class="organization-filters" aria-label="Resource filters">${select("Project", "project-filter", [["all", "All projects"], ["unassigned", "Unassigned resources"], ...inv.projects.map((p) => [p.id, p.name])], state.project)}${select("Tag", "tag-filter", [["all", "All tags"], ["untagged", "Untagged resources"], ...inv.tags.map((t) => [t.id, t.name])], state.tag)}${state.project !== "all" || state.tag !== "all" ? btn("Clear filters", "clear-filters") : ""}<small>Filters apply to VM and network lists and the resource tree.</small></div>`;
+}
+function organizationChips(resource) {
+  const project = state.inventory.projects.find(
+    (p) => p.id === resource.project_id,
+  );
+  const tags = state.inventory.tags.filter((t) =>
+    resource.tag_ids?.includes(t.id),
+  );
+  if (!project && !tags.length) return "";
+  return `<div class="organization-chips">${project ? `<span class="resource-project" title="Project">◈ ${esc(project.name)}</span>` : ""}${tags.map((t) => `<span class="resource-tag" title="Tag">${esc(t.name)}</span>`).join("")}</div>`;
+}
+function renderOrganization() {
+  const section = (kind, singular) =>
+    panel(
+      kind === "projects" ? "Projects" : "Tags",
+      table(
+        ["Name", "Virtual machines", "Networks", "Actions"],
+        state.inventory[kind].map((item) => {
+          const belongs = (r) =>
+            kind === "projects"
+              ? r.project_id === item.id
+              : r.tag_ids?.includes(item.id);
+          return `<tr><td class="name">${esc(item.name)}</td><td>${state.inventory.vms.filter(belongs).length}</td><td>${state.inventory.networks.filter(belongs).length}</td><td><div class="actions">${smallAction("View resources", "view-" + singular, item.id)}${can() ? smallAction("Rename", "rename-" + singular, item.id) + smallAction("Delete", "delete-" + singular, item.id) : ""}</div></td></tr>`;
+        }),
+      ),
+      can()
+        ? btn("+ Create " + singular, "create-" + singular, "", "primary")
+        : "",
+    );
+  return (
+    title(
+      "Projects & tags",
+      "Group resources by project and label them with multiple tags. Counts cover all resources.",
+    ) +
+    `<div class="hint">Each VM or network can belong to one project and have multiple tags. Assign them from a VM’s summary or a network’s Organize action. Projects organize this manager’s inventory; they do not change network connectivity or access permissions.</div>` +
+    section("projects", "project") +
+    section("tags", "tag")
+  );
+}
+function renderResources() {
+  const vms = state.inventory.vms.filter(matchesOrganization);
+  const networks = state.inventory.networks.filter(matchesOrganization);
+  const project = state.inventory.projects.find((p) => p.id === state.project);
+  const tag = state.inventory.tags.find((t) => t.id === state.tag);
+  return (
+    title(
+      esc(project?.name || tag?.name || "Resource view"),
+      `${vms.length} virtual machines · ${networks.length} networks`,
+    ) +
+    panel("Virtual machines", vmTable(vms)) +
+    panel(
+      "Networks",
+      table(
+        ["Name", "Provider", "Project & tags", "Actions"],
+        networks.map(
+          (n) =>
+            `<tr><td class="name">${esc(n.name)}</td><td>${badge(n.provider)}</td><td>${organizationChips(n) || "Unassigned · No tags"}</td><td><div class="actions">${smallAction("Details", "network-detail", n.id)}${can() ? smallAction("Organize", "organize-network", n.id) : ""}</div></td></tr>`,
+        ),
+      ),
+    )
+  );
+}
+async function updateOrganization() {
+  state.inventory = await api("/inventory");
+  normalizeOrganizationFilters();
+  render();
+}
+function collectionForm(kind, id = "") {
+  const item = state.inventory[kind].find((c) => c.id === id);
+  const singular = kind === "projects" ? "project" : "tag";
+  const dialog = modal(
+    (item ? "Rename " : "Create ") + singular,
+    field("Name", "name", item?.name || "", {
+      hint: "Up to 64 characters. Names must be unique, ignoring case.",
+    }),
+    async (f) => {
+      await api(
+        "/collections/" + kind + (item ? "/" + item.id : ""),
+        item ? "PUT" : "POST",
+        { name: f.get("name") },
+      );
+      await updateOrganization();
+      toast(singular === "project" ? "Project saved" : "Tag saved");
+    },
+    { submit: item ? "Save name" : "Create " + singular },
+  );
+  $("input[name=name]", dialog).maxLength = 64;
+}
+function deleteCollection(kind, id) {
+  const item = state.inventory[kind].find((c) => c.id === id);
+  if (!item) return;
+  const singular = kind === "projects" ? "project" : "tag";
+  confirmAction(
+    "Delete " + singular,
+    item.name,
+    `This removes the ${singular} and its assignments. VMs, networks and their data are retained.`,
+    async () => {
+      await api("/collections/" + kind + "/" + id, "DELETE");
+      await updateOrganization();
+      toast(singular === "project" ? "Project deleted" : "Tag deleted");
+    },
+  );
+}
+function organizeResource(kind, resource) {
+  if (!resource) return;
+  modal(
+    "Project & tags · " + resource.name,
+    select(
+      "Project",
+      "project_id",
+      [
+        ["", "Unassigned"],
+        ...state.inventory.projects.map((p) => [p.id, p.name]),
+      ],
+      resource.project_id || "",
+    ) +
+      `<fieldset class="tag-picker"><legend>Tags</legend>${state.inventory.tags.length ? state.inventory.tags.map((t) => check(t.name, "tag_ids", resource.tag_ids?.includes(t.id)).replace('name="tag_ids"', `name="tag_ids" value="${esc(t.id)}"`)).join("") : '<p class="muted">Create tags in Projects & tags first.</p>'}</fieldset><p class="hint">Assignments can be changed while VMs are running. Create projects and tags in Projects & tags.</p>`,
+    async (f) => {
+      await api(
+        "/organization/" + kind + "/" + encodeURIComponent(resource.id),
+        "PUT",
+        {
+          project_id: f.get("project_id") || null,
+          tag_ids: f.getAll("tag_ids"),
+        },
+      );
+      await updateOrganization();
+      toast("Project and tags saved");
+    },
+  );
+}
 function navigate() {
   const parts = location.hash.slice(1).split("/");
   state.page = parts[0] || "overview";
@@ -153,11 +307,11 @@ function render() {
       .filter((n) => n[0] !== "users" || can("admin"))
       .map(
         ([key, icon, label]) =>
-          `<a class="nav-link ${active === key ? "active" : ""}" href="#${key}"><span class="nav-symbol" aria-hidden="true">${icon}</span>${label}${key === "vms" ? `<span class="nav-count">${inv.vms.length}</span>` : ""}</a>`,
+          `<a class="nav-link ${active === key ? "active" : ""}" href="#${key}"><span class="nav-symbol" aria-hidden="true">${icon}</span>${label}${key === "vms" ? `<span class="nav-count">${inv.vms.filter(matchesOrganization).length}</span>` : ""}</a>`,
       )
       .join(
         "",
-      )}</nav><div class="nav-heading">RESOURCE TREE</div><div class="resource-tree" id="resource-tree">${renderTree()}</div><div class="host-online"><strong>● HOST CONNECTED</strong><small>${esc(inv.host.address)}</small></div></aside><section class="workspace"><header class="topbar"><button class="icon-button mobile-menu" data-action="toggle-sidebar" aria-label="Toggle navigation">☰</button><div class="breadcrumb"><a href="#overview">Datacenter</a><span>/</span><span>${esc(inv.host.name)}</span><span>/</span><strong>${esc(state.page === "vm" ? vm?.name || "VM" : pageNames[state.page] || "Overview")}</strong></div>${can() ? btn("+ Create VM", "create-vm", "", "primary") : ""}<button class="icon-button" data-action="help" aria-label="Help">?</button><button class="account-button" data-action="account" aria-label="Your account"><span class="avatar">${esc(state.user.username.slice(0, 2).toUpperCase())}</span><span class="account-name">${esc(state.user.username)}</span><span class="role-label">${esc(state.user.role)}</span></button></header><main class="content" id="main-content">${inv.warnings.length ? `<div class="error-banner"><strong>Some host information is unavailable.</strong><br>${inv.warnings.map(esc).join("<br>")}</div>` : ""}${renderPage()}</main><section class="task-dock" aria-label="Recent tasks" id="task-dock">${renderDock()}</section></section></div>`;
+      )}</nav><div class="nav-heading">RESOURCE TREE</div><div class="resource-tree" id="resource-tree">${renderTree()}</div><div class="host-online"><strong>● HOST CONNECTED</strong><small>${esc(inv.host.address)}</small></div></aside><section class="workspace"><header class="topbar"><button class="icon-button mobile-menu" data-action="toggle-sidebar" aria-label="Toggle navigation">☰</button><div class="breadcrumb"><a href="#overview">Datacenter</a><span>/</span><span>${esc(inv.host.name)}</span><span>/</span><strong>${esc(state.page === "vm" ? vm?.name || "VM" : pageNames[state.page] || "Overview")}</strong></div>${can() ? btn("+ Create VM", "create-vm", "", "primary") : ""}<button class="icon-button" data-action="help" aria-label="Help">?</button><button class="account-button" data-action="account" aria-label="Your account"><span class="avatar">${esc(state.user.username.slice(0, 2).toUpperCase())}</span><span class="account-name">${esc(state.user.username)}</span><span class="role-label">${esc(state.user.role)}</span></button></header><main class="content" id="main-content">${inv.warnings.length ? `<div class="error-banner"><strong>Some host information is unavailable.</strong><br>${inv.warnings.map(esc).join("<br>")}</div>` : ""}${renderOrganizationFilters()}${renderPage()}</main><section class="task-dock" aria-label="Recent tasks" id="task-dock">${renderDock()}</section></section></div>`;
   bindPage();
   if ($("#resource-tree")) $("#resource-tree").scrollTop = treeScroll;
   if ($("#main-content")) $("#main-content").scrollTop = contentScroll;
@@ -171,6 +325,7 @@ function renderTree() {
       const vms = state.inventory.vms.filter(
         (v) =>
           v.provider === provider &&
+          matchesOrganization(v) &&
           (!state.search ||
             v.name.toLowerCase().includes(state.search.toLowerCase())),
       );
@@ -186,6 +341,10 @@ function renderPage() {
       return renderVM();
     case "networks":
       return renderNetworks();
+    case "organization":
+      return renderOrganization();
+    case "resources":
+      return renderResources();
     case "isos":
       return renderISOs();
     case "storage":
@@ -206,14 +365,16 @@ function stat(label, value, caption, percent) {
   return `<article class="stat-card"><div class="label">${label}</div><div class="value">${value}</div><small>${caption}</small><div class="usage-bar"><i style="width:${Math.max(0, Math.min(100, percent || 0))}%"></i></div></article>`;
 }
 function renderOverview() {
-  const { host, vms, pools, networks, isos } = state.inventory;
+  const { host, pools, isos } = state.inventory;
+  const vms = state.inventory.vms.filter(matchesOrganization);
+  const networks = state.inventory.networks.filter(matchesOrganization);
   const running = vms.filter((v) => v.status === "running").length;
   const total = pools.reduce((n, p) => n + (p.resources?.space?.total || 0), 0);
   const used = pools.reduce((n, p) => n + (p.resources?.space?.used || 0), 0);
   return (
     title(
       "Overview",
-      "Host resources and virtual machines",
+      "Host metrics and virtual machines in the current resource view",
       btn("↻ Refresh", "refresh"),
     ) +
     `<div class="resource-cards">${stat("CPU usage", host.cpu_percent.toFixed(1) + "%", host.cpu_count + " logical CPUs", host.cpu_percent)}${stat("Memory", Math.round(host.memory_used / 1024 ** 3) + " / " + Math.round(host.memory_total / 1024 ** 3) + " GiB", host.memory_percent.toFixed(1) + "% used", host.memory_percent)}${stat("Storage", size(used, 0) + " / " + size(total, 1), pools.length + " storage pools", total ? (used / total) * 100 : 0)}${stat("Virtual machines", running + " / " + vms.length, "running / total", vms.length ? (running / vms.length) * 100 : 0)}</div><div class="overview-columns">${panel(
@@ -257,13 +418,14 @@ function vmTable(vms, compact = false) {
         ],
     vms.map(
       (v) =>
-        `<tr class="clickable" data-action="open-vm" data-id="${esc(v.id)}"><td class="vm-name-cell"><a class="name" href="#vm/${encodeURIComponent(v.id)}/summary">${esc(v.name)}</a>${!compact && v.description ? `<small>${esc(v.description.slice(0, 70))}</small>` : ""}</td><td>${badge(v.provider)}</td><td>${badge(v.status)}</td><td class="numeric">${esc(v.cpu)}</td><td class="numeric">${size(v.memory)}</td>${compact ? "" : `<td class="numeric">${Object.values(v.devices).filter((d) => d.type === "disk" && d.readonly !== "true" && !d.source?.endsWith(".iso") && d.kind !== "cdrom").length} disk(s)</td><td class="mono">${esc(v.addresses.join(", ") || "Not reported")}</td><td><div class="actions">${smallAction("Open", "open-vm", v.id)}${can() ? smallAction(v.status === "running" ? "Shutdown" : "Start", v.status === "running" ? "shutdown" : "start", v.id, !["stopped", "running"].includes(v.status)) : ""}</div></td>`}</tr>`,
+        `<tr class="clickable" data-action="open-vm" data-id="${esc(v.id)}"><td class="vm-name-cell"><a class="name" href="#vm/${encodeURIComponent(v.id)}/summary">${esc(v.name)}</a>${organizationChips(v)}${!compact && v.description ? `<small>${esc(v.description.slice(0, 70))}</small>` : ""}</td><td>${badge(v.provider)}</td><td>${badge(v.status)}</td><td class="numeric">${esc(v.cpu)}</td><td class="numeric">${size(v.memory)}</td>${compact ? "" : `<td class="numeric">${Object.values(v.devices).filter((d) => d.type === "disk" && d.readonly !== "true" && !d.source?.endsWith(".iso") && d.kind !== "cdrom").length} disk(s)</td><td class="mono">${esc(v.addresses.join(", ") || "Not reported")}</td><td><div class="actions">${smallAction("Open", "open-vm", v.id)}${can() ? smallAction(v.status === "running" ? "Shutdown" : "Start", v.status === "running" ? "shutdown" : "start", v.id, !["stopped", "running"].includes(v.status)) : ""}</div></td>`}</tr>`,
     ),
   );
 }
 function filteredVMs() {
   return state.inventory.vms.filter(
     (v) =>
+      matchesOrganization(v) &&
       (!state.search ||
         v.name.toLowerCase().includes(state.search.toLowerCase()) ||
         v.description.toLowerCase().includes(state.search.toLowerCase())) &&
@@ -350,8 +512,9 @@ function renderVM() {
             esc(v.addresses.join(", ") || "Not reported by guest"),
           ],
           ["Description", esc(v.description || "No description")],
+          ["Project & tags", organizationChips(v) || "Unassigned · No tags"],
         ]),
-      )}${panel("Quick actions", `<div class="storage-body"><p class="muted">Configure disks, network adapters and installation media from the Hardware tab.</p><div class="actions" style="margin-top:16px">${btn("View hardware", "vm-tab", "hardware")}${can() ? btn("Edit resources", "edit-vm", v.id, "secondary") : ""}</div></div>`)}</div>`
+      )}${panel("Quick actions", `<div class="storage-body"><p class="muted">Configure disks, network adapters and installation media from the Hardware tab.</p><div class="actions" style="margin-top:16px">${btn("View hardware", "vm-tab", "hardware")}${can() ? btn("Assign project & tags", "organize-vm", v.id) : ""}${can() ? btn("Edit resources", "edit-vm", v.id, "secondary") : ""}</div></div>`)}</div>`
     );
   }
   if (state.tab === "options") {
@@ -525,7 +688,7 @@ function renderPending(v) {
   return panel("Pending hardware changes", `<div class="hint">Apply with Restart in VM Manager, or Start after shutdown. Changes apply in saved order. If a change fails, the VM stays stopped and unapplied changes remain here.</div>` + table(["Hardware", "Current", "After restart"], rows.map(row => `<tr>${row.map(value => `<td>${esc(value)}</td>`).join("")}</tr>`)), can() ? btn("Discard pending", "discard-pending", v.id, "secondary") : "");
 }
 function renderNetworks() {
-  const nets = state.inventory.networks;
+  const nets = state.inventory.networks.filter(matchesOrganization);
   const selected = nets.find((n) => n.id === selectedNetwork) || nets[0];
   return (
     title(
@@ -547,7 +710,7 @@ function renderNetworks() {
         ],
         nets.map(
           (n) =>
-            `<tr class="clickable" data-action="network-detail" data-id="${esc(n.id)}"><td><span class="name">${esc(n.name)}</span>${n.description ? `<small>${esc(n.description)}</small>` : ""}</td><td>${badge(n.provider)}</td><td>${badge(networkMode(n), "incus")}</td><td class="mono">${esc(n.config["ipv4.address"] || "None")}</td><td>${n.config["ipv4.dhcp"] === "false" ? "Disabled" : "Enabled"}</td><td>${n.used_by.length}</td><td><div class="actions">${smallAction("Details", "network-detail", n.id)}${can() && n.provider === "incus" ? `${smallAction("Edit", "edit-network", n.id, !!n.used_by.length)}${smallAction("Delete", "delete-network", n.id, !!n.used_by.length)}` : ""}</div></td></tr>`,
+            `<tr class="clickable" data-action="network-detail" data-id="${esc(n.id)}"><td><span class="name">${esc(n.name)}</span>${organizationChips(n)}${n.description ? `<small>${esc(n.description)}</small>` : ""}</td><td>${badge(n.provider)}</td><td>${badge(networkMode(n), "incus")}</td><td class="mono">${esc(n.config["ipv4.address"] || "None")}</td><td>${n.config["ipv4.dhcp"] === "false" ? "Disabled" : "Enabled"}</td><td>${n.used_by.length}</td><td><div class="actions">${smallAction("Details", "network-detail", n.id)}${can() ? smallAction("Organize", "organize-network", n.id) : ""}${can() && n.provider === "incus" ? `${smallAction("Edit", "edit-network", n.id, !!n.used_by.length)}${smallAction("Delete", "delete-network", n.id, !!n.used_by.length)}` : ""}</div></td></tr>`,
         ),
       ),
     ) +
@@ -564,6 +727,10 @@ function renderNetworks() {
                   : "Routed · No NAT",
             ],
             ["Gateway", esc(selected.config["ipv4.address"] || "None")],
+            [
+              "Project & tags",
+              organizationChips(selected) || "Unassigned · No tags",
+            ],
             [
               "DHCP",
               selected.config["ipv4.dhcp"] === "false" ? "Disabled" : "Enabled",
@@ -788,6 +955,14 @@ function bindPage() {
         state[key] = e.target.value;
         if (state.page === "vms") updateVMTable();
         else render();
+      };
+  }
+  for (const key of ["project", "tag"]) {
+    const el = $(`[name="${key}-filter"]`);
+    if (el)
+      el.onchange = (event) => {
+        state[key] = event.target.value;
+        render();
       };
   }
   const input = $("#iso-input");
@@ -1056,6 +1231,7 @@ async function refresh(force = false) {
   busy = true;
   try {
     state.inventory = await api("/inventory");
+    normalizeOrganizationFilters();
     if (state.page === "vm" && state.tab === "summary") refreshVMMetrics();
     if (can("admin") && state.page === "users")
       state.users = await api("/users");
@@ -1113,6 +1289,49 @@ async function action(name, id) {
   switch (name) {
     case "discard-pending":
       confirmAction("Discard pending hardware", v.name, "Discard all unapplied hardware changes?", async () => queue(ref(v.id) + "/pending", "DELETE"));
+      break;
+    case "clear-filters":
+      state.project = state.tag = "all";
+      render();
+      break;
+    case "view-project":
+      state.project = id;
+      state.tag = "all";
+      location.hash = "#resources";
+      render();
+      break;
+    case "view-tag":
+      state.tag = id;
+      state.project = "all";
+      location.hash = "#resources";
+      render();
+      break;
+    case "create-project":
+      collectionForm("projects");
+      break;
+    case "create-tag":
+      collectionForm("tags");
+      break;
+    case "rename-project":
+      collectionForm("projects", id);
+      break;
+    case "rename-tag":
+      collectionForm("tags", id);
+      break;
+    case "delete-project":
+      deleteCollection("projects", id);
+      break;
+    case "delete-tag":
+      deleteCollection("tags", id);
+      break;
+    case "organize-vm":
+      organizeResource("vm", v);
+      break;
+    case "organize-network":
+      organizeResource(
+        "network",
+        state.inventory.networks.find((n) => n.id === id),
+      );
       break;
     case "toggle-sidebar":
       $(".app-shell").classList.toggle("sidebar-open");
@@ -1224,7 +1443,8 @@ async function action(name, id) {
       break;
     case "network-detail":
       selectedNetwork = id;
-      $("#main-content").innerHTML = renderNetworks();
+      location.hash = "#networks";
+      render();
       break;
     case "edit-network":
       networkForm(state.inventory.networks.find((n) => n.id === id));
