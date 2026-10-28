@@ -27,7 +27,7 @@ VM summaries refresh CPU and memory usage every five seconds, separately from co
 
 Console WebSockets send ping/pong keep-alives every 20 seconds. Idle input channels stay connected, permissions are rechecked every 20 seconds, and the browser reconnects broken display/input channels. The normal 12-hour sign-in expiry still applies.
 
-Normal shutdown asks the guest to power off. Force stop is separately confirmed and may lose unsaved guest data. Deleting a VM requires its exact name and a stopped VM. Incus deletion removes its root volume and attached extra volumes created by this application. Detached volumes are retained. Deleting an existing libvirt definition retains its disk files. VM configurations are backed up before operations in `/var/lib/vm-manager/config-backups`.
+Normal shutdown asks the guest to power off. Boot menus and unresponsive guests may ignore this request; the task reports a failure if the guest does not shut down. Force stop bypasses the normal task queue and powers off without guest cooperation, cancelling earlier power requests for that VM so a pending restart cannot start it again. Unapplied hardware changes remain saved for the next Start. Force stop is separately confirmed and may lose unsaved guest data. Deleting a VM requires its exact name and a stopped VM. Incus deletion removes its root volume and attached extra volumes created by this application. Detached volumes are retained. Deleting an existing libvirt definition retains its disk files. VM configurations are backed up before operations in `/var/lib/vm-manager/config-backups`.
 
 Networks and ISO media that are still referenced cannot be deleted. Existing libvirt networks are listed for visibility; new networks are managed by Incus and can also be attached to libvirt VMs as bridges. Existing Incus ISO volumes can be used directly by Incus VMs; libvirt VMs use uploaded ISO files. The app does not modify host physical interfaces.
 
@@ -66,6 +66,8 @@ npm test
 The local frontend loads even without hypervisors; provider connection failures are shown explicitly after login. Production requires Linux with existing Incus and libvirt. The installer provisions the app's service account, Python environment, SPICE browser client, certificate and systemd service. It does not initialize or replace either hypervisor.
 
 `scripts/live_check.py` is an opt-in acceptance test for the target host. It creates uniquely named disposable networks, a VM, disks and an ISO, checks real hypervisor operations and the SPICE handshake, and removes its resources. Run it with a disposable `VM_MANAGER_DATA` directory. Do not point it at production account data: it resets the `admin` password in its selected test database.
+
+`scripts/power_check.py --iso-name <uploaded-installer-name>` runs on the hypervisor against the deployed HTTPS service. It uses a temporary operator/session and disposable installer VM to verify that Force stop bypasses a waiting restart, cancels earlier queued power actions, and retains pending hardware. Run it as root with the release Python environment and `PYTHONPATH` set to the release directory. Existing VM and ISO data are retained.
 
 ## Deployment and recovery
 

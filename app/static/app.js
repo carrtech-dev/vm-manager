@@ -1387,7 +1387,7 @@ async function action(name, id) {
       confirmAction(
         "Force stop",
         v.name,
-        "The VM will stop immediately. Unsaved guest data may be lost.",
+        "The VM will power off without waiting for the guest, even at a boot menu. Earlier queued power requests are cancelled. Unsaved guest data may be lost.",
         () =>
           queue(ref(v.id) + "/action", "POST", {
             action: "stop",

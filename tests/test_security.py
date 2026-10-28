@@ -1051,3 +1051,132 @@ def test_failed_resource_delete_preserves_assignments(organized_inventory, monke
         == 409
     )
     assert client.get("/api/inventory").json()["vms"][0]["tag_ids"] == [tag]
+
+
+@pytest.mark.parametrize("provider", ["incus", "libvirt"])
+@pytest.mark.parametrize("action", ["shutdown", "restart"])
+def test_force_stop_bypasses_wait_and_cancels_earlier_power_requests(
+    client, monkeypatch, provider, action
+):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    import app.main as main
+
+    normal = ThreadPoolExecutor(max_workers=1)
+    emergency = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(main, "executor", normal)
+    monkeypatch.setattr(main, "stop_executor", emergency)
+    monkeypatch.setattr(main, "power_requests", main.PowerRequests())
+    vm_id = provider + ":power-test"
+    vm = {"status": "Running"}
+    shutdown_waiting = threading.Event()
+    stopped = threading.Event()
+    release_shutdown = threading.Event()
+    calls = []
+    monkeypatch.setattr(incus, "vm", lambda _: dict(vm))
+    monkeypatch.setattr(libvirt, "cli", lambda command, *args: (
+        "shut off" if vm["status"] == "Stopped" else "running"
+    ) if command == "domstate" else "<domain/>")
+    monkeypatch.setattr(main, "pending_hardware", lambda _: [{"id": "saved-change"}])
+    applied = []
+    monkeypatch.setattr(main, "apply_pending", lambda _: applied.append(True))
+
+    def driver_action(_, requested):
+        calls.append(requested)
+        if requested == "shutdown":
+            shutdown_waiting.set()
+            assert release_shutdown.wait(5), "test did not release graceful shutdown"
+        elif requested == "stop":
+            vm["status"] = "Stopped"
+            stopped.set()
+
+    monkeypatch.setattr(incus if provider == "incus" else libvirt, "action", driver_action)
+    headers = login(client)
+
+    def submit(requested, **extra):
+        response = client.post(
+            f"/api/vms/{vm_id}/action", headers=headers,
+            json={"action": requested, **extra},
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["task_id"]
+
+    try:
+        original = submit(action)
+        assert shutdown_waiting.wait(2)
+        queued_start = submit("start")
+        queued_shutdown = submit("shutdown")
+        # A rejected stop must not cancel the existing requests.
+        assert client.post(
+            f"/api/vms/{vm_id}/action", headers=headers,
+            json={"action": "stop", "confirm_name": "wrong"},
+        ).status_code == 400
+        force = submit("stop", confirm_name="power-test")
+        assert stopped.wait(2), "Force stop waited behind graceful shutdown"
+        assert not release_shutdown.is_set()
+    finally:
+        release_shutdown.set()
+        normal.shutdown(wait=True)
+        emergency.shutdown(wait=True)
+
+    with store.db() as db:
+        rows = {r["id"]: dict(r) for r in db.execute(
+            "SELECT * FROM tasks WHERE id IN (?,?,?,?)",
+            (original, queued_start, queued_shutdown, force),
+        )}
+        audits = db.execute(
+            "SELECT action,detail FROM audit WHERE resource=?", (vm_id,)
+        ).fetchall()
+    assert rows[force]["status"] == "completed"
+    for task_id in (original, queued_start, queued_shutdown):
+        assert rows[task_id]["status"] == "interrupted"
+        assert "Superseded by Force stop" in rows[task_id]["message"]
+    assert calls == ["shutdown", "stop"]
+    assert not applied
+    assert vm["status"] == "Stopped"
+    assert len(audits) >= 4
+
+
+def test_shutdown_failure_explains_boot_menu_and_never_forces(client, monkeypatch):
+    import app.main as main
+
+    calls = []
+    def fail(_, action):
+        calls.append(action)
+        raise HypervisorError("context deadline exceeded")
+
+    monkeypatch.setattr(incus, "action", fail)
+    with pytest.raises(HypervisorError, match="Boot menus.*Force stop"):
+        main.power_action("incus:boot-menu", "shutdown")
+    assert calls == ["shutdown"]
+
+
+def test_libvirt_shutdown_waits_for_actual_power_off(client, monkeypatch):
+    import app.main as main
+
+    states = iter(["running", "shut off"])
+    checked = []
+    monkeypatch.setattr(libvirt, "action", lambda *args: None)
+    def state(*args):
+        checked.append(True)
+        return next(states)
+    monkeypatch.setattr(libvirt, "cli", state)
+    monkeypatch.setattr(main.time, "sleep", lambda _: None)
+    main.power_action("libvirt:boot-menu", "shutdown")
+    assert len(checked) == 2
+
+
+def test_incus_force_stop_has_no_guest_shutdown_timeout(monkeypatch):
+    from app.hypervisor import Incus
+
+    driver = Incus()
+    requests = []
+    monkeypatch.setattr(driver, "request", lambda *args: requests.append(args))
+    driver.action("boot-menu", "stop")
+    driver.action("boot-menu", "shutdown")
+    assert requests[0][2] == {
+        "action": "stop", "timeout": 0, "force": True, "stateful": False,
+    }
+    assert requests[1][2] == {
+        "action": "stop", "timeout": 60, "force": False, "stateful": False,
+    }

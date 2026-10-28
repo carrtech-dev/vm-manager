@@ -308,7 +308,7 @@ class Incus:
                     "stop": "stop",
                     "restart": "restart",
                 }[action],
-                "timeout": 60,
+                "timeout": 0 if action == "stop" else 60,
                 "force": action == "stop",
                 "stateful": False,
             },

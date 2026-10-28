@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field, field_validator
 from .hypervisor import Incus, Libvirt, HypervisorError, name, run, bytes_size
 from .security import Store, ROLES, hash_password, verify_password, token_hash
 from . import organization
+from .power import PowerInterrupted, PowerRequests
 
 DATA = Path(os.environ.get("VM_MANAGER_DATA", "data")).resolve()
 DATA.mkdir(parents=True, exist_ok=True)
@@ -50,6 +51,8 @@ app = FastAPI(
     title="CarrTech VM Manager", docs_url=None, redoc_url=None, openapi_url=None
 )
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hypervisor")
+stop_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="force-stop")
+power_requests = PowerRequests()
 DUMMY_PASSWORD_HASH = hash_password("dummy-password-for-timing-only")
 cache_lock = threading.Lock()
 cache = {"at": 0, "data": None}
@@ -98,6 +101,8 @@ def task(user, action, resource, fn):
             status, message = "completed", (
                 result if isinstance(result, str) else "Completed successfully"
             )
+        except PowerInterrupted as error:
+            status, message = "interrupted", str(error)
         except Exception as error:
             logging.exception("Task %s failed for %s", action, resource)
             status, message = "failed", str(error)[:2000]
@@ -111,7 +116,7 @@ def task(user, action, resource, fn):
                 user["username"], action, resource, status + ": " + message, db=db
             )
 
-    executor.submit(execute)
+    (stop_executor if action == "vm.stop" else executor).submit(execute)
     return {"task_id": task_id}
 
 
@@ -577,11 +582,13 @@ def vm_action(vm_id: str, body: Action, user=Depends(require("operate"))):
         raise HTTPException(400, "Invalid power action")
     if body.action == "stop" and body.confirm_name != vm_name:
         raise HTTPException(400, "Type the VM name to confirm force stop")
+    cancelled = power_requests.register(vm_id, body.action)
+
     return task(
         user,
         "vm." + body.action,
         vm_id,
-        lambda: power_action(vm_id, body.action),
+        lambda: power_action(vm_id, body.action, cancelled),
     )
 
 
@@ -1036,14 +1043,16 @@ def apply_pending(vm_id):
         invalidate()
 
 
-def power_action(vm_id, action):
+def power_action(vm_id, action, cancelled=None):
     provider, vm_name = vm_ref(vm_id)
     driver = incus if provider == "incus" else libvirt
-    if action in ("start", "restart") and pending_hardware(vm_id):
-        if action == "restart":
+    power_requests.check(cancelled)
+    if action in ("shutdown", "restart"):
+        try:
             driver.action(vm_name, "shutdown")
-            deadline = time.monotonic() + 90
+            deadline = time.monotonic() + 60
             while True:
+                power_requests.check(cancelled)
                 status = (
                     incus.vm(vm_name)["status"].lower()
                     if provider == "incus"
@@ -1052,14 +1061,33 @@ def power_action(vm_id, action):
                 if status in ("stopped", "shut off"):
                     break
                 if time.monotonic() >= deadline:
-                    raise HypervisorError(
-                        "Guest did not shut down. Pending changes retained; shut down the guest and use Start to apply them."
-                    )
+                    raise HypervisorError("Guest shutdown timed out")
                 time.sleep(1)
-        apply_pending(vm_id)
-        driver.action(vm_name, "start")
-    else:
-        driver.action(vm_name, action)
+        except PowerInterrupted:
+            raise
+        except HypervisorError as error:
+            power_requests.check(cancelled)
+            raise HypervisorError(
+                "Guest did not shut down. Boot menus and unresponsive guests may ignore "
+                "Shutdown; use Force stop to power off immediately (unsaved data may be lost). "
+                "Pending hardware changes retained. " + str(error)
+            ) from error
+        if action == "shutdown":
+            return
+    with power_requests.transition(vm_id, cancelled):
+        if action in ("start", "restart"):
+            if pending_hardware(vm_id):
+                apply_pending(vm_id)
+            power_requests.check(cancelled)
+            driver.action(vm_name, "start")
+        elif action == "stop":
+            status = (
+                incus.vm(vm_name)["status"].lower()
+                if provider == "incus"
+                else libvirt.cli("domstate", vm_name).strip()
+            )
+            if status not in ("stopped", "shut off"):
+                driver.action(vm_name, "stop")
 
 
 @app.delete("/api/vms/{vm_id}/pending")
