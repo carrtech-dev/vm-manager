@@ -54,6 +54,9 @@ class Store:
                     action TEXT, resource TEXT, detail TEXT);
                 CREATE TABLE IF NOT EXISTS isos(id TEXT PRIMARY KEY, name TEXT UNIQUE, path TEXT,
                     size INTEGER, sha256 TEXT, created REAL);
+                CREATE TABLE IF NOT EXISTS pending_hardware(id TEXT PRIMARY KEY,
+                    vm_id TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL,
+                    device TEXT NOT NULL DEFAULT '', created REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS attempts(peer TEXT, at REAL);
             """)
             db.execute(
@@ -72,12 +75,15 @@ class Store:
         finally:
             db.close()
 
-    def audit(self, username, action, resource="", detail=""):
-        with self.db() as db:
-            db.execute(
-                "INSERT INTO audit(at,username,action,resource,detail) VALUES(?,?,?,?,?)",
-                (time.time(), username, action, resource, detail[:2000]),
-            )
+    def audit(self, username, action, resource="", detail="", db=None):
+        if db is None:
+            with self.db() as connection:
+                self.audit(username, action, resource, detail, db=connection)
+            return
+        db.execute(
+            "INSERT INTO audit(at,username,action,resource,detail) VALUES(?,?,?,?,?)",
+            (time.time(), username, action, resource, detail[:2000]),
+        )
 
     def bootstrap(self, directory: Path):
         with self.db() as db:

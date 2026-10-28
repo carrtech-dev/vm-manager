@@ -92,8 +92,10 @@ def task(user, action, resource, fn):
                 )
                 backup.write_text(original)
                 backup.chmod(0o600)
-            fn()
-            status, message = "completed", "Completed successfully"
+            result = fn()
+            status, message = "completed", (
+                result if isinstance(result, str) else "Completed successfully"
+            )
         except Exception as error:
             logging.exception("Task %s failed for %s", action, resource)
             status, message = "failed", str(error)[:2000]
@@ -103,7 +105,9 @@ def task(user, action, resource, fn):
                 "UPDATE tasks SET status=?,message=?,finished=? WHERE id=?",
                 (status, message, time.time(), task_id),
             )
-        store.audit(user["username"], action, resource, status + ": " + message)
+            store.audit(
+                user["username"], action, resource, status + ": " + message, db=db
+            )
 
     executor.submit(execute)
     return {"task_id": task_id}
@@ -190,9 +194,9 @@ def health():
     return {
         "status": "ok",
         "service": "vm-manager",
-        "revision": revision.read_text().strip()
-        if revision.exists()
-        else "development",
+        "revision": (
+            revision.read_text().strip() if revision.exists() else "development"
+        ),
     }
 
 
@@ -298,6 +302,16 @@ def inventory():
                 destination.extend(fn())
             except Exception as exc:
                 warnings.append(label + ": " + str(exc)[:300])
+        with store.db() as db:
+            pending_rows = db.execute(
+                "SELECT * FROM pending_hardware ORDER BY created,id"
+            ).fetchall()
+        for vm in vms:
+            vm["pending"] = [
+                dict(r, body=json.loads(r["body"]))
+                for r in pending_rows
+                if r["vm_id"] == vm["id"]
+            ]
         for net in nets:
             if net["provider"] == "libvirt":
                 net["used_by"] = [
@@ -308,6 +322,12 @@ def inventory():
                         d.get("network") == net["name"] for d in vm["devices"].values()
                     )
                 ]
+        for net in nets:
+            net.setdefault("used_by", []).extend(
+                "pending:" + r["vm_id"]
+                for r in pending_rows
+                if json.loads(r["body"]).get("network") == net["name"]
+            )
         for iso in local_isos():
             iso["used_by"] = [
                 vm["id"]
@@ -315,6 +335,12 @@ def inventory():
                 if any(d.get("source") == iso["path"] for d in vm["devices"].values())
             ]
             isos.append(iso)
+        for iso in isos:
+            iso.setdefault("used_by", []).extend(
+                "pending:" + r["vm_id"]
+                for r in pending_rows
+                if json.loads(r["body"]).get("iso_id") == iso["id"]
+            )
         memory = psutil.virtual_memory()
         disk = shutil.disk_usage(DATA)
         cache["data"] = {
@@ -441,26 +467,28 @@ class VMEdit(BaseModel):
 def edit_vm(vm_id: str, body: VMEdit, user=Depends(require("operate"))):
     provider, vm_name = vm_ref(vm_id)
 
-    def edit():
-        ensure_stopped(provider, vm_name)
-        if provider == "libvirt":
-            libvirt.edit_resources(vm_name, body.cpu, body.memory_gib, body.description)
-        else:
+    return hardware_task(user, vm_id, "resources", body)
 
-            def transform(vm):
-                vm["config"].update(
-                    {
-                        "limits.cpu": str(body.cpu),
-                        "limits.memory": str(int(body.memory_gib * 1024**3)),
-                        "security.secureboot": str(body.secure_boot).lower(),
-                        "boot.autostart": str(body.autostart).lower(),
-                    }
-                )
-                vm["description"] = body.description
 
-            incus.update(vm_name, transform)
+def hardware_edit_vm(vm_id, body):
+    provider, vm_name = vm_ref(vm_id)
+    ensure_stopped(provider, vm_name)
+    if provider == "libvirt":
+        libvirt.edit_resources(vm_name, body.cpu, body.memory_gib, body.description)
+    else:
 
-    return task(user, "vm.hardware.edit", vm_id, edit)
+        def transform(vm):
+            vm["config"].update(
+                {
+                    "limits.cpu": str(body.cpu),
+                    "limits.memory": str(int(body.memory_gib * 1024**3)),
+                    "security.secureboot": str(body.secure_boot).lower(),
+                    "boot.autostart": str(body.autostart).lower(),
+                }
+            )
+            vm["description"] = body.description
+
+        incus.update(vm_name, transform)
 
 
 class Action(BaseModel):
@@ -479,9 +507,7 @@ def vm_action(vm_id: str, body: Action, user=Depends(require("operate"))):
         user,
         "vm." + body.action,
         vm_id,
-        lambda: (incus if provider == "incus" else libvirt).action(
-            vm_name, body.action
-        ),
+        lambda: power_action(vm_id, body.action),
     )
 
 
@@ -502,6 +528,8 @@ def delete_vm(vm_id: str, body: Confirm, user=Depends(require("operate"))):
         else:
             # Existing VM storage is preserved; undefine never deletes a disk.
             libvirt.cli("undefine", vm_name, "--nvram")
+        with store.db() as db:
+            db.execute("DELETE FROM pending_hardware WHERE vm_id=?", (vm_id,))
 
     return task(user, "vm.delete", vm_id, delete)
 
@@ -516,63 +544,63 @@ def add_disk(vm_id: str, body: Disk, user=Depends(require("operate"))):
     provider, vm_name = vm_ref(vm_id)
     name(body.pool)
 
-    def add():
-        ensure_stopped(provider, vm_name)
-        disk_id = "disk" + uuid.uuid4().hex[:8]
-        if provider == "incus":
-            volume = "vmm-" + vm_name + "-" + disk_id
-            incus.request(
-                "POST",
-                f"/1.0/storage-pools/{quote(body.pool)}/volumes/custom",
-                {
-                    "name": volume,
-                    "type": "custom",
-                    "content_type": "block",
-                    "config": {"size": str(body.size_gib) + "GiB"},
-                },
-            )
-            try:
-                incus.update(
-                    vm_name,
-                    lambda vm: vm["devices"].update(
-                        {disk_id: {"type": "disk", "pool": body.pool, "source": volume}}
-                    ),
-                )
-            except Exception:
-                incus.request(
-                    "DELETE",
-                    f"/1.0/storage-pools/{quote(body.pool)}/volumes/custom/{volume}",
-                )
-                raise
-        else:
-            directory = DATA / "disks"
-            directory.mkdir(exist_ok=True)
-            path = directory / f"{vm_name}-{disk_id}.qcow2"
-            run(
-                "qemu-img", "create", "-f", "qcow2", str(path), str(body.size_gib) + "G"
-            )
-            root = libvirt.xml(vm_name)
-            used = {n.get("dev") for n in root.findall("./devices/disk/target")}
-            target = next(
-                ("vd" + chr(c) for c in range(98, 123) if "vd" + chr(c) not in used),
-                None,
-            )
-            if not target:
-                path.unlink()
-                raise HypervisorError("No available disk slots")
-            disk = ET.SubElement(
-                root.find("devices"), "disk", {"type": "file", "device": "disk"}
-            )
-            ET.SubElement(disk, "driver", {"name": "qemu", "type": "qcow2"})
-            ET.SubElement(disk, "source", {"file": str(path)})
-            ET.SubElement(disk, "target", {"dev": target, "bus": "virtio"})
-            try:
-                libvirt.define(root)
-            except Exception:
-                path.unlink(missing_ok=True)
-                raise
+    return hardware_task(user, vm_id, "disk.add", body)
 
-    return task(user, "vm.disk.add", vm_id, add)
+
+def hardware_add_disk(vm_id, body):
+    provider, vm_name = vm_ref(vm_id)
+    ensure_stopped(provider, vm_name)
+    disk_id = "disk" + uuid.uuid4().hex[:8]
+    if provider == "incus":
+        volume = "vmm-" + vm_name + "-" + disk_id
+        incus.request(
+            "POST",
+            f"/1.0/storage-pools/{quote(body.pool)}/volumes/custom",
+            {
+                "name": volume,
+                "type": "custom",
+                "content_type": "block",
+                "config": {"size": str(body.size_gib) + "GiB"},
+            },
+        )
+        try:
+            incus.update(
+                vm_name,
+                lambda vm: vm["devices"].update(
+                    {disk_id: {"type": "disk", "pool": body.pool, "source": volume}}
+                ),
+            )
+        except Exception:
+            incus.request(
+                "DELETE",
+                f"/1.0/storage-pools/{quote(body.pool)}/volumes/custom/{volume}",
+            )
+            raise
+    else:
+        directory = DATA / "disks"
+        directory.mkdir(exist_ok=True)
+        path = directory / f"{vm_name}-{disk_id}.qcow2"
+        run("qemu-img", "create", "-f", "qcow2", str(path), str(body.size_gib) + "G")
+        root = libvirt.xml(vm_name)
+        used = {n.get("dev") for n in root.findall("./devices/disk/target")}
+        target = next(
+            ("vd" + chr(c) for c in range(98, 123) if "vd" + chr(c) not in used),
+            None,
+        )
+        if not target:
+            path.unlink()
+            raise HypervisorError("No available disk slots")
+        disk = ET.SubElement(
+            root.find("devices"), "disk", {"type": "file", "device": "disk"}
+        )
+        ET.SubElement(disk, "driver", {"name": "qemu", "type": "qcow2"})
+        ET.SubElement(disk, "source", {"file": str(path)})
+        ET.SubElement(disk, "target", {"dev": target, "bus": "virtio"})
+        try:
+            libvirt.define(root)
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
 
 
 class DiskResize(BaseModel):
@@ -586,56 +614,52 @@ def resize_disk(
     provider, vm_name = vm_ref(vm_id)
     name(device)
 
-    def resize():
-        ensure_stopped(provider, vm_name)
-        if provider != "incus":
-            raise HypervisorError(
-                "Resizing existing libvirt disks is not supported; add a disk instead"
-            )
-        vm = incus.vm(vm_name)
-        d = vm.get("expanded_devices", vm["devices"]).get(device)
-        if not d or d.get("type") != "disk" or d.get("readonly") == "true":
-            raise HypervisorError("Writable disk not found")
-        if d.get("path") == "/":
-            volume = incus.get(
-                f"/1.0/storage-pools/{quote(d['pool'])}/volumes/virtual-machine/{quote(vm_name)}"
-            )
-            previous = bytes_size(
-                volume.get("config", {}).get("size", d.get("size", "0"))
-            )
-            if body.size_gib * 1024**3 <= previous:
-                raise HypervisorError(
-                    "Disks can only be expanded. Choose a larger size."
-                )
-            incus.update(
-                vm_name,
-                lambda v: v["devices"].update(
-                    {device: {**d, "size": str(body.size_gib) + "GiB"}}
-                ),
-            )
-        elif d.get("pool") and d.get("source"):
-            current = incus.get(
-                f"/1.0/storage-pools/{quote(d['pool'])}/volumes/custom/{quote(d['source'])}"
-            )
-            if body.size_gib * 1024**3 <= bytes_size(
-                current.get("config", {}).get("size", "0")
-            ):
-                raise HypervisorError(
-                    "Disks can only be expanded. Choose a larger size."
-                )
-            current["config"]["size"] = str(body.size_gib) + "GiB"
-            incus.request(
-                "PUT",
-                f"/1.0/storage-pools/{quote(d['pool'])}/volumes/custom/{quote(d['source'])}",
-                {
-                    "config": current["config"],
-                    "description": current.get("description", ""),
-                },
-            )
-        else:
-            raise HypervisorError("This disk cannot be resized from the app")
+    return hardware_task(user, vm_id, "disk.resize", body, device)
 
-    return task(user, "vm.disk.resize", vm_id, resize)
+
+def hardware_resize_disk(vm_id, body, device):
+    provider, vm_name = vm_ref(vm_id)
+    ensure_stopped(provider, vm_name)
+    if provider != "incus":
+        raise HypervisorError(
+            "Resizing existing libvirt disks is not supported; add a disk instead"
+        )
+    vm = incus.vm(vm_name)
+    d = vm.get("expanded_devices", vm["devices"]).get(device)
+    if not d or d.get("type") != "disk" or d.get("readonly") == "true":
+        raise HypervisorError("Writable disk not found")
+    if d.get("path") == "/":
+        volume = incus.get(
+            f"/1.0/storage-pools/{quote(d['pool'])}/volumes/virtual-machine/{quote(vm_name)}"
+        )
+        previous = bytes_size(volume.get("config", {}).get("size", d.get("size", "0")))
+        if body.size_gib * 1024**3 <= previous:
+            raise HypervisorError("Disks can only be expanded. Choose a larger size.")
+        incus.update(
+            vm_name,
+            lambda v: v["devices"].update(
+                {device: {**d, "size": str(body.size_gib) + "GiB"}}
+            ),
+        )
+    elif d.get("pool") and d.get("source"):
+        current = incus.get(
+            f"/1.0/storage-pools/{quote(d['pool'])}/volumes/custom/{quote(d['source'])}"
+        )
+        if body.size_gib * 1024**3 <= bytes_size(
+            current.get("config", {}).get("size", "0")
+        ):
+            raise HypervisorError("Disks can only be expanded. Choose a larger size.")
+        current["config"]["size"] = str(body.size_gib) + "GiB"
+        incus.request(
+            "PUT",
+            f"/1.0/storage-pools/{quote(d['pool'])}/volumes/custom/{quote(d['source'])}",
+            {
+                "config": current["config"],
+                "description": current.get("description", ""),
+            },
+        )
+    else:
+        raise HypervisorError("This disk cannot be resized from the app")
 
 
 @app.delete("/api/vms/{vm_id}/devices/{device}")
@@ -647,48 +671,48 @@ def detach_device(
     if body.confirm_name != device:
         raise HTTPException(400, "Type the device name to confirm detaching it")
 
-    def detach():
-        ensure_stopped(provider, vm_name)
-        if provider == "incus":
+    return hardware_task(user, vm_id, "device.detach", body, device)
 
-            def change(vm):
-                d = vm.get("expanded_devices", vm["devices"]).get(device)
-                if not d or d.get("path") == "/":
-                    raise HypervisorError("The root disk cannot be detached")
-                if d.get("type") not in ("disk", "nic"):
-                    raise HypervisorError(
-                        "Only disks and network adapters can be detached"
-                    )
-                if device in vm["devices"]:
-                    del vm["devices"][device]
-                else:
-                    vm["devices"][device] = {"type": "none"}
 
-            incus.update(vm_name, change)
-        else:
-            root = libvirt.xml(vm_name)
-            devices = root.find("devices")
-            if device.startswith("nic"):
-                selected = devices.findall("interface")[int(device[3:])]
+def hardware_detach_device(vm_id, body, device):
+    provider, vm_name = vm_ref(vm_id)
+    ensure_stopped(provider, vm_name)
+    if provider == "incus":
+
+        def change(vm):
+            d = vm.get("expanded_devices", vm["devices"]).get(device)
+            if not d or d.get("path") == "/":
+                raise HypervisorError("The root disk cannot be detached")
+            if d.get("type") not in ("disk", "nic"):
+                raise HypervisorError("Only disks and network adapters can be detached")
+            if device in vm["devices"]:
+                del vm["devices"][device]
             else:
-                selected = next(
-                    (
-                        d
-                        for d in devices.findall("disk")
-                        if d.find("target") is not None
-                        and d.find("target").get("dev") == device
-                    ),
-                    None,
-                )
-                if selected is None or selected is next(
-                    (d for d in devices.findall("disk") if d.get("device") == "disk"),
-                    None,
-                ):
-                    raise HypervisorError("Disk not found or is the root disk")
-            devices.remove(selected)
-            libvirt.define(root)
+                vm["devices"][device] = {"type": "none"}
 
-    return task(user, "vm.device.detach", vm_id, detach)
+        incus.update(vm_name, change)
+    else:
+        root = libvirt.xml(vm_name)
+        devices = root.find("devices")
+        if device.startswith("nic"):
+            selected = devices.findall("interface")[int(device[3:])]
+        else:
+            selected = next(
+                (
+                    d
+                    for d in devices.findall("disk")
+                    if d.find("target") is not None
+                    and d.find("target").get("dev") == device
+                ),
+                None,
+            )
+            if selected is None or selected is next(
+                (d for d in devices.findall("disk") if d.get("device") == "disk"),
+                None,
+            ):
+                raise HypervisorError("Disk not found or is the root disk")
+        devices.remove(selected)
+        libvirt.define(root)
 
 
 class NIC(BaseModel):
@@ -703,60 +727,56 @@ def edit_nic(vm_id: str, body: NIC, user=Depends(require("operate"))):
     if body.device:
         name(body.device)
 
-    def attach():
-        ensure_stopped(provider, vm_name)
-        networks = incus.networks()
-        if body.network not in [n["name"] for n in networks]:
-            raise HypervisorError("Incus network not found")
-        if provider == "incus":
+    return hardware_task(user, vm_id, "nic", body)
 
-            def change(vm):
-                key = body.device or "nic" + uuid.uuid4().hex[:8]
-                if (
-                    body.device
-                    and vm.get("expanded_devices", vm["devices"])
-                    .get(key, {})
-                    .get("type")
-                    != "nic"
-                ):
-                    raise HypervisorError("Network adapter not found")
-                if any(
-                    k != key
-                    and d.get("type") == "nic"
-                    and d.get("network") == body.network
-                    for k, d in vm.get("expanded_devices", vm["devices"]).items()
-                ):
-                    raise HypervisorError(
-                        "This VM already has an adapter on that network. Choose a different network or edit the existing adapter."
-                    )
-                vm["devices"][key] = {
-                    "type": "nic",
-                    "network": body.network,
-                    "name": key,
-                }
 
-            incus.update(vm_name, change)
-        else:
-            root = libvirt.xml(vm_name)
-            nics = root.findall("./devices/interface")
-            if body.device:
-                index = int(body.device.removeprefix("nic"))
-                if index >= len(nics):
-                    raise HypervisorError("Network adapter not found")
-                nic = nics[index]
-                for child in list(nic):
-                    if child.tag in ("source", "virtualport", "filterref"):
-                        nic.remove(child)
-                nic.set("type", "bridge")
-            else:
-                nic = ET.SubElement(
-                    root.find("devices"), "interface", {"type": "bridge"}
+def hardware_edit_nic(vm_id, body):
+    provider, vm_name = vm_ref(vm_id)
+    ensure_stopped(provider, vm_name)
+    networks = incus.networks()
+    if body.network not in [n["name"] for n in networks]:
+        raise HypervisorError("Incus network not found")
+    if provider == "incus":
+
+        def change(vm):
+            key = body.device or "nic" + uuid.uuid4().hex[:8]
+            if (
+                body.device
+                and vm.get("expanded_devices", vm["devices"]).get(key, {}).get("type")
+                != "nic"
+            ):
+                raise HypervisorError("Network adapter not found")
+            if any(
+                k != key and d.get("type") == "nic" and d.get("network") == body.network
+                for k, d in vm.get("expanded_devices", vm["devices"]).items()
+            ):
+                raise HypervisorError(
+                    "This VM already has an adapter on that network. Choose a different network or edit the existing adapter."
                 )
-                ET.SubElement(nic, "model", {"type": "virtio"})
-            ET.SubElement(nic, "source", {"bridge": body.network})
-            libvirt.define(root)
+            vm["devices"][key] = {
+                "type": "nic",
+                "network": body.network,
+                "name": key,
+            }
 
-    return task(user, "vm.network.attach", vm_id, attach)
+        incus.update(vm_name, change)
+    else:
+        root = libvirt.xml(vm_name)
+        nics = root.findall("./devices/interface")
+        if body.device:
+            index = int(body.device.removeprefix("nic"))
+            if index >= len(nics):
+                raise HypervisorError("Network adapter not found")
+            nic = nics[index]
+            for child in list(nic):
+                if child.tag in ("source", "virtualport", "filterref"):
+                    nic.remove(child)
+            nic.set("type", "bridge")
+        else:
+            nic = ET.SubElement(root.find("devices"), "interface", {"type": "bridge"})
+            ET.SubElement(nic, "model", {"type": "virtio"})
+        ET.SubElement(nic, "source", {"bridge": body.network})
+        libvirt.define(root)
 
 
 class CDROM(BaseModel):
@@ -767,86 +787,364 @@ class CDROM(BaseModel):
 @app.put("/api/vms/{vm_id}/cdrom")
 def cdrom(vm_id: str, body: CDROM, user=Depends(require("operate"))):
     provider, vm_name = vm_ref(vm_id)
+    get_iso(body.iso_id)
+
+    return hardware_task(user, vm_id, "cdrom", body)
+
+
+def hardware_cdrom(vm_id, body):
+    provider, vm_name = vm_ref(vm_id)
     iso = get_iso(body.iso_id)
+    ensure_stopped(provider, vm_name)
+    if provider == "incus":
 
-    def mount():
-        ensure_stopped(provider, vm_name)
-        if provider == "incus":
-
-            def change(vm):
-                # Eject all CD-ROMs visible to this VM, including inherited ISO devices.
-                for key, device in list(
-                    vm.get("expanded_devices", vm["devices"]).items()
+        def change(vm):
+            # Eject all CD-ROMs visible to this VM, including inherited ISO devices.
+            for key, device in list(vm.get("expanded_devices", vm["devices"]).items()):
+                if device.get("type") == "disk" and (
+                    key == "cdrom"
+                    or device.get("source", "").lower().endswith(".iso")
+                    or any(
+                        i.get("pool") == device.get("pool")
+                        and i["name"] == device.get("source")
+                        for i in inventory()["isos"]
+                        if i.get("source") == "incus"
+                    )
                 ):
-                    if device.get("type") == "disk" and (
-                        key == "cdrom"
-                        or device.get("source", "").lower().endswith(".iso")
-                        or any(
-                            i.get("pool") == device.get("pool")
-                            and i["name"] == device.get("source")
-                            for i in inventory()["isos"]
-                            if i.get("source") == "incus"
-                        )
-                    ):
-                        if key in vm["devices"]:
-                            del vm["devices"][key]
-                        else:
-                            vm["devices"][key] = {"type": "none"}
-                if iso:
-                    vm["devices"]["cdrom"] = incus.cdrom(iso, body.boot)
-                    if body.boot:
-                        priorities = [
-                            int(d.get("boot.priority", "0"))
-                            for d in vm.get("expanded_devices", vm["devices"]).values()
-                            if d.get("boot.priority", "0").lstrip("-").isdigit()
-                        ]
-                        vm["devices"]["cdrom"]["boot.priority"] = str(
-                            max([0, *priorities]) + 10
-                        )
-
-            incus.update(vm_name, change)
-        else:
-            if iso and iso.get("source") != "upload":
-                raise HypervisorError(
-                    "Upload the ISO to the library to attach it to a libvirt VM"
-                )
-            root = libvirt.xml(vm_name)
-            devices = root.find("devices")
-            for old in list(devices.findall("disk")):
-                if old.get("device") == "cdrom":
-                    devices.remove(old)
-            # Use OS boot ordering; remove per-device boot order to avoid mixed schema modes.
-            for parent in devices.findall("disk") + devices.findall("interface"):
-                for boot in list(parent.findall("boot")):
-                    parent.remove(boot)
-            os_node = root.find("os")
-            for boot in list(os_node.findall("boot")):
-                os_node.remove(boot)
+                    if key in vm["devices"]:
+                        del vm["devices"][key]
+                    else:
+                        vm["devices"][key] = {"type": "none"}
             if iso:
-                disk = ET.SubElement(
-                    devices, "disk", {"type": "file", "device": "cdrom"}
-                )
-                ET.SubElement(disk, "driver", {"name": "qemu", "type": "raw"})
-                ET.SubElement(disk, "source", {"file": iso["path"]})
-                used = {n.get("dev") for n in devices.findall("disk/target")}
-                target = next(
-                    (
-                        "sd" + chr(c)
-                        for c in range(97, 123)
-                        if "sd" + chr(c) not in used
-                    ),
-                    None,
-                )
-                if not target:
-                    raise HypervisorError("No available CD-ROM slots")
-                ET.SubElement(disk, "target", {"dev": target, "bus": "sata"})
-                ET.SubElement(disk, "readonly")
+                vm["devices"]["cdrom"] = incus.cdrom(iso, body.boot)
                 if body.boot:
-                    ET.SubElement(os_node, "boot", {"dev": "cdrom"})
-            ET.SubElement(os_node, "boot", {"dev": "hd"})
-            libvirt.define(root)
+                    priorities = [
+                        int(d.get("boot.priority", "0"))
+                        for d in vm.get("expanded_devices", vm["devices"]).values()
+                        if d.get("boot.priority", "0").lstrip("-").isdigit()
+                    ]
+                    vm["devices"]["cdrom"]["boot.priority"] = str(
+                        max([0, *priorities]) + 10
+                    )
 
-    return task(user, "vm.cdrom.mount" if iso else "vm.cdrom.eject", vm_id, mount)
+        incus.update(vm_name, change)
+    else:
+        if iso and iso.get("source") != "upload":
+            raise HypervisorError(
+                "Upload the ISO to the library to attach it to a libvirt VM"
+            )
+        root = libvirt.xml(vm_name)
+        devices = root.find("devices")
+        for old in list(devices.findall("disk")):
+            if old.get("device") == "cdrom":
+                devices.remove(old)
+        # Use OS boot ordering; remove per-device boot order to avoid mixed schema modes.
+        for parent in devices.findall("disk") + devices.findall("interface"):
+            for boot in list(parent.findall("boot")):
+                parent.remove(boot)
+        os_node = root.find("os")
+        for boot in list(os_node.findall("boot")):
+            os_node.remove(boot)
+        if iso:
+            disk = ET.SubElement(devices, "disk", {"type": "file", "device": "cdrom"})
+            ET.SubElement(disk, "driver", {"name": "qemu", "type": "raw"})
+            ET.SubElement(disk, "source", {"file": iso["path"]})
+            used = {n.get("dev") for n in devices.findall("disk/target")}
+            target = next(
+                ("sd" + chr(c) for c in range(97, 123) if "sd" + chr(c) not in used),
+                None,
+            )
+            if not target:
+                raise HypervisorError("No available CD-ROM slots")
+            ET.SubElement(disk, "target", {"dev": target, "bus": "sata"})
+            ET.SubElement(disk, "readonly")
+            if body.boot:
+                ET.SubElement(os_node, "boot", {"dev": "cdrom"})
+        ET.SubElement(os_node, "boot", {"dev": "hd"})
+        libvirt.define(root)
+
+
+# Pending operations are application state, never applied to a running guest.
+def pending_hardware(vm_id):
+    with store.db() as db:
+        return [
+            dict(r)
+            for r in db.execute(
+                "SELECT * FROM pending_hardware WHERE vm_id=? ORDER BY created,id",
+                (vm_id,),
+            )
+        ]
+
+
+def hardware_task(user, vm_id, kind, body, device=""):
+    def save_or_apply():
+        provider, vm_name = vm_ref(vm_id)
+        status = (
+            incus.vm(vm_name)["status"].lower()
+            if provider == "incus"
+            else libvirt.cli("domstate", vm_name).strip()
+        )
+        if status in ("stopped", "shut off"):
+            apply_pending(vm_id)
+            apply_hardware(vm_id, kind, body.model_dump(), device)
+            return
+        if status != "running":
+            raise HypervisorError(
+                "Wait until the VM is running or stopped before changing hardware"
+            )
+        # Repeated edits to the same resource replace its planned value.
+        with store.db() as db:
+            if (
+                kind == "resources"
+                or kind == "cdrom"
+                or kind in ("disk.resize", "device.detach")
+                or (kind == "nic" and body.device)
+            ):
+                target = body.device if kind == "nic" else device
+                for row in db.execute(
+                    "SELECT * FROM pending_hardware WHERE vm_id=? AND kind=?",
+                    (vm_id, kind),
+                ).fetchall():
+                    previous_target = (
+                        json.loads(row["body"]).get("device", "")
+                        if kind == "nic"
+                        else row["device"]
+                    )
+                    if previous_target == target:
+                        db.execute(
+                            "DELETE FROM pending_hardware WHERE id=?", (row["id"],)
+                        )
+            db.execute(
+                "INSERT INTO pending_hardware VALUES(?,?,?,?,?,?)",
+                (
+                    uuid.uuid4().hex,
+                    vm_id,
+                    kind,
+                    json.dumps(body.model_dump()),
+                    device,
+                    time.time(),
+                ),
+            )
+
+        return "Hardware changes saved for Restart in VM Manager or the next Start."
+
+    return task(user, "vm.hardware." + kind, vm_id, save_or_apply)
+
+
+def apply_hardware(vm_id, kind, body, device):
+    handlers = {
+        "resources": (hardware_edit_vm, VMEdit),
+        "disk.add": (hardware_add_disk, Disk),
+        "disk.resize": (hardware_resize_disk, DiskResize),
+        "device.detach": (hardware_detach_device, Confirm),
+        "nic": (hardware_edit_nic, NIC),
+        "cdrom": (hardware_cdrom, CDROM),
+    }
+    handler, model = handlers[kind]
+    args = (vm_id, model(**body))
+    (
+        handler(*args, device)
+        if kind in ("disk.resize", "device.detach")
+        else handler(*args)
+    )
+
+
+def apply_pending(vm_id):
+    provider, vm_name = vm_ref(vm_id)
+    ensure_stopped(provider, vm_name)
+    for row in pending_hardware(vm_id):
+        # Delete only successfully applied operations. A failed operation and all
+        # following changes remain recoverable; the VM is not started on failure.
+        apply_hardware(vm_id, row["kind"], json.loads(row["body"]), row["device"])
+        with store.db() as db:
+            db.execute("DELETE FROM pending_hardware WHERE id=?", (row["id"],))
+        invalidate()
+
+
+def power_action(vm_id, action):
+    provider, vm_name = vm_ref(vm_id)
+    driver = incus if provider == "incus" else libvirt
+    if action in ("start", "restart") and pending_hardware(vm_id):
+        if action == "restart":
+            driver.action(vm_name, "shutdown")
+            deadline = time.monotonic() + 90
+            while True:
+                status = (
+                    incus.vm(vm_name)["status"].lower()
+                    if provider == "incus"
+                    else libvirt.cli("domstate", vm_name).strip()
+                )
+                if status in ("stopped", "shut off"):
+                    break
+                if time.monotonic() >= deadline:
+                    raise HypervisorError(
+                        "Guest did not shut down. Pending changes retained; shut down the guest and use Start to apply them."
+                    )
+                time.sleep(1)
+        apply_pending(vm_id)
+        driver.action(vm_name, "start")
+    else:
+        driver.action(vm_name, action)
+
+
+@app.delete("/api/vms/{vm_id}/pending")
+def discard_pending(vm_id: str, user=Depends(require("operate"))):
+    vm_ref(vm_id)
+
+    def discard():
+        with store.db() as db:
+            db.execute("DELETE FROM pending_hardware WHERE vm_id=?", (vm_id,))
+
+    return task(user, "vm.hardware.discard", vm_id, discard)
+
+
+def pending_reference(field, value):
+    with store.db() as db:
+        return any(
+            json.loads(r["body"]).get(field) == value
+            for r in db.execute("SELECT body FROM pending_hardware")
+        )
+
+
+metric_samples = {}
+metric_lock = threading.Lock()
+
+
+def cpu_percentage(vm_id, counter, identity, cpus, now):
+    with metric_lock:
+        previous = metric_samples.get(vm_id)
+        metric_samples[vm_id] = (counter, identity, now)
+        # Bound state even if externally created/deleted VMs are sampled.
+        for key, sample in list(metric_samples.items()):
+            if now - sample[2] > 3600:
+                del metric_samples[key]
+    if (
+        previous
+        and previous[1] == identity
+        and counter >= previous[0]
+        and now > previous[2]
+    ):
+        return round(
+            min(
+                100,
+                max(
+                    0,
+                    (counter - previous[0]) / (now - previous[2]) / max(cpus, 1) * 100,
+                ),
+            ),
+            1,
+        )
+    return None
+
+
+@app.get("/api/vms/{vm_id}/metrics")
+def vm_metrics(vm_id: str, user=Depends(require())):
+    provider, vm_name = vm_ref(vm_id)
+    memory_used, memory_source, cpu_source, counter, identity = (
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    if provider == "incus":
+        vm = incus.vm(vm_name)
+        state = incus.get("/1.0/instances/" + quote(vm_name) + "/state")
+        running = state.get("status", "").lower() == "running"
+        config = vm.get("expanded_config", vm.get("config", {}))
+        cpu_config = config.get("limits.cpu", "1")
+        cpus = int(cpu_config) if cpu_config.isdigit() else cpu_count(cpu_config)
+        memory_total = bytes_size(config.get("limits.memory", "0"))
+        if running:
+            memory = state.get("memory") or {}
+            if memory.get("total", 0) > 0:
+                memory_used = memory.get("usage")
+                memory_total = memory["total"]
+                memory_source = "Guest memory used"
+            # State counters can be zero when no guest agent is installed (e.g. an ISO).
+            try:
+                process = psutil.Process(state["pid"])
+                times = process.cpu_times()
+                counter = times.user + times.system
+                identity = process.create_time()
+                cpu_source = "Host VM process"
+                if memory_used is None:
+                    memory_used = process.memory_info().rss
+                    memory_source = "Host VM resident memory"
+            except (psutil.Error, KeyError):
+                cpu = state.get("cpu") or {}
+                if cpu.get("usage", 0) > 0:
+                    counter = cpu["usage"] / 1e9
+                    identity = state.get("started_at")
+                    cpu_source = "Guest CPU time"
+    else:
+        stats = libvirt.cli(
+            "domstats",
+            vm_name,
+            "--cpu-total",
+            "--balloon",
+            "--vcpu",
+            "--state",
+            "--raw",
+        )
+        values = dict(
+            line.strip().split("=", 1) for line in stats.splitlines() if "=" in line
+        )
+        running = values.get("state.state") == "1"
+        cpus = int(values.get("vcpu.current", "1"))
+        memory_total = int(values.get("balloon.current", "0")) * 1024
+        if running:
+            counter = int(values["cpu.time"]) / 1e9 if "cpu.time" in values else None
+            identity = "libvirt"
+            cpu_source = "Host VM CPU time"
+            if "balloon.available" in values and "balloon.unused" in values:
+                memory_used = (
+                    max(
+                        0,
+                        int(values["balloon.available"])
+                        - int(values["balloon.unused"]),
+                    )
+                    * 1024
+                )
+                memory_source = "Guest memory used"
+            elif "balloon.rss" in values:
+                memory_used = int(values["balloon.rss"]) * 1024
+                memory_source = "Host VM resident memory"
+    now = time.monotonic()
+    if not running:
+        with metric_lock:
+            metric_samples.pop(vm_id, None)
+    cpu_percent = (
+        cpu_percentage(vm_id, counter, identity, cpus, now)
+        if running and counter is not None
+        else None
+    )
+    return {
+        "vm_id": vm_id,
+        "running": running,
+        "cpu_percent": cpu_percent,
+        "cpu_count": cpus,
+        "cpu_source": cpu_source,
+        "memory_used": memory_used,
+        "memory_total": memory_total,
+        "memory_source": memory_source,
+        "updated": time.time(),
+    }
+
+
+def cpu_count(value):
+    if value.startswith("sockets="):
+        count = 1
+        for part in value.split(","):
+            count *= int(part.split("=")[1])
+        return count
+    try:
+        return sum(
+            int(part.split("-")[-1]) - int(part.split("-")[0]) + 1
+            for part in value.split(",")
+        )
+    except ValueError:
+        return psutil.cpu_count() or 1
 
 
 class Network(BaseModel):
@@ -955,7 +1253,7 @@ def edit_network(net_name: str, body: Network, user=Depends(require("operate")))
 
     def edit():
         net = incus.get("/1.0/networks/" + quote(net_name))
-        if net.get("used_by"):
+        if net.get("used_by") or pending_reference("network", net_name):
             raise HypervisorError(
                 "Detach VMs and profiles before changing this network"
             )
@@ -978,6 +1276,10 @@ def delete_network(net_name: str, body: Confirm, user=Depends(require("operate")
         raise HTTPException(400, "Type the network name to confirm deletion")
 
     def delete():
+        if pending_reference("network", net_name):
+            raise HypervisorError(
+                "Network is referenced by pending VM hardware changes"
+            )
         if incus.get("/1.0/networks/" + quote(net_name)).get("used_by"):
             raise HypervisorError(
                 "Network is in use. Detach its VMs and profiles first."
@@ -1057,6 +1359,8 @@ def delete_iso(iso_id: str, body: Confirm, user=Depends(require("operate"))):
         raise HTTPException(400, "Type the ISO name to confirm deletion")
 
     def delete():
+        if pending_reference("iso_id", iso_id):
+            raise HypervisorError("ISO is referenced by pending VM hardware changes")
         invalidate()
         inv = inventory()
         if inv["warnings"]:
@@ -1190,6 +1494,7 @@ def audit(user=Depends(require("users"))):
         ]
 
 
+CONSOLE_AUTH_INTERVAL = 20
 console_groups = {}
 console_lock = asyncio.Lock()
 
@@ -1215,6 +1520,8 @@ async def incus_console_group(user, vm_name):
                     incus.socket,
                     uri=base + "secret=" + fds["control"] + suffix,
                     max_size=None,
+                    ping_interval=20,
+                    ping_timeout=20,
                 )
             except Exception:
                 await asyncio.to_thread(
@@ -1276,7 +1583,13 @@ async def console(ws: WebSocket, vm_id: str):
         if provider == "incus":
             # All SPICE channels share one Incus operation and control connection.
             key, group = await incus_console_group(user, vm_name)
-            remote = await unix_connect(incus.socket, uri=group["uri"], max_size=None)
+            remote = await unix_connect(
+                incus.socket,
+                uri=group["uri"],
+                max_size=None,
+                ping_interval=20,
+                ping_timeout=20,
+            )
         else:
             display = await asyncio.to_thread(libvirt.cli, "domdisplay", vm_name)
             url = urlparse(display)
@@ -1290,16 +1603,18 @@ async def console(ws: WebSocket, vm_id: str):
                 url.hostname, 5900 + (url.port or 0)
             )
         await ws.accept(
-            subprotocol="binary"
-            if "binary" in ws.headers.get("sec-websocket-protocol", "")
-            else None
+            subprotocol=(
+                "binary"
+                if "binary" in ws.headers.get("sec-websocket-protocol", "")
+                else None
+            )
         )
         store.audit(user["username"], "console.open", vm_id)
 
         async def browser_to_vm():
             while True:
                 session(ws)
-                data = await asyncio.wait_for(ws.receive_bytes(), timeout=900)
+                data = await ws.receive_bytes()
                 if remote:
                     await remote.send(data)
                 else:
@@ -1314,7 +1629,15 @@ async def console(ws: WebSocket, vm_id: str):
                     return
                 await ws.send_bytes(chunk)
 
+        async def validate_session():
+            while True:
+                await asyncio.sleep(CONSOLE_AUTH_INTERVAL)
+                current = session(ws)
+                if "operate" not in ROLES.get(current["role"], set()):
+                    raise HTTPException(403, "Console permission revoked")
+
         pending = [
+            asyncio.create_task(validate_session()),
             asyncio.create_task(browser_to_vm()),
             asyncio.create_task(vm_to_browser()),
         ]
@@ -1337,6 +1660,8 @@ async def console(ws: WebSocket, vm_id: str):
     finally:
         for future in pending:
             future.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         if remote:
             await remote.close()
         if writer:

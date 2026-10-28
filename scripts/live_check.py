@@ -133,6 +133,33 @@ try:
         v for v in request("GET", "/api/inventory")["vms"] if v["name"] == vm_name
     )
     assert vm["status"] == "running", vm
+    # Real running-VM edits must remain deferred until a full stop/start.
+    request(
+        "PUT",
+        "/api/vms/incus:" + vm_name,
+        {"cpu": 3, "memory_gib": 2.5, "description": "Pending acceptance edit"},
+    )
+    request("PUT", "/api/vms/incus:" + vm_name + "/disks/root", {"size_gib": 6})
+    request(
+        "POST",
+        "/api/vms/incus:" + vm_name + "/disks",
+        {"pool": "hdd-pool", "size_gib": 1},
+    )
+    request(
+        "PUT", "/api/vms/incus:" + vm_name + "/cdrom", {"iso_id": "", "boot": False}
+    )
+    assert incus.vm(vm_name)["config"]["limits.cpu"] == "2"
+    invalidate()
+    planned = next(
+        v for v in request("GET", "/api/inventory")["vms"] if v["name"] == vm_name
+    )
+    assert len(planned["pending"]) == 4, planned
+    metrics = request("GET", "/api/vms/incus:" + vm_name + "/metrics")
+    assert metrics["running"] and metrics["memory_used"] is not None, metrics
+    time.sleep(1)
+    metrics = request("GET", "/api/vms/incus:" + vm_name + "/metrics")
+    assert metrics["cpu_percent"] is not None, metrics
+    print("Live metrics and deferred hardware verified", flush=True)
     with client.websocket_connect(
         "/api/console/incus:" + vm_name + "?csrf=" + headers["X-CSRF-Token"],
         headers={"Origin": "http://testserver"},
@@ -148,6 +175,26 @@ try:
         data = ws.receive_bytes()
         assert data[:4] == b"REDQ", data[:20]
         print("SPICE console handshake verified", flush=True)
+    request(
+        "POST",
+        "/api/vms/incus:" + vm_name + "/action",
+        {"action": "stop", "confirm_name": vm_name},
+    )
+    request("POST", "/api/vms/incus:" + vm_name + "/action", {"action": "start"})
+    applied = incus.vm(vm_name)
+    assert applied["config"]["limits.cpu"] == "3", applied
+    assert applied["config"]["limits.memory"] == str(int(2.5 * 1024**3)), applied
+    assert applied["devices"]["root"]["size"] == "6GiB", applied
+    assert "cdrom" not in applied["devices"], applied
+    invalidate()
+    applied_view = next(
+        v for v in request("GET", "/api/inventory")["vms"] if v["name"] == vm_name
+    )
+    assert not applied_view["pending"], applied_view
+    print(
+        "Pending resources, root expansion, disk addition and ISO eject applied on Start",
+        flush=True,
+    )
     request(
         "POST",
         "/api/vms/incus:" + vm_name + "/action",

@@ -42,6 +42,7 @@ let busy = false,
   selectedNetwork = null,
   renderedPath = "";
 const seenTasks = new Map();
+let vmMetrics = null, metricsBusy = false;
 const badge = (text, style = text) =>
   `<span class="badge ${esc(style)}"><span aria-hidden="true">●</span>${esc(text)}</span>`;
 const btn = (
@@ -96,7 +97,10 @@ function navigate() {
     state.vm = decodeURIComponent(parts[1] || "");
     state.tab = parts[2] || "summary";
   }
-  if (state.user) render();
+  if (state.user) {
+    render();
+    refreshVMMetrics();
+  }
 }
 function renderLogin(message = "") {
   $("#app").innerHTML =
@@ -316,7 +320,7 @@ function renderVM() {
     `<span class="title-status">${esc(v.name)} ${badge(v.status)}</span>`,
     `${v.provider === "incus" ? "Incus" : "libvirt"} virtual machine${v.managed ? " · Created in VM Manager" : ""}`,
     can()
-      ? `${btn("Console", "console", v.id, "secondary", !running)}${btn(running ? "Shutdown" : "Start", running ? "shutdown" : "start", v.id, "primary", !["running", "stopped"].includes(v.status))}${btn("Restart", "restart", v.id, "secondary", !running)}${btn("Force stop", "force-stop", v.id, "danger", !running)}`
+      ? `${btn("Console", "console", v.id, "secondary", !running)}${btn(running ? "Shutdown" : "Start", running ? "shutdown" : "start", v.id, "primary", !["running", "stopped"].includes(v.status))}${btn(v.pending?.length ? "Restart & apply" : "Restart", "restart", v.id, "secondary", !running)}${btn("Force stop", "force-stop", v.id, "danger", !running)}`
       : "",
   );
   html += `<div class="tabs">${["summary", "hardware", "console", "options"].map((t) => `<button class="tab ${state.tab === t ? "active" : ""}" data-action="vm-tab" data-id="${t}" ${t === "console" && !can() ? "disabled" : ""}>${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</div>`;
@@ -335,7 +339,7 @@ function renderVM() {
   if (state.tab === "summary") {
     return (
       html +
-      `<div class="resource-cards">${stat("Power state", esc(v.status), "Current hypervisor state", running ? 100 : 0)}${stat("Processors", esc(v.cpu), "Allocated virtual CPUs", 0)}${stat("Memory", size(v.memory), "Configured memory", 0)}${stat("Network adapters", Object.values(v.devices).filter((d) => d.type === "nic").length, "Connected virtual interfaces", 0)}</div><div class="overview-columns">${panel(
+      `<div id="vm-live-metrics" class="resource-cards">${renderVMMetrics(v)}</div><div class="overview-columns">${panel(
         "VM information",
         properties([
           ["Name", esc(v.name)],
@@ -347,7 +351,7 @@ function renderVM() {
           ],
           ["Description", esc(v.description || "No description")],
         ]),
-      )}${panel("Quick actions", `<div class="storage-body"><p class="muted">Configure disks, network adapters and installation media from the Hardware tab.</p><div class="actions" style="margin-top:16px">${btn("View hardware", "vm-tab", "hardware")}${can() ? btn("Edit resources", "edit-vm", v.id, "secondary", editDisabled) : ""}</div></div>`)}</div>`
+      )}${panel("Quick actions", `<div class="storage-body"><p class="muted">Configure disks, network adapters and installation media from the Hardware tab.</p><div class="actions" style="margin-top:16px">${btn("View hardware", "vm-tab", "hardware")}${can() ? btn("Edit resources", "edit-vm", v.id, "secondary") : ""}</div></div>`)}</div>`
     );
   }
   if (state.tab === "options") {
@@ -381,25 +385,25 @@ function renderVM() {
         ]),
       ) +
       (can()
-        ? `<div class="actions">${btn("Edit resources and options", "edit-vm", v.id, "secondary", editDisabled)}${btn("Delete virtual machine", "delete-vm", v.id, "danger", editDisabled)}</div><div class="hint" style="margin-top:18px">${v.provider === "incus" ? "Deleting this VM removes its root disk and attached extra disks created by this app. Detached volumes remain stored." : "Deleting this existing libvirt VM removes its definition and retains its disk files."} A stopped VM and exact name confirmation are required.</div>`
+        ? `<div class="actions">${btn("Edit resources and options", "edit-vm", v.id, "secondary")}${btn("Delete virtual machine", "delete-vm", v.id, "danger", editDisabled)}</div><div class="hint" style="margin-top:18px">${v.provider === "incus" ? "Deleting this VM removes its root disk and attached extra disks created by this app. Detached volumes remain stored." : "Deleting this existing libvirt VM removes its definition and retains its disk files."} A stopped VM and exact name confirmation are required.</div>`
         : "")
     );
   }
   html += running
-    ? '<div class="hint">Shut down this VM before changing hardware or installation media.</div>'
+    ? '<div class="hint">Changes are saved for Restart in VM Manager, or the next Start after shutdown. A reboot inside the guest does not apply pending hardware.</div>'
     : "";
   if (can())
-    html += `<div class="toolbar">${btn("Edit CPU / memory", "edit-vm", v.id, "secondary", editDisabled)}${btn("+ Add disk", "add-disk", v.id, "secondary", editDisabled)}${btn("+ Network adapter", "add-nic", v.id, "secondary", editDisabled)}${btn("Mount / eject ISO", "cdrom", v.id, "secondary", editDisabled)}</div>`;
+    html += `<div class="toolbar">${btn("Edit CPU / memory", "edit-vm", v.id, "secondary")}${btn("+ Add disk", "add-disk", v.id, "secondary")}${btn("+ Network adapter", "add-nic", v.id, "secondary")}${btn("Mount / eject ISO", "cdrom", v.id, "secondary")}</div>`;
   const hardware = [
     [
       "Processors",
       `${esc(v.cpu)} vCPU`,
-      can() ? smallAction("Edit", "edit-vm", v.id, editDisabled) : "",
+      can() ? smallAction("Edit", "edit-vm", v.id) : "",
     ],
     [
       "Memory",
       size(v.memory),
-      can() ? smallAction("Edit", "edit-vm", v.id, editDisabled) : "",
+      can() ? smallAction("Edit", "edit-vm", v.id) : "",
     ],
     [
       "Firmware",
@@ -431,23 +435,23 @@ function renderVM() {
           "Edit",
           "edit-nic",
           v.id + "|" + key,
-          editDisabled,
+          false,
         );
       else if (isISO)
-        actions += smallAction("Change / eject", "cdrom", v.id, editDisabled);
+        actions += smallAction("Change / eject", "cdrom", v.id);
       else if (v.provider === "incus" && d.readonly !== "true")
         actions += smallAction(
           "Expand",
           "resize-disk",
           v.id + "|" + key,
-          editDisabled,
+          false,
         );
       if (!isRoot && !isISO)
         actions += smallAction(
           "Detach",
           "detach-device",
           v.id + "|" + key,
-          editDisabled,
+          false,
         );
     }
     hardware.push([
@@ -458,6 +462,7 @@ function renderVM() {
   }
   return (
     html +
+    renderPending(v) +
     panel(
       "Hardware",
       hardware
@@ -469,6 +474,55 @@ function renderVM() {
     ) +
     `<p class="subtle" style="font-size:11px">Disk expansion increases the virtual device. Extend partitions and filesystems inside the guest afterwards.</p>`
   );
+}
+function renderVMMetrics(v) {
+  const m = vmMetrics?.vm_id === v.id ? vmMetrics : null;
+  const fresh = m && Date.now() / 1000 - m.updated < 20;
+  const cpu = fresh && m.cpu_percent != null ? `${m.cpu_percent.toFixed(1)}%` : "—";
+  const memory = fresh && m.memory_used != null ? size(m.memory_used) : "—";
+  const cpuLabel = !fresh ? "Waiting for live sample" : !m.running ? "VM stopped" : m.cpu_percent == null ? "Sampling CPU usage…" : `${m.cpu_source} · 100% = all allocated vCPUs`;
+  const memLabel = !fresh ? "Waiting for live sample" : !m.running ? "VM stopped" : m.memory_source || "Guest memory unavailable";
+  return stat("CPU usage", cpu, `${esc(v.cpu)} vCPU allocated · ${esc(cpuLabel)}`, fresh ? m.cpu_percent || 0 : 0)
+    + stat("Memory usage", memory, `${size(v.memory)} configured · ${esc(memLabel)}`, fresh && m.memory_total ? Math.min(100, (m.memory_used || 0) / m.memory_total * 100) : 0)
+    + stat("Power state", esc(v.status), "Live usage refreshes every 5 seconds", v.status === "running" ? 100 : 0)
+    + stat("Network adapters", Object.values(v.devices).filter(d => d.type === "nic").length, "Connected virtual interfaces", 0);
+}
+async function refreshVMMetrics() {
+  if (metricsBusy || !state.user || state.page !== "vm" || state.tab !== "summary") return;
+  const v = currentVM();
+  if (!v) return;
+  metricsBusy = true;
+  try {
+    vmMetrics = await api(ref(v.id) + "/metrics");
+  } catch {
+    vmMetrics = null;
+  } finally {
+    metricsBusy = false;
+    if (state.page === "vm" && state.tab === "summary" && currentVM()?.id === v.id && $("#vm-live-metrics"))
+      $("#vm-live-metrics").innerHTML = renderVMMetrics(currentVM());
+  }
+}
+function renderPending(v) {
+  if (!v.pending?.length) return "";
+  const rows = v.pending.flatMap(p => {
+    const b = p.body;
+    if (p.kind === "resources") {
+      const values = [["Processors", `${v.cpu} vCPU`, `${b.cpu} vCPU`], ["Memory", size(v.memory), size(b.memory_gib * 1024 ** 3)], ["Description", v.description || "None", b.description || "None"]];
+      if (v.provider === "incus") values.push(["Secure Boot", v.config["security.secureboot"] === "false" ? "Disabled" : "Enabled", b.secure_boot ? "Enabled" : "Disabled"], ["Start with host", v.config["boot.autostart"] === "true" ? "Enabled" : "Disabled", b.autostart ? "Enabled" : "Disabled"]);
+      return values.filter(([,a,b]) => a !== b);
+    }
+    if (p.kind === "disk.add") return [["New disk", "Not attached", `${b.size_gib} GiB · ${b.pool}`]];
+    if (p.kind === "disk.resize") return [[`Disk ${p.device}`, v.devices[p.device]?.size || "Current disk size", `${b.size_gib} GiB`]];
+    if (p.kind === "device.detach") {
+      const d = v.devices[p.device];
+      const current = d?.type === "nic" ? d.network || d.parent || "Network adapter" : [d?.source?.split("/").pop() || d?.pool || "Disk", d?.size].filter(Boolean).join(" · ");
+      return [[p.device, current, "Detached (storage retained)"]];
+    }
+    if (p.kind === "nic") return [[b.device || "New network adapter", v.devices[b.device]?.network || "Not attached", b.network]];
+    if (p.kind === "cdrom") return [["CD/DVD drive", Object.values(v.devices).filter(d => d.kind === "cdrom" || d.source?.endsWith(".iso")).map(d => d.source).join(", ") || "No ISO", b.iso_id ? `${state.inventory.isos.find(i => i.id === b.iso_id)?.name || b.iso_id}${b.boot ? " · Boot first" : ""}` : "Ejected"]];
+    return [];
+  });
+  return panel("Pending hardware changes", `<div class="hint">Apply with Restart in VM Manager, or Start after shutdown. Changes apply in saved order. If a change fails, the VM stays stopped and unapplied changes remain here.</div>` + table(["Hardware", "Current", "After restart"], rows.map(row => `<tr>${row.map(value => `<td>${esc(value)}</td>`).join("")}</tr>`)), can() ? btn("Discard pending", "discard-pending", v.id, "secondary") : "");
 }
 function renderNetworks() {
   const nets = state.inventory.networks;
@@ -813,8 +867,12 @@ function createVM() {
   };
 }
 function editVM(v) {
+  const planned = [...(v.pending || [])].reverse().find(p => p.kind === "resources")?.body;
+  const current = v;
+  if (planned) v = {...v, cpu: String(planned.cpu), memory: planned.memory_gib * 1024 ** 3,
+    description: planned.description, config: {...v.config, "security.secureboot": String(planned.secure_boot), "boot.autostart": String(planned.autostart)}};
   modal(
-    "Edit resources · " + v.name,
+    (current.status === "running" ? "Plan resources · " : "Edit resources · ") + v.name,
     `<div class="form-grid">${field("CPU cores", "cpu", /^\d+$/.test(v.cpu) ? v.cpu : 2, { type: "number", min: 1, max: 128 })}${field("Memory (GiB)", "memory_gib", Math.max(0.5, v.memory / 1024 ** 3 || 4), { type: "number", min: 0.5, max: 256, step: 0.5 })}${v.provider === "incus" ? check("Secure Boot", "secure_boot", v.config["security.secureboot"] !== "false") + check("Start with host", "autostart", v.config["boot.autostart"] === "true") : ""}${textarea("Description", "description", v.description)}</div>`,
     async (f) =>
       queue(ref(v.id), "PUT", {
@@ -998,6 +1056,7 @@ async function refresh(force = false) {
   busy = true;
   try {
     state.inventory = await api("/inventory");
+    if (state.page === "vm" && state.tab === "summary") refreshVMMetrics();
     if (can("admin") && state.page === "users")
       state.users = await api("/users");
     if (can("admin") && state.page === "audit")
@@ -1032,7 +1091,7 @@ async function refreshTasks() {
         ["completed", "failed", "interrupted"].includes(t.status)
       ) {
         toast(
-          `${t.resource}: ${t.status === "completed" ? "completed" : t.message}`,
+          `${t.resource}: ${t.status === "completed" && t.message === "Completed successfully" ? "completed" : t.message}`,
           t.status === "completed" ? "success" : "error",
         );
         finished = true;
@@ -1052,6 +1111,9 @@ async function refreshTasks() {
 async function action(name, id) {
   const v = currentVM(id.split("|")[0]);
   switch (name) {
+    case "discard-pending":
+      confirmAction("Discard pending hardware", v.name, "Discard all unapplied hardware changes?", async () => queue(ref(v.id) + "/pending", "DELETE"));
+      break;
     case "toggle-sidebar":
       $(".app-shell").classList.toggle("sidebar-open");
       break;
@@ -1070,6 +1132,7 @@ async function action(name, id) {
       break;
     case "create-vm":
       state.inventory = await api("/inventory");
+    if (state.page === "vm" && state.tab === "summary") refreshVMMetrics();
       createVM();
       break;
     case "open-vm":
@@ -1245,7 +1308,7 @@ async function action(name, id) {
     case "help": {
       const dialog = modal(
         "Using VM Manager",
-        '<div class="hint">Create a network, upload an OS ISO, then create a VM with the desired CPU, memory and disks. Start the VM and open Console to install the OS. Shut down and eject its ISO after installation.</div><p class="muted">Hardware changes require a stopped VM. NAT networks provide outbound access; isolated networks keep guest traffic local. Every management operation appears in the task log. Select a task to inspect its result.</p>',
+        '<div class="hint">Create a network, upload an OS ISO, then create a VM with the desired CPU, memory and disks. Start the VM and open Console to install the OS. Shut down and eject its ISO after installation.</div><p class="muted">Hardware changes can be saved while running and applied with Restart in VM Manager, or the next Start after shutdown. NAT networks provide outbound access; isolated networks keep guest traffic local. Every management operation appears in the task log. Select a task to inspect its result.</p>',
         async () => {},
         { submit: "Got it" },
       );
@@ -1293,4 +1356,5 @@ setInterval(() => {
 setInterval(() => {
   if (!document.hidden) refresh();
 }, 10000);
+setInterval(() => { if (!document.hidden) refreshVMMetrics(); }, 5000);
 init();

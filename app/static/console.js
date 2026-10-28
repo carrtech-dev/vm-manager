@@ -1,12 +1,36 @@
 import RFB from "/static/vendor/novnc/core/rfb.js";
 const vm = new URLSearchParams(location.search).get("vm");
 const status = document.getElementById("console-status");
-let connection;
+let connection, retryTimer, healthTimer;
+let generation = 0, leaving = false, retryDelay = 2000;
+function closeConnection() {
+  connection?.stop?.();
+  connection?.disconnect?.();
+  connection = null;
+}
+function reconnectSoon(text) {
+  if (leaving || retryTimer) return;
+  message(`${text} Reconnecting…`, true);
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    connect().catch(e => reconnectSoon(e.message));
+  }, retryDelay);
+  retryDelay = Math.min(30000, retryDelay * 2);
+}
+function connected(protocol) {
+  retryDelay = 2000;
+  message(`Connected · ${protocol} · Keep-alive active`);
+}
 function message(text, error = false) {
   status.textContent = text;
   status.className = error ? "error" : "";
 }
 async function connect() {
+  const attempt = ++generation;
+  closeConnection();
+  clearInterval(healthTimer);
+  clearTimeout(retryTimer);
+  retryTimer = null;
   if (!vm || !/^(incus|libvirt):[a-zA-Z][\w-]{0,62}$/.test(vm)) {
     message("Invalid virtual machine", true);
     return;
@@ -21,21 +45,19 @@ async function connect() {
     return;
   }
   const user = await response.json();
+  if (attempt !== generation || leaving) return;
   const uri = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/console/${encodeURIComponent(vm)}?csrf=${encodeURIComponent(user.csrf)}`;
   document.getElementById("spice-screen").replaceChildren();
   message("Connecting to display…");
   if (vm.startsWith("incus:")) {
     const Spice = await import("/vendor/spice/main.js");
+    if (attempt !== generation || leaving) return;
     connection = new Spice.SpiceMainConn({
       uri,
       screen_id: "spice-screen",
       message_id: "spice-message",
-      onerror: (e) =>
-        message(
-          e?.message || "Console disconnected. Check that the VM is running.",
-          true,
-        ),
-      onsuccess: () => message("Connected · SPICE"),
+      onerror: (e) => { if (attempt === generation) reconnectSoon(e?.message || "Console disconnected."); },
+      onsuccess: () => { if (attempt === generation) connected("SPICE"); },
     });
   } else {
     connection = new RFB(document.getElementById("spice-screen"), uri, {
@@ -43,9 +65,9 @@ async function connect() {
     });
     connection.scaleViewport = true;
     connection.resizeSession = true;
-    connection.addEventListener("connect", () => message("Connected · VNC"));
+    connection.addEventListener("connect", () => { if (attempt === generation) connected("VNC"); });
     connection.addEventListener("disconnect", () =>
-      message("Console disconnected. Check that the VM is running.", true),
+      attempt === generation && reconnectSoon("Console disconnected."),
     );
     connection.addEventListener("credentialsrequired", () =>
       message(
@@ -54,11 +76,18 @@ async function connect() {
       ),
     );
   }
+  // The server sends protocol-level ping/pong on every channel. Watch SPICE's
+  // separate input channel too: a healthy display does not prove input is alive.
+  healthTimer = setInterval(() => {
+    if (attempt !== generation || leaving || !connection) return;
+    const channels = [connection, connection.inputs, connection.display, connection.cursor].filter(Boolean);
+    if (channels.some(c => c.ws && c.ws.readyState >= WebSocket.CLOSING))
+      reconnectSoon("A console channel disconnected.");
+  }, 5000);
 }
 document.getElementById("reconnect").addEventListener("click", () => {
-  connection?.stop?.();
-  connection?.disconnect?.();
-  connect().catch((e) => message(e.message, true));
+  retryDelay = 2000;
+  connect().catch((e) => reconnectSoon(e.message));
 });
 document
   .getElementById("fullscreen")
@@ -73,7 +102,10 @@ document.getElementById("send-keys").addEventListener("click", async () => {
   }
 });
 window.addEventListener("beforeunload", () => {
-  connection?.stop?.();
-  connection?.disconnect?.();
+  leaving = true;
+  generation++;
+  clearTimeout(retryTimer);
+  clearInterval(healthTimer);
+  closeConnection();
 });
-connect().catch((e) => message(e.message, true));
+connect().catch((e) => reconnectSoon(e.message));

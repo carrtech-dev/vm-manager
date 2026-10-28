@@ -12,7 +12,7 @@ WorkingDirectory=/opt/carrtech/vm-manager/current
 Environment=VM_MANAGER_DATA=/var/lib/vm-manager
 Environment=VM_MANAGER_HOST=192.168.8.235
 Environment=TMPDIR=/var/lib/vm-manager/tmp
-ExecStart=/opt/carrtech/vm-manager/current/.venv/bin/uvicorn app.main:app --host 192.168.8.235 --port 8443 --ssl-keyfile /opt/carrtech/vm-manager/tls/server.key --ssl-certfile /opt/carrtech/vm-manager/tls/server.crt --no-proxy-headers --no-access-log --timeout-keep-alive 10
+ExecStart=/opt/carrtech/vm-manager/current/.venv/bin/uvicorn app.main:app --host 192.168.8.235 --port 8443 --ssl-keyfile /opt/carrtech/vm-manager/tls/server.key --ssl-certfile /opt/carrtech/vm-manager/tls/server.crt --no-proxy-headers --no-access-log --timeout-keep-alive 10 --ws-ping-interval 20 --ws-ping-timeout 20
 Restart=on-failure
 RestartSec=3
 UMask=0022

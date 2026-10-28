@@ -20,8 +20,12 @@ Change the password through **Account** after signing in; the initial credential
 2. Upload an operating-system `.iso` in **ISO library**. Existing Incus ISO volumes are also discovered. Files are validated as ISO9660/UDF, hashed with SHA-256, and stored persistently. Maximum size is 32 GiB, subject to available host space.
 3. Select **Create VM**, choose a network and storage pool, set CPU, memory, root disk and optional extra disks, and attach the installation ISO.
 4. Start the VM and open **Console** to install the operating system. Incus uses the host's SPICE console; libvirt uses its local VNC display.
-5. Shut the VM down, eject its ISO through **Hardware**, then start it to boot from disk.
-6. CPU, memory, disks, network adapters, CD-ROMs, Secure Boot and autostart can be changed through the VM workspace. Hardware changes require a stopped VM. Disk expansion does not expand the guest filesystem; complete that inside the guest.
+5. Eject its ISO through **Hardware**. For a running VM this is saved as a pending change; use **Restart** in VM Manager to apply it and boot from disk.
+6. CPU, memory, disks, network adapters, CD-ROMs, Secure Boot and autostart can be changed through the VM workspace. While running, hardware changes are saved persistently and shown as **Current → After restart** in the Hardware tab. Use **Restart** in VM Manager to shut down gracefully, apply the pending changes and start again, or shut down and use **Start**. Rebooting only inside the guest does not apply these pending changes. Stopped VMs apply edits immediately. Pending changes can be discarded before application. A failed change leaves the VM stopped with remaining changes retained; inspect the task log before retrying. Disk expansion does not expand the guest filesystem; complete that inside the guest.
+
+VM summaries refresh CPU and memory usage every five seconds, separately from configured resource limits. CPU percentage is normalized across allocated vCPUs. Memory uses guest usage when reported; otherwise it is explicitly labelled as host VM resident memory, which includes VM overhead and is not guest application usage. Missing measurements are shown as unavailable.
+
+Console WebSockets send ping/pong keep-alives every 20 seconds. Idle input channels stay connected, permissions are rechecked every 20 seconds, and the browser reconnects broken display/input channels. The normal 12-hour sign-in expiry still applies.
 
 Normal shutdown asks the guest to power off. Force stop is separately confirmed and may lose unsaved guest data. Deleting a VM requires its exact name and a stopped VM. Incus deletion removes its root volume and attached extra volumes created by this application. Detached volumes are retained. Deleting an existing libvirt definition retains its disk files. VM configurations are backed up before operations in `/var/lib/vm-manager/config-backups`.
 

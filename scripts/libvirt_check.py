@@ -12,7 +12,7 @@ from app.hypervisor import run
 vm_name = "vmm-libcheck-" + uuid.uuid4().hex[:6]
 root_disk = DATA / (vm_name + ".qcow2")
 run("qemu-img", "create", "-f", "qcow2", str(root_disk), "1G")
-xml = f'''<domain type="kvm"><name>{vm_name}</name><memory unit="MiB">512</memory><vcpu>1</vcpu><os><type arch="x86_64" machine="q35">hvm</type><boot dev="hd"/></os><devices><emulator>/usr/bin/qemu-system-x86_64</emulator><disk type="file" device="disk"><driver name="qemu" type="qcow2"/><source file="{root_disk}"/><target dev="vda" bus="virtio"/></disk><graphics type="vnc" autoport="yes" listen="127.0.0.1"/></devices></domain>'''
+xml = f"""<domain type="kvm"><name>{vm_name}</name><memory unit="MiB">512</memory><vcpu>1</vcpu><os><type arch="x86_64" machine="q35">hvm</type><boot dev="hd"/></os><devices><emulator>/usr/bin/qemu-system-x86_64</emulator><disk type="file" device="disk"><driver name="qemu" type="qcow2"/><source file="{root_disk}"/><target dev="vda" bus="virtio"/></disk><graphics type="vnc" autoport="yes" listen="127.0.0.1"/></devices></domain>"""
 path = DATA / (vm_name + ".xml")
 path.write_text(xml)
 with store.db() as db:
@@ -60,6 +60,14 @@ try:
         for v in client.get("/api/inventory").json()["vms"]
     )
     request("POST", "/api/vms/libvirt:" + vm_name + "/action", {"action": "start"})
+    request(
+        "PUT",
+        "/api/vms/libvirt:" + vm_name,
+        {"cpu": 3, "memory_gib": 1.5, "description": "Pending libvirt edit"},
+    )
+    assert libvirt.xml(vm_name).findtext("vcpu") == "2"
+    metrics = client.get("/api/vms/libvirt:" + vm_name + "/metrics").json()
+    assert metrics["running"] and metrics["memory_used"] is not None, metrics
     import struct
 
     with client.websocket_connect(
@@ -74,6 +82,15 @@ try:
         "/api/vms/libvirt:" + vm_name + "/action",
         {"action": "stop", "confirm_name": vm_name},
     )
+    request("POST", "/api/vms/libvirt:" + vm_name + "/action", {"action": "start"})
+    assert libvirt.xml(vm_name).findtext("vcpu") == "3"
+    assert libvirt.xml(vm_name).findtext("memory") == str(int(1.5 * 1024**2))
+    request(
+        "POST",
+        "/api/vms/libvirt:" + vm_name + "/action",
+        {"action": "stop", "confirm_name": vm_name},
+    )
+    print("Libvirt pending resources and live metrics verified", flush=True)
     request("DELETE", "/api/vms/libvirt:" + vm_name, {"confirm_name": vm_name})
     assert root_disk.exists(), "Existing libvirt root disk was unexpectedly deleted"
     print("LIBVIRT_ACCEPTANCE_PASSED", flush=True)
