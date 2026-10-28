@@ -18,7 +18,7 @@ from app.security import hash_password, token_hash
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", default="https://127.0.0.1:8443")
+    parser.add_argument("--url", default="https://192.168.8.235:8443")
     parser.add_argument("--data", default="/var/lib/vm-manager")
     parser.add_argument("--iso-name", required=True)
     args = parser.parse_args()
