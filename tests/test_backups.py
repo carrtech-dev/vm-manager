@@ -136,7 +136,8 @@ def test_interrupted_records_recovered_and_retention_only_scheduled(environment,
     assert {r['id'] for r in backups.catalog(store)} == {bid, manual, newer}
 
 
-def test_restore_uses_independent_incus_volumes_and_clears_identity(environment, monkeypatch, tmp_path):
+@pytest.mark.parametrize('restore_name', ['clone', 'c' * 63])
+def test_restore_uses_independent_incus_volumes_and_clears_identity(environment, monkeypatch, tmp_path, restore_name):
     _, manager, _ = environment
     vm = {'devices': {'root': {'type': 'disk', 'path': '/', 'pool': 'old'}, 'data': {'type': 'disk', 'pool': 'old', 'source': 'original'}, 'eth0': {'type': 'nic', 'network': 'net', 'hwaddr': 'old'}, 'cdrom': {'type': 'disk', 'readonly': 'true', 'source': '/old.iso'}}, 'config': {'volatile.uuid': 'old', 'limits.cpu': '2', 'boot.autostart': 'true'}}
     manifest = {'config': vm, 'volumes': [{'device': 'data', 'file': 'volume-0.tar.gz'}], 'media': ['cdrom']}
@@ -149,10 +150,10 @@ def test_restore_uses_independent_incus_volumes_and_clears_identity(environment,
     manager.incus.update = update
     monkeypatch.setattr(manager, 'cli', lambda *args: imported.append(args))
     monkeypatch.setattr(storage, 'check_vm_pool', lambda _: None)
-    manager.restore_incus(tmp_path, manifest, backups.Restore(name='clone', pool='new'))
+    manager.restore_incus(tmp_path, manifest, backups.Restore(name=restore_name, pool='new'))
     assert set(updates[0]['devices']) == {'root'}
     restored = updates[-1]
-    assert restored['devices']['data']['source'].startswith('vmm-clone-restore-')
+    assert restored['devices']['data']['source'].startswith('vmm-' + restore_name + '-restore-')
     assert restored['devices']['data']['pool'] == 'new'
     assert restored['config']['boot.autostart'] == 'false'
     assert 'volatile.uuid' not in restored['config']

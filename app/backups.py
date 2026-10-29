@@ -412,7 +412,7 @@ class Manager:
         for key in manifest['media']:
             devices.pop(key, None)
         for i, volume in enumerate(manifest['volumes']):
-            new_name = 'vmm-' + spec.name[:35] + '-restore-' + uuid.uuid4().hex[:12] + '-' + str(i)
+            new_name = 'vmm-' + spec.name + '-restore-' + uuid.uuid4().hex[:12] + '-' + str(i)
             self.cli('storage', 'volume', 'import', spec.pool, str(path / volume['file']), new_name)
             devices[volume['device']].update(pool=spec.pool, source=new_name)
         for device in devices.values():
