@@ -1031,7 +1031,14 @@ function createVM() {
     );
     return;
   }
-  const body = `<div class="wizard-layout"><aside class="wizard-rail"><strong>1 &nbsp; General</strong><span>2 &nbsp; Hardware</span><span>3 &nbsp; Network & media</span><span>4 &nbsp; Create</span><small>Complete the configuration, then create your stopped VM. Start it when you are ready to install the OS.</small></aside><div class="wizard-form"><div class="form-grid"><div class="form-section">General</div>${field("VM name", "name", "", { placeholder: "my-temporary-vm", hint: "Unique name on this host. Letters, digits and hyphens." })}${field("Hypervisor", "provider", "Incus", { readonly: true })}<div class="form-section">Hardware</div>${field("CPU cores", "cpu", 2, { type: "number", min: 1, max: 128 })}${field("Memory (GiB)", "memory_gib", 4, { type: "number", min: 0.5, max: 256, step: 0.5 })}${select("Storage pool", "pool", pools, defaultVMPool())}${field("Root disk (GiB)", "disk_gib", 32, { type: "number", min: 4, max: 4096 })}<div class="extra-disks"><label class="field"><span>Additional disks</span></label><div id="extra-disk-list"></div><button type="button" class="button small" id="extra-disk-add" style="margin-top:8px">+ Add another disk</button></div><div class="form-section">Network & installation media</div><div class="full">${select("Network", "network", networks, networks.some((n) => n[0] === "incusbr0") ? "incusbr0" : networks[0][0])}</div><div class="full">${select("Installation ISO", "iso_id", isoOptions(), "", "Optional. The VM boots from selected media until you eject it.")}</div>${check("Secure Boot", "secure_boot", false)}${check("Start with host", "autostart", false)}${textarea("Description (optional)", "description")}</div></div></div>`;
+  const steps = ["General", "Hardware", "Network & media", "Create"];
+  const panels = [
+    `${field("VM name", "name", "", { placeholder: "my-temporary-vm", hint: "Unique name on this host. Start with a letter; use letters, digits, underscores or hyphens." })}${field("Hypervisor", "provider", "Incus", { readonly: true })}${textarea("Description (optional)", "description")}${check("Start with host", "autostart", false)}`,
+    `${field("CPU cores", "cpu", 2, { type: "number", min: 1, max: 128 })}${field("Memory (GiB)", "memory_gib", 4, { type: "number", min: 0.5, max: 256, step: 0.5 })}${select("Storage pool", "pool", pools, defaultVMPool())}${field("Root disk (GiB)", "disk_gib", 32, { type: "number", min: 4, max: 4096 })}<div class="extra-disks"><label class="field"><span>Additional disks</span></label><div id="extra-disk-list"></div><button type="button" class="button small" id="extra-disk-add" style="margin-top:8px">+ Add another disk</button></div>${check("Secure Boot", "secure_boot", false)}`,
+    `<div class="full">${select("Network", "network", networks, networks.some((n) => n[0] === "incusbr0") ? "incusbr0" : networks[0][0])}</div><div class="full">${select("Installation ISO", "iso_id", isoOptions(), "", "Optional. The VM boots from selected media until you eject it.")}</div>`,
+    `<div class="full hint">Review the configuration, then create your stopped VM. Start it when you are ready to install the OS.</div><div class="full" id="vm-create-review"></div>`,
+  ];
+  const body = `<div class="wizard-layout"><nav class="wizard-rail" aria-label="VM creation steps">${steps.map((label, index) => `<button type="button" class="wizard-step" data-step="${index}" aria-controls="vm-create-step-${index}">${index + 1} &nbsp; ${label}</button>`).join("")}<small>Complete the configuration, then create your stopped VM. Start it when you are ready to install the OS.</small></nav><div class="wizard-form">${panels.map((content, index) => `<section id="vm-create-step-${index}" aria-labelledby="vm-create-heading-${index}" ${index ? "hidden" : ""}><div class="form-grid"><h3 class="form-section" id="vm-create-heading-${index}" tabindex="-1">${steps[index]}</h3>${content}</div></section>`).join("")}</div></div>`;
   const dialog = modal(
     "Create: Virtual machine",
     body,
@@ -1054,6 +1061,86 @@ function createVM() {
     },
     { wide: true, submit: "Create VM" },
   );
+  const form = $("#dialog-form", dialog);
+  const submit = $("button[type=submit]", form);
+  const back = document.createElement("button");
+  back.type = "button";
+  back.className = "button secondary";
+  back.textContent = "Back";
+  submit.before(back);
+  const name = form.elements.namedItem("name");
+  name.pattern = String.raw`[a-zA-Z][a-zA-Z0-9_\-]{0,62}`;
+  name.maxLength = 63;
+  // Validate the relevant panels ourselves so hidden invalid fields can be shown.
+  form.noValidate = true;
+  let step = 0, submitting = false;
+  const showStep = (index, focus = true) => {
+    step = index;
+    panels.forEach((_, i) => {
+      $("#vm-create-step-" + i, dialog).hidden = i !== step;
+      const button = $(`.wizard-step[data-step="${i}"]`, dialog);
+      if (i === step) button.setAttribute("aria-current", "step");
+      else button.removeAttribute("aria-current");
+    });
+    back.hidden = step === 0;
+    submit.textContent = step === 3 ? "Create VM" : "Next";
+    $(".form-error", dialog).hidden = true;
+    if (step === 3) {
+      const value = (key) => esc(form.elements.namedItem(key).value);
+      const selected = (key) => esc(form.elements.namedItem(key).selectedOptions[0].textContent);
+      const enabled = (key) => form.elements.namedItem(key).checked ? "Enabled" : "Disabled";
+      const review = (title, entries) => `<h4>${title}</h4>${properties(entries)}`;
+      $("#vm-create-review", dialog).innerHTML =
+        review("General", [
+          ["VM name", value("name")], ["Hypervisor", "Incus"],
+          ["Description", value("description") || "—"], ["Start with host", enabled("autostart")],
+        ]) + review("Hardware", [
+          ["CPU cores", value("cpu")], ["Memory", value("memory_gib") + " GiB"],
+          ["Storage pool", selected("pool")], ["Root disk", value("disk_gib") + " GiB"],
+          ["Additional disks", new FormData(form).getAll("extra_disk").map(v => esc(v) + " GiB").join(", ") || "None"],
+          ["Secure Boot", enabled("secure_boot")],
+        ]) + review("Network & media", [["Network", selected("network")], ["Installation ISO", selected("iso_id")]]);
+    }
+    if (focus) $("#vm-create-heading-" + step, dialog).focus();
+    $(".dialog-content", dialog).scrollTop = 0;
+  };
+  const validateThrough = (last) => {
+    for (let i = 0; i <= last; i++) {
+      const invalid = $$("input, select, textarea", $("#vm-create-step-" + i, dialog))
+        .find(input => !input.checkValidity());
+      if (invalid) {
+        showStep(i);
+        invalid.reportValidity();
+        return false;
+      }
+    }
+    return true;
+  };
+  $$(".wizard-step", dialog).forEach(button => {
+    button.onclick = () => {
+      if (submitting) return;
+      const target = +button.dataset.step;
+      if (target <= step || validateThrough(target - 1)) showStep(target);
+    };
+  });
+  back.onclick = () => { if (!submitting) showStep(step - 1); };
+  const create = form.onsubmit;
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (submitting || !validateThrough(step === 3 ? 2 : step)) return;
+    if (step < 3) return showStep(step + 1);
+    submitting = true;
+    back.disabled = true;
+    $$(".wizard-step", dialog).forEach(button => button.disabled = true);
+    try {
+      await create(event);
+    } finally {
+      submitting = false;
+      back.disabled = false;
+      $$(".wizard-step", dialog).forEach(button => button.disabled = false);
+    }
+  };
+  showStep(0, false);
   $("#extra-disk-add", dialog).onclick = () => {
     if ($$(".extra-disk-row", dialog).length >= 8) {
       toast(

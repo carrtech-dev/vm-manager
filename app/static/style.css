@@ -1079,6 +1079,9 @@ dialog footer {
   padding: 16px 24px;
   border-top: 1px solid var(--border-default);
 }
+dialog footer .button[hidden] {
+  display: none;
+}
 dialog .dialog-content {
   padding: 24px;
   max-height: calc(100dvh - 260px);
@@ -1101,9 +1104,35 @@ dialog .warning {
   font-size: 12px;
   color: var(--text-muted);
 }
-.wizard-rail strong {
+.wizard-step {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--text-muted);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.wizard-step:hover,
+.wizard-step[aria-current="step"] {
   color: var(--accent-orange);
-  font-weight: 500;
+}
+.wizard-step[aria-current="step"] {
+  font-weight: 600;
+}
+.wizard-form section {
+  min-height: 320px;
+}
+#vm-create-review h4 {
+  margin: 16px 0 8px;
+  font-size: 12px;
+}
+#vm-create-review h4:first-child {
+  margin-top: 0;
+}
+#vm-create-review dd {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 .wizard-rail small {
   font-size: 10px;
@@ -1120,7 +1149,7 @@ dialog .warning {
   height: 65px;
 }
 .wizard-form .form-section:first-child {
-  margin-top: 0;
+  margin: 0;
 }
 .extra-disks {
   grid-column: 1/-1;
@@ -1313,7 +1342,15 @@ dialog .warning {
     grid-template-columns: 1fr;
   }
   .wizard-rail {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .wizard-rail small {
     display: none;
+  }
+  .wizard-form section {
+    min-height: 0;
   }
   .form-grid {
     gap: 16px;
