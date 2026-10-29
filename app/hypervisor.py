@@ -18,6 +18,10 @@ class HypervisorError(Exception):
     pass
 
 
+class HypervisorNotFound(HypervisorError):
+    pass
+
+
 def name(value):
     if not NAME.fullmatch(value):
         raise HypervisorError(
@@ -81,7 +85,8 @@ class Incus:
             except ValueError as e:
                 raise HypervisorError("Incus returned an invalid response") from e
             if response.status_code >= 400 or result.get("type") == "error":
-                raise HypervisorError(result.get("error", "Incus request failed"))
+                error = HypervisorNotFound if response.status_code == 404 else HypervisorError
+                raise error(result.get("error", "Incus request failed"))
             if result.get("type") == "async" and wait:
                 operation_url = urlsplit(result["operation"])
                 operation = client.get(

@@ -4,7 +4,7 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from app.hypervisor import HypervisorError
+from app.hypervisor import HypervisorError, HypervisorNotFound
 from app.security import Store
 from app.snapshots import Snapshots
 
@@ -39,7 +39,7 @@ class FakeIncus:
             return [value for key, value in self.snapshots.items() if key.startswith(prefix)]
         if path in self.snapshots:
             return self.snapshots[path]
-        raise HypervisorError("Not found: " + path)
+        raise HypervisorNotFound("Not found: " + path)
 
     def request(self, method, path, data=None):
         self.changes.append((method, path, data))
@@ -107,7 +107,7 @@ def test_incus_description_is_restored_from_durable_manifest(engine):
     assert engine.incus.instance["description"] == "Before upgrade"
 
 
-@pytest.mark.parametrize("unsafe", ["running", "shared", "host-path", "full-copy"])
+@pytest.mark.parametrize("unsafe", ["running", "shared", "host-path", "full-copy", "passthrough"])
 def test_unsupported_snapshot_fails_without_disk_mutations(engine, unsafe):
     if unsafe == "running":
         engine.incus.instance["status"] = "Running"
@@ -115,6 +115,8 @@ def test_unsupported_snapshot_fails_without_disk_mutations(engine, unsafe):
         engine.incus.volume["used_by"].append("/1.0/instances/another")
     elif unsafe == "host-path":
         engine.incus.instance["devices"]["disk1"]["source"] = "/dev/sdb"
+    elif unsafe == "passthrough":
+        engine.incus.instance["devices"]["controller"] = {"type": "pci", "address": "01:00.0"}
     else:
         engine.incus.driver = "dir"
     with pytest.raises(HypervisorError):
@@ -186,6 +188,22 @@ def test_delete_retries_partial_disk_cleanup(engine):
     engine.delete("incus", "demo", "incus:demo", "one")
     assert not engine.rows("incus:demo")
     assert not engine.incus.snapshots
+
+
+def test_delete_cleans_manifest_when_data_volume_was_removed_externally(engine, monkeypatch):
+    create(engine)
+    get = engine.incus.get
+
+    def missing_volume(path):
+        if "/custom/data" in path:
+            raise HypervisorNotFound("Volume removed")
+        return get(path)
+
+    monkeypatch.setattr(engine.incus, "get", missing_volume)
+    data = engine.listing("incus", "demo", "incus:demo")
+    assert data["snapshots"][0]["status"] == "unavailable"
+    engine.delete("incus", "demo", "incus:demo", "one")
+    assert not engine.rows("incus:demo")
 
 
 def test_libvirt_plan_rejects_unsupported_state_and_shared_disks(engine):

@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
-from .hypervisor import HypervisorError, name
+from .hypervisor import HypervisorError, HypervisorNotFound, name
 
 NO_EXPIRY = "0001-01-01T00:00:00Z"
 
@@ -43,6 +43,8 @@ class Snapshots:
     def plan(self, provider, vm_name):
         if provider == "libvirt":
             root = self.libvirt.xml(vm_name)
+            if root.find("./devices/hostdev") is not None or root.find("launchSecurity") is not None:
+                raise HypervisorError("Passthrough hardware and encrypted guest state cannot be included in a VM snapshot.")
             if root.find("./os/nvram") is not None or root.find("./devices/tpm") is not None:
                 raise HypervisorError("This libvirt VM uses NVRAM or TPM state, which offline internal snapshots cannot capture.")
             if root.findall("./devices/filesystem"):
@@ -73,6 +75,8 @@ class Snapshots:
         if vm.get("type") != "virtual-machine":
             raise HypervisorError("Snapshots are available for virtual machines only.")
         devices = vm.get("expanded_devices", vm.get("devices", {}))
+        if any(d.get("type") in ("pci", "usb", "unix-block", "unix-char") for d in devices.values()):
+            raise HypervisorError("Passthrough hardware cannot be included in a VM snapshot.")
         roots = [d for d in devices.values() if d.get("type") == "disk" and d.get("path") == "/"]
         if len(roots) != 1 or not roots[0].get("pool"):
             raise HypervisorError("The VM must have one Incus-managed root disk.")
@@ -279,7 +283,12 @@ class Snapshots:
                     self.libvirt.cli("snapshot-delete", vm_name, snapshot)
             if provider == "incus":
                 for volume in manifest["volumes"]:
-                    names = [s["name"].rsplit("/", 1)[-1] for s in self.incus.get(volume["url"] + "/snapshots?recursion=1")]
+                    try:
+                        names = [s["name"].rsplit("/", 1)[-1] for s in self.incus.get(volume["url"] + "/snapshots?recursion=1")]
+                    except HypervisorNotFound:
+                        # A detached data volume may have been removed outside
+                        # the manager. Its missing snapshot is already gone.
+                        names = []
                     if manifest["volume_snapshot"] in names:
                         self.incus.request("DELETE", volume["url"] + "/snapshots/" + manifest["volume_snapshot"])
             with self.store.db() as db:
