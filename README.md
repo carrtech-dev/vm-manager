@@ -113,3 +113,45 @@ To temporarily withdraw public access, stop only this connector with the same Co
 The service runs as `vm-manager` in the existing `incus-admin` and `libvirt` groups. Its filesystem writes are restricted to its persistent state directory. Hypervisor group membership is powerful; protect administrator and operator accounts accordingly. This is a single-host control plane.
 
 Frontend display software is bundled locally: noVNC (MPL-2.0, license in `app/static/vendor/novnc`), Inter (OFL, license in `app/static/fonts`) and the system `spice-html5` package (LGPL-3.0+).
+
+## Storage blocks
+
+Open **Storage → Create storage block**, choose an underlying ZFS pool, a name,
+capacity in GiB, and one purpose: **VM disks (Incus)**, **ISO images**, or
+**Configuration backups**. A block uses a dedicated dataset on the same physical
+ZFS storage as the chosen pool. ZFS enforces its capacity limit and reserves that
+capacity, so creating or expanding blocks reduces the underlying available space.
+The purpose is fixed at creation. Existing Btrfs pools remain usable for VM disks;
+creating bounded blocks on Btrfs is not currently supported.
+
+VM blocks appear by name in **Create VM** and **Add disk**. **Assign defaults**
+sets the initial VM storage selection, the destination for new ISO uploads, and
+the destination for configuration snapshots taken before VM operations. The ISO
+library also has an upload destination selector. Existing disks, ISOs and backups
+remain where they are; changing a default does not migrate data. Backup blocks
+hold VM configuration files, not full guest-disk backups. Existing libvirt disk
+creation continues to use application disk storage.
+
+Blocks can be expanded but cannot be shrunk. Deletion requires the exact name,
+an empty block, no default assignment and no pending hardware references. Incus
+also checks pool/volume references. Files and volumes are retained until explicitly
+removed; the application never empties a block to delete it. A full, unavailable
+or unmounted destination reports an error rather than writing to another disk.
+An interrupted provisioning operation appears as incomplete/unavailable and needs
+administrator inspection before recovery; its registry entry is retained.
+
+Provisioning is handled by `vm-manager-storage.service`, a root service with a
+local Unix socket accessible only to root and the application group. It accepts
+validated storage operations, derives all dataset names and paths itself, and
+checks a dataset ownership property before modification. The application service
+continues to run as `vm-manager`. The root-owned storage registry is
+`/var/lib/vm-manager-storage/blocks.json`; filesystem blocks mount below
+`/var/lib/vm-manager-storage/mounts`. ZFS mounts them at boot. Deployment backs up
+the registry alongside SQLite; these metadata backups do not contain block data.
+
+`scripts/storage_check.py` is an opt-in acceptance check against the deployed
+service. Run as root on the host with the release environment and `PYTHONPATH` set
+to the release directory. It creates temporary blocks, a VM and an ISO; checks
+actual hard quotas, capacity reservation, upload/backup routing, expansion and
+deletion guards; restores existing defaults and removes its own resources. It
+uses a temporary operator and never resets existing passwords.

@@ -1,6 +1,7 @@
 """CarrTech VM Manager: authenticated local hypervisor control plane."""
 
 import asyncio
+import errno
 import hashlib
 import ipaddress
 import json
@@ -28,6 +29,7 @@ from fastapi import (
     HTTPException,
     Depends,
     UploadFile,
+    Form,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -38,6 +40,7 @@ from pydantic import BaseModel, Field, field_validator
 from .hypervisor import Incus, Libvirt, HypervisorError, name, run, bytes_size
 from .security import Store, ROLES, hash_password, verify_password, token_hash
 from . import organization
+from . import storage
 from .power import PowerInterrupted, PowerRequests
 
 DATA = Path(os.environ.get("VM_MANAGER_DATA", "data")).resolve()
@@ -85,18 +88,18 @@ def task(user, action, resource, fn):
         try:
             if action.startswith("vm.") and ":" in resource:
                 provider, vm_name = vm_ref(resource)
-                backups = DATA / "config-backups"
-                backups.mkdir(mode=0o700, exist_ok=True)
                 original = (
                     json.dumps(incus.vm(vm_name), indent=2)
                     if provider == "incus"
                     else libvirt.cli("dumpxml", vm_name, "--inactive")
                 )
-                backup = backups / (
-                    task_id + (".json" if provider == "incus" else ".xml")
-                )
-                backup.write_text(original)
-                backup.chmod(0o600)
+                with storage.lock:
+                    backups = storage.directory(store, DATA, "backup")
+                    backup = backups / (
+                        task_id + (".json" if provider == "incus" else ".xml")
+                    )
+                    backup.write_text(original)
+                    backup.chmod(0o600)
             result = fn()
             status, message = "completed", (
                 result if isinstance(result, str) else "Completed successfully"
@@ -419,7 +422,70 @@ def ensure_stopped(provider, vm_name):
 
 @app.get("/api/inventory")
 def get_inventory(user=Depends(require())):
-    return organization.decorate(store, inventory())
+    result = organization.decorate(store, inventory())
+    try:
+        blocks = storage.broker("list")
+        error = ""
+    except HypervisorError as exc:
+        blocks, error = [], str(exc)
+    return dict(result, storage_blocks=blocks, storage_defaults=storage.defaults(store),
+                storage_error=error)
+
+
+@app.post("/api/storage/blocks")
+def create_storage_block(body: storage.BlockCreate, user=Depends(require("operate"))):
+    def create():
+        with storage.lock:
+            return storage.broker("create", body=body.model_dump())
+    return task(user, "storage.create", body.name, create)
+
+
+@app.put("/api/storage/blocks/{block_id}")
+def grow_storage_block(block_id: str, body: storage.BlockSize, user=Depends(require("operate"))):
+    def grow():
+        with storage.lock:
+            return storage.broker("grow", block_id=block_id, body=body.model_dump())
+    return task(user, "storage.grow", block_id, grow)
+
+
+@app.put("/api/storage/defaults/{purpose}")
+def set_storage_default(purpose: storage.Purpose, body: storage.DefaultBlock,
+                        user=Depends(require("operate"))):
+    with storage.lock:
+        if body.block_id:
+            block = next((b for b in storage.broker("list") if b["id"] == body.block_id), None)
+            if not block or block["purpose"] != purpose or block["status"] != "ready":
+                raise HTTPException(400, "Choose an available block with the matching purpose")
+        with store.db() as db:
+            db.execute("INSERT INTO storage_defaults VALUES(?,?) ON CONFLICT(purpose) DO UPDATE SET block_id=excluded.block_id",
+                       (purpose, body.block_id))
+        store.audit(user["username"], "storage.default", purpose, body.block_id or "Original storage")
+    invalidate()
+    return {"ok": True}
+
+
+class StorageDelete(BaseModel):
+    confirm_name: str
+
+
+@app.delete("/api/storage/blocks/{block_id}")
+def delete_storage_block(block_id: str, body: StorageDelete, user=Depends(require("operate"))):
+    def delete():
+        with storage.lock:
+            block = next((b for b in storage.broker("list") if b["id"] == block_id), None)
+            if not block or body.confirm_name != block["name"]:
+                raise HypervisorError("Type the storage block name to confirm deletion")
+            if block_id in storage.defaults(store).values():
+                raise HypervisorError("Change the default storage assignment before deleting this block")
+            with store.db() as db:
+                if any(json.loads(r[0]).get("pool") == block["pool"] for r in
+                       db.execute("SELECT body FROM pending_hardware")) and block["pool"]:
+                    raise HypervisorError("Storage block is referenced by pending hardware changes")
+                if block["path"] and db.execute("SELECT 1 FROM isos WHERE path LIKE ?",
+                                                 (block["path"] + "/%",)).fetchone():
+                    raise HypervisorError("Storage block contains ISO records")
+            return storage.broker("delete", block_id=block_id)
+    return task(user, "storage.delete", block_id, delete)
 
 
 @app.get("/api/collections")
@@ -528,6 +594,7 @@ def create_vm(body: VMCreate, user=Depends(require("operate"))):
     iso = get_iso(body.iso_id)
 
     def create():
+        storage.check_vm_pool(body.pool)
         inv = inventory()
         if any(v["name"] == body.name for v in inv["vms"]):
             raise HypervisorError("A VM with this name already exists")
@@ -644,6 +711,7 @@ def hardware_add_disk(vm_id, body):
     ensure_stopped(provider, vm_name)
     disk_id = "disk" + uuid.uuid4().hex[:8]
     if provider == "incus":
+        storage.check_vm_pool(body.pool)
         volume = "vmm-" + vm_name + "-" + disk_id
         incus.request(
             "POST",
@@ -1404,7 +1472,18 @@ def delete_network(net_name: str, body: Confirm, user=Depends(require("operate")
 
 
 @app.post("/api/isos")
-def upload_iso(file: UploadFile, user=Depends(require("operate"))):
+def upload_iso(file: UploadFile, storage_id: str | None = Form(default=None), user=Depends(require("operate"))):
+    # Serialize uploads with storage deletion and default changes, so a mounted
+    # destination cannot disappear between validation and the final rename.
+    with storage.lock:
+        try:
+            directory = storage.directory(store, DATA, "iso", "" if storage_id == "application" else storage_id)
+            return save_iso(file, directory, user)
+        finally:
+            file.file.close()
+
+
+def save_iso(file, directory, user):
     filename = Path(file.filename or "").name
     if not filename.lower().endswith(".iso") or len(filename) > 180:
         raise HTTPException(400, "Choose an .iso file with a name under 180 characters")
@@ -1412,16 +1491,16 @@ def upload_iso(file: UploadFile, user=Depends(require("operate"))):
         if db.execute("SELECT 1 FROM isos WHERE name=?", (filename,)).fetchone():
             raise HTTPException(409, "An ISO with this name already exists")
     iso_id = uuid.uuid4().hex
-    partial = ISOS / (iso_id + ".part")
-    destination = ISOS / (iso_id + ".iso")
+    partial = directory / (iso_id + ".part")
+    destination = directory / (iso_id + ".iso")
     size, digest = 0, hashlib.sha256()
     try:
         with partial.open("xb") as stream:
             while chunk := file.file.read(1024 * 1024):
                 size += len(chunk)
-                if size > 32 * 1024**3 or shutil.disk_usage(ISOS).free < 2 * 1024**3:
+                if size > 32 * 1024**3 or shutil.disk_usage(directory).free < min(2 * 1024**3, shutil.disk_usage(directory).total // 20):
                     raise HTTPException(
-                        413, "ISO exceeds the 32 GiB limit or host storage reserve"
+                        413, "ISO exceeds the 32 GiB limit or selected storage reserve"
                     )
                 digest.update(chunk)
                 stream.write(chunk)
@@ -1450,6 +1529,12 @@ def upload_iso(file: UploadFile, user=Depends(require("operate"))):
                     time.time(),
                 ),
             )
+    except OSError as exc:
+        partial.unlink(missing_ok=True)
+        destination.unlink(missing_ok=True)
+        if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+            raise HTTPException(507, "Selected storage block is full") from exc
+        raise
     except Exception:
         partial.unlink(missing_ok=True)
         destination.unlink(missing_ok=True)

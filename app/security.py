@@ -58,6 +58,9 @@ class Store:
                     vm_id TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL,
                     device TEXT NOT NULL DEFAULT '', created REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS attempts(peer TEXT, at REAL);
+                CREATE TABLE IF NOT EXISTS storage_defaults(
+                    purpose TEXT PRIMARY KEY CHECK(purpose IN ('vm','iso','backup')),
+                    block_id TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,
                     name TEXT NOT NULL, name_key TEXT UNIQUE NOT NULL);
                 CREATE TABLE IF NOT EXISTS tags(id TEXT PRIMARY KEY,

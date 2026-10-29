@@ -1207,3 +1207,106 @@ def test_incus_force_stop_has_no_guest_shutdown_timeout(monkeypatch):
     assert requests[1][2] == {
         "action": "stop", "timeout": 60, "force": False, "stateful": False,
     }
+
+
+@pytest.fixture
+def storage_blocks(monkeypatch, tmp_path):
+    from app import storage
+    with store.db() as db:
+        db.execute("DELETE FROM storage_defaults")
+    blocks = [dict(id="a" * 32, name="media", parent="hdd-pool", purpose="iso",
+                   size_gib=1, path=str(tmp_path / "media"), pool="", status="ready"),
+              dict(id="b" * 32, name="disks", parent="hdd-pool", purpose="vm",
+                   size_gib=8, path="", pool="vmm-block-" + "b" * 32, status="ready")]
+    Path(blocks[0]["path"]).mkdir()
+    calls = []
+    def broker(operation, **kwargs):
+        calls.append((operation, kwargs))
+        return blocks if operation == "list" else {"ok": True}
+    monkeypatch.setattr(storage, "broker", broker)
+    monkeypatch.setattr(storage.os.path, "ismount", lambda p: str(p) == blocks[0]["path"])
+    yield blocks, calls
+    with store.db() as db:
+        db.execute("DELETE FROM storage_defaults")
+
+
+def run_storage_task(client, response):
+    import time
+    assert response.status_code == 200, response.text
+    task_id = response.json()["task_id"]
+    for _ in range(100):
+        row = next(t for t in client.get("/api/tasks").json() if t["id"] == task_id)
+        if row["status"] in ("completed", "failed"):
+            return row
+        time.sleep(.01)
+    pytest.fail("Task did not finish")
+
+
+def test_storage_permissions_validation_and_assignment(client, storage_blocks):
+    blocks, calls = storage_blocks
+    headers = login(client, "viewer")
+    assert len(client.get("/api/inventory").json()["storage_blocks"]) == 2
+    for method, url, body in [
+        ("POST", "/api/storage/blocks", dict(name="new", parent="hdd-pool", purpose="iso", size_gib=1)),
+        ("PUT", "/api/storage/blocks/" + "a" * 32, dict(size_gib=2)),
+        ("PUT", "/api/storage/defaults/iso", dict(block_id="a" * 32)),
+        ("DELETE", "/api/storage/blocks/" + "a" * 32, dict(confirm_name="media")),
+    ]:
+        assert client.request(method, url, json=body, headers=headers).status_code == 403
+    headers = login(client, "operator")
+    assert client.post("/api/storage/blocks", headers=headers,
+                       json=dict(name="../../bad", parent="hdd-pool", purpose="iso", size_gib=1)).status_code == 422
+    assert client.put("/api/storage/defaults/iso", headers=headers, json=dict(block_id="b" * 32)).status_code == 400
+    assert client.put("/api/storage/defaults/iso", headers=headers, json=dict(block_id="a" * 32)).status_code == 200
+    row = run_storage_task(client, client.request("DELETE", "/api/storage/blocks/" + "a" * 32,
+                            headers=headers, json=dict(confirm_name="media")))
+    assert row["status"] == "failed" and "default" in row["message"]
+    assert not any(op == "delete" for op, _ in calls)
+
+
+def test_iso_upload_routes_to_block_and_rejects_wrong_or_missing_mount(client, storage_blocks, monkeypatch):
+    from app import storage
+    blocks, _ = storage_blocks
+    headers = login(client, "operator")
+    content = b"\0" * 32768 + b"CD001" + b"\0" * 32768
+    client.put("/api/storage/defaults/iso", headers=headers, json=dict(block_id="a" * 32))
+    response = client.post("/api/isos", headers=headers, files={"file": ("block-test.iso", content)})
+    assert response.status_code == 200, response.text
+    iso_id = response.json()["id"]
+    with store.db() as db:
+        path = db.execute("SELECT path FROM isos WHERE id=?", (iso_id,)).fetchone()[0]
+        assert Path(path).parent == Path(blocks[0]["path"])
+        db.execute("DELETE FROM isos WHERE id=?", (iso_id,))
+    Path(path).unlink()
+    response = client.post("/api/isos", headers=headers, data=dict(storage_id="b" * 32),
+                           files={"file": ("wrong.iso", content)})
+    assert response.status_code == 409
+    # An explicit application destination must override the configured default.
+    response = client.post("/api/isos", headers=headers, data=dict(storage_id="application"),
+                           files={"file": ("original-storage.iso", content)})
+    assert response.status_code == 200
+    from app.main import ISOS
+    with store.db() as db:
+        original = db.execute("SELECT path FROM isos WHERE id=?", (response.json()["id"],)).fetchone()[0]
+        assert Path(original).parent == ISOS
+        db.execute("DELETE FROM isos WHERE id=?", (response.json()["id"],))
+    Path(original).unlink()
+    monkeypatch.setattr(storage.os.path, "ismount", lambda p: False)
+    response = client.post("/api/isos", headers=headers, files={"file": ("unmounted.iso", content)})
+    assert response.status_code == 409 and "not mounted" in response.text
+
+
+def test_storage_pending_disk_reference_blocks_delete(client, storage_blocks):
+    blocks, calls = storage_blocks
+    headers = login(client, "operator")
+    with store.db() as db:
+        db.execute("INSERT INTO pending_hardware VALUES(?,?,?,?,?,?)",
+                   ("storage-pending", "incus:test", "disk.add", '{"pool":"' + blocks[1]["pool"] + '"}', "", 0))
+    try:
+        row = run_storage_task(client, client.request("DELETE", "/api/storage/blocks/" + "b" * 32,
+                                headers=headers, json=dict(confirm_name="disks")))
+        assert row["status"] == "failed" and "pending" in row["message"]
+        assert not any(op == "delete" for op, _ in calls)
+    finally:
+        with store.db() as db:
+            db.execute("DELETE FROM pending_hardware WHERE id='storage-pending'")

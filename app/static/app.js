@@ -74,8 +74,17 @@ const networkMode = (n) =>
     : n.config["ipv4.routing"] === "false"
       ? "Isolated"
       : "Routed";
+const storageBlocks = () => state.inventory.storage_blocks || [];
+const storagePurposes = [["vm", "VM disks (Incus)"], ["iso", "ISO images"], ["backup", "Configuration backups"]];
+const storageOptions = (purpose) => [
+  ["", purpose === "vm" ? "Existing pool selection" : "Original application storage"],
+  ...storageBlocks().filter(b => b.purpose === purpose && b.status === "ready")
+    .map(b => [b.id, `${b.name} · ${b.size_gib} GiB`]),
+];
 const poolOptions = () =>
-  state.inventory.pools.map((p) => [p.name, `${p.name} · ${p.driver}`]);
+  state.inventory.pools.filter(p => !p.name.startsWith("vmm-block-") || storageBlocks().some(b => b.pool === p.name && b.status === "ready"))
+    .map((p) => [p.name, `${storageBlocks().find(b => b.pool === p.name)?.name || p.name} · ${p.driver}`]);
+const defaultVMPool = () => storageBlocks().find(b => b.id === state.inventory.storage_defaults?.vm && b.status === "ready")?.pool || (poolOptions().some(p => p[0] === "hdd-pool") ? "hdd-pool" : poolOptions()[0]?.[0]);
 const networkOptions = () =>
   state.inventory.networks
     .filter((n) => n.provider === "incus")
@@ -369,8 +378,9 @@ function renderOverview() {
   const vms = state.inventory.vms.filter(matchesOrganization);
   const networks = state.inventory.networks.filter(matchesOrganization);
   const running = vms.filter((v) => v.status === "running").length;
-  const total = pools.reduce((n, p) => n + (p.resources?.space?.total || 0), 0);
-  const used = pools.reduce((n, p) => n + (p.resources?.space?.used || 0), 0);
+  const underlying = pools.filter(p => !p.name.startsWith("vmm-block-"));
+  const total = underlying.reduce((n, p) => n + (p.resources?.space?.total || 0), 0);
+  const used = underlying.reduce((n, p) => n + (p.resources?.space?.used || 0), 0);
   return (
     title(
       "Overview",
@@ -767,7 +777,7 @@ function renderISOs() {
       "Upload installation media and attach it to virtual CD-ROM drives",
     ) +
     (can()
-      ? `<label class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload ISO"><span class="upload-symbol">↑</span><strong>Drag ISO files here or click to browse</strong><small>ISO9660 / UDF · Up to 32 GiB per file · ${size(state.inventory.host.disk_free)} free on host</small><input id="iso-input" type="file" accept=".iso" multiple><div id="upload-progress" class="upload-progress" hidden><progress id="upload-bar" max="100" value="0"></progress><small id="upload-label"></small></div></label>`
+      ? `${select("Upload destination", "iso-storage", storageOptions("iso"), state.inventory.storage_defaults?.iso || "", "Applies to new uploads. Existing ISO files stay in their current storage.")}<label class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload ISO"><span class="upload-symbol">↑</span><strong>Drag ISO files here or click to browse</strong><small>ISO9660 / UDF · Up to 32 GiB per file · Choose a destination above</small><input id="iso-input" type="file" accept=".iso" multiple><div id="upload-progress" class="upload-progress" hidden><progress id="upload-bar" max="100" value="0"></progress><small id="upload-label"></small></div></label>`
       : "") +
     panel(
       "ISO images",
@@ -775,7 +785,7 @@ function renderISOs() {
         ["Name", "Size", "Storage", "Uploaded", "Used by", "Actions"],
         isos.map(
           (i) =>
-            `<tr><td class="iso-name-cell"><span class="name">${esc(i.name)}</span>${i.sha256 ? `<small title="SHA-256 ${esc(i.sha256)}">SHA-256 ${esc(i.sha256.slice(0, 20))}…</small>` : ""}</td><td class="numeric">${size(i.size)}</td><td>${esc(i.pool || "ISO library")}</td><td class="numeric">${i.created ? when(i.created) : "—"}</td><td>${i.used_by?.length || 0} reference(s)</td><td>${can() ? smallAction("Delete", "delete-iso", i.id, !!i.used_by?.length) : '<span class="subtle">Read only</span>'}</td></tr>`,
+            `<tr><td class="iso-name-cell"><span class="name">${esc(i.name)}</span>${i.sha256 ? `<small title="SHA-256 ${esc(i.sha256)}">SHA-256 ${esc(i.sha256.slice(0, 20))}…</small>` : ""}</td><td class="numeric">${size(i.size)}</td><td>${esc(storageBlocks().find(b => b.path && i.path?.startsWith(b.path + "/"))?.name || i.pool || "Original ISO library")}</td><td class="numeric">${i.created ? when(i.created) : "—"}</td><td>${i.used_by?.length || 0} reference(s)</td><td>${can() ? smallAction("Delete", "delete-iso", i.id, !!i.used_by?.length) : '<span class="subtle">Read only</span>'}</td></tr>`,
         ),
       ),
       `<small>${isos.length} images</small>`,
@@ -787,9 +797,14 @@ function renderStorage() {
   return (
     title(
       "Storage",
-      "Existing hypervisor pools and local application storage",
+      "Capacity-limited blocks for VM disks, ISO images and configuration backups",
+      can() ? btn("Create storage block", "create-storage", "", "primary", !!state.inventory.storage_error) + btn("Assign defaults", "storage-defaults") : "",
     ) +
-    `<div class="storage-cards">${state.inventory.pools
+    (state.inventory.storage_error ? `<div class="warning">${esc(state.inventory.storage_error)}</div>` : "") +
+    panel("Storage blocks", table(["Name", "Purpose", "Underlying pool", "Used / capacity", "Status", "Actions"], storageBlocks().map(b =>
+      `<tr><td class="name">${esc(b.name)}${Object.values(state.inventory.storage_defaults || {}).includes(b.id) ? ' <small>Default destination</small>' : ""}</td><td>${esc(storagePurposes.find(p => p[0] === b.purpose)?.[1])}</td><td>${esc(b.parent)}</td><td>${size(b.used)} / ${size(b.capacity || b.size_gib * 1024 ** 3)}<small>${size(b.available)} available</small></td><td>${badge(b.status)}${b.error ? `<small>${esc(b.error)}</small>` : ""}</td><td>${can() ? smallAction("Expand", "grow-storage", b.id, b.status !== "ready") + smallAction("Delete", "delete-storage", b.id, b.status !== "ready") : "Read only"}</td></tr>`))) +
+    `<div class="hint">Blocks reserve capacity on the underlying ZFS storage and enforce a hard limit. Create blocks from a ZFS pool; existing Btrfs pools remain available for VM disks. Defaults direct new writes. Existing disks and files stay in place. Backup blocks store VM configuration backups.</div>` +
+    `<div class="storage-cards">${state.inventory.pools.filter(p => !p.name.startsWith("vmm-block-"))
       .map((p) => {
         const space = p.resources?.space || {};
         return panel(
@@ -816,6 +831,20 @@ function renderStorage() {
     ) +
     `<div class="hint">Choose an existing pool when creating a VM or adding a disk. Application deployment preserves VM storage and uploaded ISO files.</div>`
   );
+}
+function createStorageBlock() {
+  const parents = state.inventory.pools.filter(p => p.driver === "zfs" && !p.name.startsWith("vmm-block-"));
+  if (!parents.length) return toast("A ZFS storage pool is required to create capacity-limited blocks.", "warning");
+  modal("Create storage block", `<div class="form-grid">${field("Block name", "name", "", { placeholder: "vm-storage" })}${select("Underlying storage", "parent", parents.map(p => [p.name, p.name]))}${select("Purpose", "purpose", storagePurposes)}${field("Capacity (GiB)", "size_gib", 100, { type: "number", min: 1, max: 65536 })}</div><div class="hint">Capacity is reserved from the same physical ZFS storage as the selected pool. The purpose is fixed when created. VM blocks appear in the storage selector when creating VMs or adding disks.</div>`,
+    f => queue("/storage/blocks", "POST", { name: f.get("name"), parent: f.get("parent"), purpose: f.get("purpose"), size_gib: +f.get("size_gib") }), { submit: "Create block" });
+}
+function storageDefaultsForm() {
+  modal("Assign default storage", `<div class="form-grid">${storagePurposes.map(([purpose, label]) => select(label, purpose, storageOptions(purpose), state.inventory.storage_defaults?.[purpose] || "")).join("")}</div><div class="hint">Applies to new VM selections, ISO uploads and VM configuration backups. Existing data stays in place. A full or unavailable destination reports an error.</div>`,
+    async f => {
+      for (const [purpose] of storagePurposes)
+        await api("/storage/defaults/" + purpose, "PUT", { block_id: f.get(purpose) });
+      await refresh(true);
+    });
 }
 const roleDescriptions = [
   [
@@ -1002,7 +1031,7 @@ function createVM() {
     );
     return;
   }
-  const body = `<div class="wizard-layout"><aside class="wizard-rail"><strong>1 &nbsp; General</strong><span>2 &nbsp; Hardware</span><span>3 &nbsp; Network & media</span><span>4 &nbsp; Create</span><small>Complete the configuration, then create your stopped VM. Start it when you are ready to install the OS.</small></aside><div class="wizard-form"><div class="form-grid"><div class="form-section">General</div>${field("VM name", "name", "", { placeholder: "my-temporary-vm", hint: "Unique name on this host. Letters, digits and hyphens." })}${field("Hypervisor", "provider", "Incus", { readonly: true })}<div class="form-section">Hardware</div>${field("CPU cores", "cpu", 2, { type: "number", min: 1, max: 128 })}${field("Memory (GiB)", "memory_gib", 4, { type: "number", min: 0.5, max: 256, step: 0.5 })}${select("Storage pool", "pool", pools, pools.some((p) => p[0] === "hdd-pool") ? "hdd-pool" : pools[0][0])}${field("Root disk (GiB)", "disk_gib", 32, { type: "number", min: 4, max: 4096 })}<div class="extra-disks"><label class="field"><span>Additional disks</span></label><div id="extra-disk-list"></div><button type="button" class="button small" id="extra-disk-add" style="margin-top:8px">+ Add another disk</button></div><div class="form-section">Network & installation media</div><div class="full">${select("Network", "network", networks, networks.some((n) => n[0] === "incusbr0") ? "incusbr0" : networks[0][0])}</div><div class="full">${select("Installation ISO", "iso_id", isoOptions(), "", "Optional. The VM boots from selected media until you eject it.")}</div>${check("Secure Boot", "secure_boot", false)}${check("Start with host", "autostart", false)}${textarea("Description (optional)", "description")}</div></div></div>`;
+  const body = `<div class="wizard-layout"><aside class="wizard-rail"><strong>1 &nbsp; General</strong><span>2 &nbsp; Hardware</span><span>3 &nbsp; Network & media</span><span>4 &nbsp; Create</span><small>Complete the configuration, then create your stopped VM. Start it when you are ready to install the OS.</small></aside><div class="wizard-form"><div class="form-grid"><div class="form-section">General</div>${field("VM name", "name", "", { placeholder: "my-temporary-vm", hint: "Unique name on this host. Letters, digits and hyphens." })}${field("Hypervisor", "provider", "Incus", { readonly: true })}<div class="form-section">Hardware</div>${field("CPU cores", "cpu", 2, { type: "number", min: 1, max: 128 })}${field("Memory (GiB)", "memory_gib", 4, { type: "number", min: 0.5, max: 256, step: 0.5 })}${select("Storage pool", "pool", pools, defaultVMPool())}${field("Root disk (GiB)", "disk_gib", 32, { type: "number", min: 4, max: 4096 })}<div class="extra-disks"><label class="field"><span>Additional disks</span></label><div id="extra-disk-list"></div><button type="button" class="button small" id="extra-disk-add" style="margin-top:8px">+ Add another disk</button></div><div class="form-section">Network & installation media</div><div class="full">${select("Network", "network", networks, networks.some((n) => n[0] === "incusbr0") ? "incusbr0" : networks[0][0])}</div><div class="full">${select("Installation ISO", "iso_id", isoOptions(), "", "Optional. The VM boots from selected media until you eject it.")}</div>${check("Secure Boot", "secure_boot", false)}${check("Start with host", "autostart", false)}${textarea("Description (optional)", "description")}</div></div></div>`;
   const dialog = modal(
     "Create: Virtual machine",
     body,
@@ -1062,7 +1091,7 @@ function editVM(v) {
 function addDisk(v) {
   modal(
     "Add disk · " + v.name,
-    `<div class="form-grid">${field("Disk size (GiB)", "size_gib", 16, { type: "number", min: 1, max: 4096 })}${v.provider === "incus" ? select("Storage pool", "pool", poolOptions(), "hdd-pool") : field("Storage", "storage", "Application disk storage", { readonly: true })}</div><div class="hint" style="margin-top:18px">A new blank disk will be attached. Partition and format it inside the guest.</div>`,
+    `<div class="form-grid">${field("Disk size (GiB)", "size_gib", 16, { type: "number", min: 1, max: 4096 })}${v.provider === "incus" ? select("Storage pool", "pool", poolOptions(), defaultVMPool()) : field("Storage", "storage", "Application disk storage", { readonly: true })}</div><div class="hint" style="margin-top:18px">A new blank disk will be attached. Partition and format it inside the guest.</div>`,
     async (f) =>
       queue(ref(v.id) + "/disks", "POST", {
         size_gib: +f.get("size_gib"),
@@ -1174,6 +1203,7 @@ async function uploadFiles(files) {
   if (!files.length) return;
   uploading = true;
   const zone = $("#dropzone");
+  const storageId = $('[name="iso-storage"]')?.value || "";
   try {
     for (const file of files) {
       if (!file.name.toLowerCase().endsWith(".iso"))
@@ -1182,6 +1212,7 @@ async function uploadFiles(files) {
         throw new Error("Each ISO must be smaller than 32 GiB");
       const form = new FormData();
       form.append("file", file);
+      form.append("storage_id", storageId || "application");
       if ($("#upload-progress")) $("#upload-progress").hidden = false;
       if ($("#upload-label"))
         $("#upload-label").textContent = "Uploading " + file.name;
@@ -1287,6 +1318,24 @@ async function refreshTasks() {
 async function action(name, id) {
   const v = currentVM(id.split("|")[0]);
   switch (name) {
+    case "create-storage":
+      createStorageBlock();
+      break;
+    case "storage-defaults":
+      storageDefaultsForm();
+      break;
+    case "grow-storage": {
+      const b = storageBlocks().find(b => b.id === id);
+      modal("Expand storage · " + b.name, field("Capacity (GiB)", "size_gib", b.size_gib + 1, { type: "number", min: b.size_gib + 1, max: 65536 }),
+        f => queue("/storage/blocks/" + id, "PUT", { size_gib: +f.get("size_gib") }), { submit: "Expand block" });
+      break;
+    }
+    case "delete-storage": {
+      const b = storageBlocks().find(b => b.id === id);
+      confirmAction("Delete empty storage block", b.name, "Only empty blocks can be deleted. Change any default assignment first. Files, VM volumes and pending hardware references prevent deletion.",
+        () => queue("/storage/blocks/" + id, "DELETE", { confirm_name: b.name }));
+      break;
+    }
     case "discard-pending":
       confirmAction("Discard pending hardware", v.name, "Discard all unapplied hardware changes?", async () => queue(ref(v.id) + "/pending", "DELETE"));
       break;

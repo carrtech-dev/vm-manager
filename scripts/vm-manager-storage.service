@@ -1,0 +1,23 @@
+[Unit]
+Description=CarrTech VM Manager storage provisioning
+After=incus.service zfs-mount.service
+Before=vm-manager.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/carrtech/vm-manager/current
+ExecStart=/opt/carrtech/vm-manager/current/.venv/bin/python -m app.storage_broker
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=vm-manager-storage
+RuntimeDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

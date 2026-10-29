@@ -111,6 +111,10 @@ for file in certs.iterdir():
 current = base / "current"
 previous = current.resolve() if current.exists() else None
 subprocess.run(["systemctl", "stop", "vm-manager.service"], check=False)
+subprocess.run(["systemctl", "stop", "vm-manager-storage.service"], check=False)
+storage_state = Path("/var/lib/vm-manager-storage")
+storage_state.mkdir(mode=0o711, exist_ok=True)
+(storage_state / "mounts").mkdir(mode=0o755, exist_ok=True)
 if (state / "manager.sqlite3").exists():
     backups = base / "backups"
     backups.mkdir(mode=0o700, exist_ok=True)
@@ -124,13 +128,20 @@ if (state / "manager.sqlite3").exists():
     ):
         source.backup(destination)
     backup.chmod(0o600)
+    if (storage_state / "blocks.json").exists():
+        registry_backup = backup.with_suffix(".storage.json")
+        shutil.copyfile(storage_state / "blocks.json", registry_backup)
+        registry_backup.chmod(0o600)
 unit = (release / "scripts" / "vm-manager.service").read_text()
 Path("/etc/systemd/system/vm-manager.service").write_text(unit)
+Path("/etc/systemd/system/vm-manager-storage.service").write_text(
+    (release / "scripts" / "vm-manager-storage.service").read_text())
 temporary = base / "next"
 temporary.unlink(missing_ok=True)
 temporary.symlink_to(release)
 os.replace(temporary, current)
 subprocess.run(["systemctl", "daemon-reload"], check=True)
+subprocess.run(["systemctl", "enable", "--now", "vm-manager-storage.service"], check=True)
 subprocess.run(["systemctl", "enable", "--now", "vm-manager.service"], check=True)
 context = ssl._create_unverified_context()
 healthy = False
@@ -153,6 +164,10 @@ if not healthy:
     if previous:
         temporary.symlink_to(previous)
         os.replace(temporary, current)
+        if (previous / "app" / "storage_broker.py").exists():
+            subprocess.run(["systemctl", "restart", "vm-manager-storage.service"], check=False)
+        else:
+            subprocess.run(["systemctl", "stop", "vm-manager-storage.service"], check=False)
         subprocess.run(["systemctl", "restart", "vm-manager.service"], check=False)
     raise SystemExit(
         "Service failed health check; previous source restored when available. Database backup retained."
