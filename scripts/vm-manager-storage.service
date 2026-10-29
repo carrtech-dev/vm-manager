@@ -13,10 +13,10 @@ RuntimeDirectory=vm-manager-storage
 RuntimeDirectoryMode=0750
 UMask=0077
 NoNewPrivileges=yes
-ProtectHome=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
+# Provisioned mounts must reach the host and the application. Mount namespace
+# isolation (including implicit namespaces from ProtectSystem/ProtectHome and
+# ProtectKernel* options) would hide newly created ZFS mounts from consumers.
+PrivateMounts=no
 RestrictAddressFamilies=AF_UNIX
 
 [Install]

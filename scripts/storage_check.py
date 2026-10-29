@@ -3,7 +3,9 @@
 Uses uniquely named disposable resources and a temporary operator. Restores
 previous defaults and removes only its own VM, ISO, files, blocks and account.
 """
+import errno
 import json
+import os
 from pathlib import Path
 import secrets
 import sqlite3
@@ -62,15 +64,26 @@ def main():
             block = next(b for b in request("GET", "/api/inventory")["storage_blocks"] if b["name"] == prefix + "-" + purpose)
             blocks.append(block)
             assert block["status"] == "ready", block
+            if purpose != "vm":
+                assert os.path.ismount(block["path"]), "Storage mount is hidden from the host"
             values = subprocess.check_output(["zfs", "get", "-Hp", "-o", "value", "quota,reservation", block["dataset"]], text=True).splitlines()
             assert values == [str(capacity * 1024**3)] * 2, values
             request("PUT", "/api/storage/defaults/" + purpose, dict(block_id=block["id"]))
         vm_block, iso_block, backup_block = blocks
-        # ZFS must reject a single file reservation beyond the filesystem quota.
+        # Write incompressible data: fallocate may succeed without allocating
+        # physical blocks on ZFS, so it cannot establish quota enforcement.
         probe = Path(iso_block["path"]) / "quota-probe"
         try:
-            result = subprocess.run(["fallocate", "-l", "2G", str(probe)], capture_output=True, text=True)
-            assert result.returncode != 0 and ("space" in result.stderr.lower() or "quota" in result.stderr.lower()), result
+            try:
+                with probe.open("wb", buffering=0) as stream:
+                    chunk = secrets.token_bytes(4 * 1024**2)
+                    for _ in range(320):
+                        stream.write(chunk)
+                    os.fsync(stream.fileno())
+            except OSError as exc:
+                assert exc.errno in (errno.ENOSPC, errno.EDQUOT), exc
+            else:
+                raise AssertionError("ZFS accepted writes beyond the block quota")
         finally:
             probe.unlink(missing_ok=True)
         content = b"\0" * 32768 + b"CD001" + b"\0" * 32768
