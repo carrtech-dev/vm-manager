@@ -49,6 +49,7 @@ let busy = false,
   renderedPath = "";
 const seenTasks = new Map();
 let vmMetrics = null, metricsBusy = false;
+let vmSnapshots = null, snapshotsLoading = null;
 const badge = (text, style = text) =>
   `<span class="badge ${esc(style)}"><span aria-hidden="true">●</span>${esc(text)}</span>`;
 const btn = (
@@ -481,6 +482,44 @@ function renderVMs() {
       )}</select><span class="result-count" id="vm-result-count">${vms.length} virtual machines</span></div><div id="vm-table">${panel("Virtual machines", vmTable(vms))}</div>`
   );
 }
+async function refreshSnapshots(vmId, repaint = true) {
+  if (snapshotsLoading === vmId) return;
+  snapshotsLoading = vmId;
+  try {
+    const data = await api(ref(vmId) + "/snapshots");
+    vmSnapshots = { vm: vmId, ...data };
+  } catch (e) {
+    vmSnapshots = { vm: vmId, error: e.message };
+  } finally {
+    if (snapshotsLoading === vmId) snapshotsLoading = null;
+    if (repaint && state.page === "vm" && state.tab === "snapshots" && state.vm === vmId && !$("#modal").open) render();
+  }
+}
+function renderSnapshots(v, data) {
+  if (data.error) return `<div class="error-banner">${esc(data.error)}</div>${btn("Retry", "refresh-snapshots", v.id)}`;
+  const working = state.tasks.some(t => t.resource === v.id && ["queued", "running"].includes(t.status));
+  const incomplete = data.snapshots.some(s => s.managed && s.status !== "ready");
+  const disabled = v.status !== "stopped" || !!v.pending?.length || working;
+  const actions = `${can() ? btn("Take snapshot", "create-snapshot", v.id, "primary", disabled || incomplete || !data.supported) : ""}${btn("Refresh", "refresh-snapshots", v.id)}`;
+  return `<div class="hint">Snapshots share unchanged disk blocks; subsequent snapshots store changes. Each snapshot records its parent. Shut down the VM before taking, restoring or deleting snapshots. Snapshots include configuration and writable disks, and remain on the same storage as the VM.</div>
+    ${!data.supported ? `<div class="error-banner">${esc(data.reason)}</div>` : ""}
+    ${v.pending?.length ? '<div class="pending-banner">Apply or discard pending hardware changes before taking or restoring a snapshot.</div>' : ""}
+    ${panel("Snapshot history", data.snapshots.length ? table(["Snapshot", "Parent", "Created", "Disks", "Status", "Actions"], data.snapshots.map(s => {
+      const retry = s.status === "incomplete" && s.operation === "restore";
+      const restoreDisabled = disabled || !data.supported || !(s.status === "ready" || retry);
+      const deleteDisabled = v.status !== "stopped" || working || !!s.children?.length || retry;
+      return `<tr><td class="vm-name-cell"><strong>${esc(s.name)}</strong>${s.description ? `<small>${esc(s.description)}</small>` : ""}${s.current ? '<small>Current snapshot base</small>' : ""}${s.error ? `<small role="alert">${esc(s.error)}</small>` : ""}${!s.managed ? '<small>Created outside VM Manager; manage through the hypervisor.</small>' : ""}</td><td>${esc(s.parent || (s.managed ? "Base" : "—"))}</td><td>${s.created ? when(s.created) : "—"}</td><td>${s.disks ? esc(s.disks.map(d => d.device).join(", ")) : "—"}</td><td>${badge(s.status)}</td><td><div class="actions">${can() && s.managed ? `${btn(retry ? "Retry restore" : "Restore", "restore-snapshot", v.id + "|" + s.name, "small", restoreDisabled)}${btn("Delete", "delete-snapshot", v.id + "|" + s.name, "small danger", deleteDisabled)}` : "—"}</div>${s.children?.length ? '<small>Delete children first</small>' : ""}</td></tr>`;
+    })) : empty("No snapshots yet", "Take a snapshot before making changes so you can return to this state."), actions)}
+    <div class="hint">Restoring replaces current disk contents and configuration and leaves the VM stopped. On ZFS, explicitly delete newer snapshots first. Delete snapshots newest first to preserve the chain. Snapshots do not protect against storage failure; use backups for a separate recoverable copy.</div>`;
+}
+function createSnapshot(v) {
+  modal("Take snapshot · " + v.name,
+    field("Snapshot name", "name", "snap-" + new Date().toISOString().replace(/[-:]/g, "").slice(0, 15).replace("T", "-"), { hint: "1–63 letters, digits, underscores or hyphens; start with a letter." }) +
+    textarea("Description (optional)", "description", "") +
+    '<div class="hint">Includes the VM configuration and all supported writable disks. The VM must be stopped. Unchanged blocks are shared with earlier snapshots.</div>',
+    f => queue(ref(v.id) + "/snapshots", "POST", { name: f.get("name"), description: f.get("description") }),
+    { submit: "Take snapshot" });
+}
 function renderVM() {
   const v = currentVM();
   if (!v)
@@ -499,7 +538,14 @@ function renderVM() {
       ? `${btn("Console", "console", v.id, "secondary", !running)}${btn(running ? "Shutdown" : "Start", running ? "shutdown" : "start", v.id, "primary", !["running", "stopped"].includes(v.status))}${btn(v.pending?.length ? "Restart & apply" : "Restart", "restart", v.id, "secondary", !running)}${btn("Force stop", "force-stop", v.id, "danger", !running)}`
       : "",
   );
-  html += `<div class="tabs">${["summary", "hardware", "console", "backups", "options"].map((t) => `<button class="tab ${state.tab === t ? "active" : ""}" data-action="vm-tab" data-id="${t}" ${t === "console" && !can() ? "disabled" : ""}>${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</div>`;
+  html += `<div class="tabs">${["summary", "hardware", "snapshots", "backups", "console", "options"].map((t) => `<button class="tab ${state.tab === t ? "active" : ""}" data-action="vm-tab" data-id="${t}" ${t === "console" && !can() ? "disabled" : ""}>${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</div>`;
+  if (state.tab === "snapshots") {
+    if (vmSnapshots?.vm !== v.id) {
+      refreshSnapshots(v.id);
+      return html + '<div class="empty">Loading snapshots…</div>';
+    }
+    return html + renderSnapshots(v, vmSnapshots);
+  }
   if (state.tab === "console") {
     return (
       html +
@@ -1422,6 +1468,7 @@ async function refresh(force = false) {
   try {
     state.inventory = await api("/inventory");
     normalizeOrganizationFilters();
+    if (state.page === "vm" && state.tab === "snapshots") await refreshSnapshots(state.vm, false);
     if (state.page === "vm" && state.tab === "summary") refreshVMMetrics();
     if (can("admin") && state.page === "users")
       state.users = await api("/users");
@@ -1477,6 +1524,25 @@ async function refreshTasks() {
 async function action(name, id) {
   const v = currentVM(id.split("|")[0]);
   switch (name) {
+    case "refresh-snapshots":
+      await refreshSnapshots(id);
+      break;
+    case "create-snapshot":
+      createSnapshot(v);
+      break;
+    case "restore-snapshot": {
+      const snapshot = id.split("|")[1];
+      confirmAction("Restore snapshot · " + snapshot, v.name,
+        "This replaces the VM's current disk contents and configuration with the selected snapshot. Changes since that snapshot will be lost. The VM must be stopped and will remain stopped. ZFS requires newer snapshots to be deleted first.",
+        () => queue(ref(v.id) + "/snapshots/" + encodeURIComponent(snapshot) + "/restore", "POST", { confirm_name: v.name }));
+      break;
+    }
+    case "delete-snapshot": {
+      const snapshot = id.split("|")[1];
+      confirmAction("Delete snapshot", snapshot, "This permanently removes this restore point from all included disks. The current VM disk contents are retained. Delete child snapshots first.",
+        () => queue(ref(v.id) + "/snapshots/" + encodeURIComponent(snapshot), "DELETE", { confirm_name: snapshot }));
+      break;
+    }
     case "backup-now": backupForm([id]); break;
     case "backup-settings": backupForm([id], true); break;
     case "backup-selected": backupForm([...selectedBackupVMs]); break;
