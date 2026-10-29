@@ -426,7 +426,9 @@ class Manager:
             vm['devices'] = devices
             vm['config'] = {k: v for k, v in manifest['config'].get('expanded_config', manifest['config']['config']).items()
                             if not k.startswith('volatile.')}
-            vm['config'].update({'boot.autostart': 'false', 'user.vm-manager': 'true'})
+            identity = str(uuid.uuid4())
+            vm['config'].update({'boot.autostart': 'false', 'user.vm-manager': 'true',
+                                 'volatile.uuid': identity, 'volatile.uuid.generation': identity})
         self.incus.update(spec.name, transform)
 
     def restore_libvirt(self, path, manifest, spec):

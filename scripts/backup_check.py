@@ -99,6 +99,14 @@ def main():
             with path.open('rb') as stream:
                 stream.seek(4 * 1024**2)
                 assert stream.read(len(marker)) == marker, str(path)
+        # A restored archive must also produce a bootable hypervisor definition.
+        task('POST', '/api/vms/incus:' + restored + '/action', dict(action='start'))
+        started = incus.vm(restored)
+        original = incus.vm(source)
+        assert started['status'].lower() == 'running'
+        for key in ('volatile.uuid', 'volatile.eth0.hwaddr'):
+            assert started['config'].get(key) and started['config'][key] != original['config'].get(key), key
+        task('POST', '/api/vms/incus:' + restored + '/action', dict(action='stop', confirm_name=restored))
         # Existing destination is protected; corruption is rejected before import.
         task('POST', '/api/backups/' + point['id'] + '/restore', dict(name=restored, pool=pool), 'failed')
         archive = Path(block['path']) / 'vm-backups' / point['id'] / 'instance.tar.gz'
@@ -110,7 +118,7 @@ def main():
         assert 'checksum' in row['message'], row
         with archive.open('r+b') as stream:
             stream.write(original)
-        print('PASS: Incus root + extra disk marker restoration, independent volumes, stopped/autostart-off restore, collision and checksum guards.', flush=True)
+        print('PASS: Incus root + extra disk marker restoration, independent volumes, stopped/autostart-off restore, successful VM start with new identities, collision and checksum guards.', flush=True)
 
         # A sparse qcow2 with a backing chain verifies that libvirt export flattens
         # both layers, rather than retaining dependencies on original host files.

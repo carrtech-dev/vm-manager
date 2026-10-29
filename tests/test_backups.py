@@ -156,7 +156,10 @@ def test_restore_uses_independent_incus_volumes_and_clears_identity(environment,
     assert restored['devices']['data']['source'].startswith('vmm-' + restore_name + '-restore-')
     assert restored['devices']['data']['pool'] == 'new'
     assert restored['config']['boot.autostart'] == 'false'
-    assert 'volatile.uuid' not in restored['config']
+    import uuid
+    assert str(uuid.UUID(restored['config']['volatile.uuid'])) == restored['config']['volatile.uuid']
+    assert restored['config']['volatile.uuid'] == restored['config']['volatile.uuid.generation']
+    assert restored['config']['volatile.uuid'] != 'old'
     assert 'hwaddr' not in restored['devices']['eth0']
     assert 'cdrom' not in restored['devices']
     assert imported[1][:4] == ('storage', 'volume', 'import', 'new')
