@@ -141,6 +141,13 @@ def digest(path):
     return result.hexdigest()
 
 
+class ArchiveLoader(yaml.SafeLoader):
+    """Keep RFC3339 timestamp scalars intact for the Incus Go decoder."""
+
+
+ArchiveLoader.add_constructor('tag:yaml.org,2002:timestamp', lambda loader, node: loader.construct_scalar(node))
+
+
 def portable_instance(source, target):
     """Stream the root archive with a standalone import configuration.
 
@@ -156,7 +163,7 @@ def portable_instance(source, target):
                 if member.name in ('backup/index.yaml', 'backup/virtual-machine/backup.yaml'):
                     if member.size > 4 * 1024**2:
                         raise HypervisorError('Incus backup metadata is too large')
-                    document = yaml.safe_load(content.read())
+                    document = yaml.load(content.read(), Loader=ArchiveLoader)
                     config = document['config'] if member.name == 'backup/index.yaml' else document
                     vm = config.get('container', config.get('instance'))
                     if not isinstance(vm, dict):
@@ -221,37 +228,38 @@ class Manager:
         restart, complete, error = False, False, None
         self.update(backup_id, 'running')
         try:
-            # Validate before disrupting the guest; hold storage lock throughout to
-            # prevent block deletion/default changes while exporting.
+            # Catalog references prevent storage deletion for the full job.
+            # Hold the storage lock only while resolving the mounted directory,
+            # keeping settings and other queue requests responsive during I/O.
             with storage.lock:
                 path = archive_dir(self.store, self.data, row, create=True)
-                status = self.status(provider, vm_name)
-                if status not in ('stopped', 'shut off'):
-                    if status != 'running' or not shutdown:
-                        raise HypervisorError('VM must be stopped, or enable graceful shutdown and restart for backups')
-                    restart = True
-                    self.power_action(vm_id, 'shutdown', cancelled)
-                self.power_requests.check(cancelled)
-                manifest = {'version': 1, 'provider': provider, 'vm_id': vm_id, 'created': row['created']}
-                if provider == 'incus':
-                    self.export_incus(vm_name, path, manifest)
-                else:
-                    manifest['libvirt'] = storage.broker('libvirt_export', block_id=row['block_id'], backup_id=backup_id, vm_name=vm_name)
-                if self.status(provider, vm_name) not in ('stopped', 'shut off'):
-                    raise HypervisorError('VM power changed during backup; archive cannot be trusted')
-                self.power_requests.check(cancelled)
-                manifest['files'] = {str(p.relative_to(path)): {'size': p.stat().st_size, 'sha256': digest(p)}
-                                     for p in path.rglob('*') if p.is_file()}
-                (path / 'manifest.json').write_text(json.dumps(manifest, indent=2))
-                # Flush data before making a restore point visible.
-                for file in path.rglob('*'):
-                    if file.is_file():
-                        file.chmod(0o600)
-                        with file.open('rb') as stream:
-                            os.fsync(stream.fileno())
-                size = sum(f['size'] for f in manifest['files'].values())
-                self.update(backup_id, 'completed', 'Verified SHA-256; full offline backup', size)
-                complete = True
+            status = self.status(provider, vm_name)
+            if status not in ('stopped', 'shut off'):
+                if status != 'running' or not shutdown:
+                    raise HypervisorError('VM must be stopped, or enable graceful shutdown and restart for backups')
+                restart = True
+                self.power_action(vm_id, 'shutdown', cancelled)
+            self.power_requests.check(cancelled)
+            manifest = {'version': 1, 'provider': provider, 'vm_id': vm_id, 'created': row['created']}
+            if provider == 'incus':
+                self.export_incus(vm_name, path, manifest)
+            else:
+                manifest['libvirt'] = storage.broker('libvirt_export', block_id=row['block_id'], backup_id=backup_id, vm_name=vm_name)
+            if self.status(provider, vm_name) not in ('stopped', 'shut off'):
+                raise HypervisorError('VM power changed during backup; archive cannot be trusted')
+            self.power_requests.check(cancelled)
+            manifest['files'] = {str(p.relative_to(path)): {'size': p.stat().st_size, 'sha256': digest(p)}
+                                 for p in path.rglob('*') if p.is_file()}
+            (path / 'manifest.json').write_text(json.dumps(manifest, indent=2))
+            # Flush data before making a restore point visible.
+            for file in path.rglob('*'):
+                if file.is_file():
+                    file.chmod(0o600)
+                    with file.open('rb') as stream:
+                        os.fsync(stream.fileno())
+            size = sum(f['size'] for f in manifest['files'].values())
+            self.update(backup_id, 'completed', 'Verified SHA-256; full offline backup', size)
+            complete = True
         except Exception as exc:
             error = exc
             self.update(backup_id, 'interrupted' if isinstance(exc, PowerInterrupted) else 'failed', str(exc))
@@ -366,16 +374,18 @@ class Manager:
         return manifest
 
     def restore(self, backup_id, spec):
-        with self.lock, storage.lock:
+        # Restore and deletion run on the same hypervisor executor. The
+        # catalog keeps the block referenced while restore reads its archive.
+        with storage.lock:
             row = self.record(backup_id)
             if row['status'] != 'completed':
                 raise HypervisorError('Only completed backups can be restored')
             path = archive_dir(self.store, self.data, row)
-            manifest = self.verify(path)
-            if manifest['provider'] == 'incus':
-                self.restore_incus(path, manifest, spec)
-            else:
-                self.restore_libvirt(path, manifest, spec)
+        manifest = self.verify(path)
+        if manifest['provider'] == 'incus':
+            self.restore_incus(path, manifest, spec)
+        else:
+            self.restore_libvirt(path, manifest, spec)
         return 'Restored as ' + spec.name + ' (stopped). Check guest identity and network settings before starting.'
 
     def restore_incus(self, path, manifest, spec):

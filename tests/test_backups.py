@@ -228,11 +228,11 @@ def test_portable_incus_archive_removes_original_disk_and_network_dependencies()
     import tarfile
     import yaml
     root = {'path': '/', 'type': 'disk', 'pool': 'old'}
-    vm = {'devices': {'root': root, 'data': {'type': 'disk', 'source': 'original'}, 'nic': {'type': 'nic', 'network': 'original'}}, 'profiles': ['original'], 'config': {'boot.autostart': 'true', 'volatile.uuid': 'original', 'limits.cpu': '2'}}
+    vm = {'created_at': '2026-10-29T22:00:00Z', 'devices': {'root': root, 'data': {'type': 'disk', 'source': 'original'}, 'nic': {'type': 'nic', 'network': 'original'}}, 'profiles': ['original'], 'config': {'boot.autostart': 'true', 'volatile.uuid': 'original', 'limits.cpu': '2'}}
     source, target = io.BytesIO(), io.BytesIO()
     with tarfile.open(fileobj=source, mode='w') as archive:
         for filename, value in [('backup/index.yaml', {'config': {'container': vm}}), ('backup/virtual-machine/backup.yaml', {'container': vm})]:
-            content = yaml.safe_dump(value).encode()
+            content = yaml.safe_dump(value).encode().replace(b"'2026-10-29T22:00:00Z'", b'2026-10-29T22:00:00Z')
             info = tarfile.TarInfo(filename)
             info.size = len(content)
             archive.addfile(info, io.BytesIO(content))
@@ -245,7 +245,31 @@ def test_portable_incus_archive_removes_original_disk_and_network_dependencies()
     with tarfile.open(fileobj=target, mode='r:gz') as archive:
         doc = yaml.safe_load(archive.extractfile('backup/index.yaml').read())
         restored = doc['config']['container']
+        assert restored['created_at'] == '2026-10-29T22:00:00Z'
         assert set(restored['devices']) == {'root'}
         assert restored['profiles'] == []
         assert restored['config'] == {'boot.autostart': 'false', 'limits.cpu': '2'}
         assert archive.extractfile('backup/virtual-machine.img').read() == b'guest!'
+
+
+def test_settings_can_be_saved_during_long_export(api_environment, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    client, store, manager = api_environment
+    headers = auth(client, 'operator')
+    started, release = threading.Event(), threading.Event()
+    def export(vm_name, path, manifest):
+        started.set()
+        assert release.wait(5)
+        (path / 'instance.tar.gz').write_bytes(b'guest')
+    monkeypatch.setattr(manager, 'export_incus', export)
+    bid = add(store)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        job = workers.submit(manager.create, bid, False, None)
+        assert started.wait(2)
+        try:
+            update = workers.submit(lambda: client.put('/api/backups/plans', json={'vm_ids': ['incus:demo'], 'block_id': BLOCK}, headers=headers))
+            assert update.result(timeout=2).status_code == 200
+        finally:
+            release.set()
+        job.result(timeout=2)
