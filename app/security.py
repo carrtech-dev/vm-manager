@@ -57,6 +57,14 @@ class Store:
                 CREATE TABLE IF NOT EXISTS pending_hardware(id TEXT PRIMARY KEY,
                     vm_id TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL,
                     device TEXT NOT NULL DEFAULT '', created REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS vm_snapshots(
+                    vm_id TEXT NOT NULL, name TEXT NOT NULL, parent TEXT,
+                    description TEXT NOT NULL, created REAL NOT NULL,
+                    status TEXT NOT NULL, operation TEXT NOT NULL,
+                    manifest TEXT NOT NULL, error TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY(vm_id,name));
+                CREATE TABLE IF NOT EXISTS snapshot_heads(
+                    vm_id TEXT PRIMARY KEY, name TEXT);
                 CREATE TABLE IF NOT EXISTS attempts(peer TEXT, at REAL);
                 CREATE TABLE IF NOT EXISTS storage_defaults(
                     purpose TEXT PRIMARY KEY CHECK(purpose IN ('vm','iso','backup')),
@@ -79,6 +87,10 @@ class Store:
             db.execute(
                 "UPDATE tasks SET status='interrupted', finished=?, message='Service restarted. Inspect the resource before retrying.' WHERE status IN ('queued','running')",
                 (time.time(),),
+            )
+            db.execute(
+                "UPDATE vm_snapshots SET status='incomplete', error='Service restarted during snapshot operation. Inspect the task log and retry restore or delete the incomplete snapshot.' "
+                "WHERE status IN ('creating','restoring','deleting')"
             )
         self.path.chmod(0o600)
 

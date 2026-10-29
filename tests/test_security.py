@@ -52,6 +52,55 @@ def login(client, username="admin"):
     return {"X-CSRF-Token": r.json()["csrf"]}
 
 
+def test_snapshot_api_permissions_confirmations_and_validation(client, monkeypatch):
+    from app.main import snapshots
+    path = "/api/vms/incus:demo/snapshots"
+    assert client.get(path).status_code == 401
+    monkeypatch.setattr(snapshots, "listing", lambda *args: {"snapshots": [], "supported": True})
+    headers = login(client, "viewer")
+    assert client.get(path).status_code == 200
+    assert client.post(path, headers=headers, json={"name": "one"}).status_code == 403
+    assert client.post(path + "/one/restore", headers=headers, json={"confirm_name": "demo"}).status_code == 403
+    assert client.request("DELETE", path + "/one", headers=headers, json={"confirm_name": "one"}).status_code == 403
+    headers = login(client, "operator")
+    assert client.post(path, json={"name": "one"}).status_code == 403
+    assert client.post(path, headers=headers, json={"name": "../bad"}).status_code == 422
+    assert client.post(path + "/one/restore", headers=headers, json={"confirm_name": "wrong"}).status_code == 400
+    assert client.request("DELETE", path + "/one", headers=headers, json={"confirm_name": "wrong"}).status_code == 400
+
+
+def test_snapshot_tasks_are_audited_and_pending_hardware_blocks_restore(client, monkeypatch):
+    import time
+    import app.main as main
+    headers = login(client, "operator")
+    vm_id = "incus:snapshot-api-check"
+    path = "/api/vms/" + vm_id + "/snapshots"
+    calls = []
+    monkeypatch.setattr(incus, "vm", lambda name: {"name": name})
+    monkeypatch.setattr(main.snapshots, "create", lambda *args: calls.append(args) or "Created snapshot one")
+
+    def wait(response):
+        assert response.status_code == 200, response.text
+        task_id = response.json()["task_id"]
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            row = next(t for t in client.get("/api/tasks").json() if t["id"] == task_id)
+            if row["status"] not in ("running", "queued"):
+                return row
+            time.sleep(.01)
+        pytest.fail("Snapshot task did not finish")
+
+    row = wait(client.post(path, headers=headers, json={"name": "one", "description": "Before upgrade"}))
+    assert row["status"] == "completed"
+    assert calls == [("incus", "snapshot-api-check", vm_id, "one", "Before upgrade")]
+    with store.db() as db:
+        assert db.execute("SELECT 1 FROM audit WHERE action='vm.snapshot.create' AND resource=?", (vm_id,)).fetchone()
+    monkeypatch.setattr(main, "pending_hardware", lambda vm: [{"id": "pending"}])
+    row = wait(client.post(path + "/one/restore", headers=headers, json={"confirm_name": "snapshot-api-check"}))
+    assert row["status"] == "failed"
+    assert "pending hardware" in row["message"]
+
+
 def test_password_hashes():
     hashed = hash_password("example-password")
     assert verify_password("example-password", hashed)

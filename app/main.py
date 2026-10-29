@@ -42,6 +42,7 @@ from .security import Store, ROLES, hash_password, verify_password, token_hash
 from . import organization
 from . import storage
 from .power import PowerInterrupted, PowerRequests
+from .snapshots import Snapshots
 
 DATA = Path(os.environ.get("VM_MANAGER_DATA", "data")).resolve()
 DATA.mkdir(parents=True, exist_ok=True)
@@ -50,6 +51,7 @@ ISOS.mkdir(exist_ok=True)
 store = Store(DATA)
 store.bootstrap(DATA)
 incus, libvirt = Incus(), Libvirt()
+snapshots = Snapshots(store, incus, libvirt)
 app = FastAPI(
     title="CarrTech VM Manager", docs_url=None, redoc_url=None, openapi_url=None
 )
@@ -673,6 +675,54 @@ class Confirm(BaseModel):
     confirm_name: str
 
 
+class SnapshotCreate(BaseModel):
+    name: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,62}$")
+    description: str = Field(default="", max_length=1000)
+
+
+@app.get("/api/vms/{vm_id}/snapshots")
+def list_snapshots(vm_id: str, user=Depends(require())):
+    provider, vm_name = vm_ref(vm_id)
+    return snapshots.listing(provider, vm_name, vm_id)
+
+
+@app.post("/api/vms/{vm_id}/snapshots")
+def create_snapshot(vm_id: str, body: SnapshotCreate, user=Depends(require("operate"))):
+    provider, vm_name = vm_ref(vm_id)
+
+    def create():
+        if pending_hardware(vm_id):
+            raise HypervisorError("Apply or discard pending hardware changes before taking a snapshot.")
+        return snapshots.create(provider, vm_name, vm_id, body.name, body.description)
+
+    return task(user, "vm.snapshot.create", vm_id, create)
+
+
+@app.post("/api/vms/{vm_id}/snapshots/{snapshot}/restore")
+def restore_snapshot(vm_id: str, snapshot: str, body: Confirm, user=Depends(require("operate"))):
+    provider, vm_name = vm_ref(vm_id)
+    name(snapshot)
+    if body.confirm_name != vm_name:
+        raise HTTPException(400, "Type the VM name to confirm snapshot restore")
+
+    def restore():
+        if pending_hardware(vm_id):
+            raise HypervisorError("Apply or discard pending hardware changes before restoring a snapshot.")
+        return snapshots.restore(provider, vm_name, vm_id, snapshot)
+
+    return task(user, "vm.snapshot.restore", vm_id, restore)
+
+
+@app.delete("/api/vms/{vm_id}/snapshots/{snapshot}")
+def delete_snapshot(vm_id: str, snapshot: str, body: Confirm, user=Depends(require("operate"))):
+    provider, vm_name = vm_ref(vm_id)
+    name(snapshot)
+    if body.confirm_name != snapshot:
+        raise HTTPException(400, "Type the snapshot name to confirm deletion")
+    return task(user, "vm.snapshot.delete", vm_id,
+                lambda: snapshots.delete(provider, vm_name, vm_id, snapshot))
+
+
 @app.delete("/api/vms/{vm_id}")
 def delete_vm(vm_id: str, body: Confirm, user=Depends(require("operate"))):
     provider, vm_name = vm_ref(vm_id)
@@ -681,6 +731,8 @@ def delete_vm(vm_id: str, body: Confirm, user=Depends(require("operate"))):
 
     def delete():
         ensure_stopped(provider, vm_name)
+        if snapshots.rows(vm_id):
+            raise HypervisorError("Delete the VM's snapshots first, newest first, before deleting the VM.")
         if provider == "incus":
             incus.delete(vm_name)
         else:
@@ -688,6 +740,7 @@ def delete_vm(vm_id: str, body: Confirm, user=Depends(require("operate"))):
             libvirt.cli("undefine", vm_name, "--nvram")
         with store.db() as db:
             db.execute("DELETE FROM pending_hardware WHERE vm_id=?", (vm_id,))
+            db.execute("DELETE FROM snapshot_heads WHERE vm_id=?", (vm_id,))
             organization.clear(store, "vm", vm_id, db=db)
 
     return task(user, "vm.delete", vm_id, delete)
@@ -1038,6 +1091,7 @@ def pending_hardware(vm_id):
 
 def hardware_task(user, vm_id, kind, body, device=""):
     def save_or_apply():
+        snapshots.guard_start(vm_id)
         provider, vm_name = vm_ref(vm_id)
         status = (
             incus.vm(vm_name)["status"].lower()
@@ -1154,6 +1208,7 @@ def power_action(vm_id, action, cancelled=None):
             return
     with power_requests.transition(vm_id, cancelled):
         if action in ("start", "restart"):
+            snapshots.guard_start(vm_id)
             if pending_hardware(vm_id):
                 apply_pending(vm_id)
             power_requests.check(cancelled)

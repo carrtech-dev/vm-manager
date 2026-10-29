@@ -41,6 +41,57 @@ The **Project** and **Tag** filters above each page combine to narrow VM and net
 
 Projects are inventory groups within VM Manager, independent of Incus projects and user permissions. Assigning a VM does not assign its attached networks automatically; shared networks can remain unassigned or belong to a different project. Metadata is kept in the existing SQLite database and included in deployment backups. Deleting a project or tag removes its assignments and retains the VMs, networks and data. Administrators and operators can manage assignments; viewers can browse and filter them. Changes are audited.
 
+## VM snapshots
+
+Open a VM's **Snapshots** tab, shut it down, then select **Take snapshot**. Give
+the snapshot a unique name and an optional description. Snapshots capture the VM
+configuration and all supported writable disks, including attached Incus custom
+data volumes. Runtime memory is excluded. Apply or discard pending hardware
+changes first. Administrators and operators can create, restore and delete
+snapshots; viewers can inspect the history. Every operation is backed up at the
+configuration level and recorded in the task log and audit trail.
+
+Each snapshot shares unchanged disk blocks through the storage backend's native
+copy-on-write support. History records its parent and the current snapshot base;
+after a restore, a new snapshot branches from the restored snapshot. Incus uses
+native ZFS, Btrfs, thin LVM or Ceph snapshots. Directory storage and thick LVM are
+rejected because they cannot provide the required incremental storage. Libvirt
+uses internal qcow2 snapshots on exclusive file-backed disks; raw disks, shared
+disks, host mounts, passthrough disks, NVRAM and TPM configurations are rejected
+with an explanation. Read-only media are excluded. Snapshots created outside VM
+Manager are listed for visibility and remain managed through the hypervisor.
+
+**Restore** requires the VM's exact name, replaces its current disk contents and
+configuration, and leaves the VM stopped. Restore the original disk attachments
+first if the disk layout has changed. ZFS requires newer snapshots to be deleted
+explicitly before restoring an older one, even when the host is configured to
+delete newer snapshots automatically. **Delete** requires the snapshot's exact
+name and removes that restore point while retaining current VM contents. Delete
+child snapshots first, newest first. Delete managed snapshots before deleting a
+VM so that separately snapshotted data volumes are cleaned up together.
+
+Snapshot operations require a stopped VM to keep its disks consistent. A failed
+or interrupted operation retains its manifest and appears as incomplete. Delete
+an incomplete creation, retry an incomplete deletion, or retry the same restore
+after fixing the reported problem. A partial restore blocks VM Start and hardware
+changes until the restore succeeds. The manifest survives service restarts and
+is included in SQLite deployment backups. Snapshot creation and restore across
+multiple Incus volumes are coordinated operations, not a single atomic storage
+transaction; keep a VM with an incomplete restore stopped during recovery.
+
+Snapshots stay on the VM's storage and do not protect against storage failure or
+loss of the host. They are separate from independent VM backups and from the
+configuration backups automatically taken before management operations. Creating
+snapshots does not impose an automatic retention schedule; delete old restore
+points to reclaim their uniquely retained blocks.
+
+`scripts/snapshot_check.py` is an opt-in acceptance check against the deployed
+service. Run as root on the host with the release environment and `PYTHONPATH` set
+to the release directory. It creates disposable Incus/ZFS and libvirt/qcow2 VMs,
+writes and restores known contents on root and data disks, verifies restored
+configuration, shared storage, parent chains, permissions and deletion guards,
+then removes its resources and temporary operator. Existing VMs are retained.
+
 ## Permissions
 
 | Role | Inventory and tasks | VM, network and ISO operations | User administration and audit |
