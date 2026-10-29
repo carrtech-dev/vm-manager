@@ -64,7 +64,12 @@ def main():
     def volume_path(pool, kind, vm_name):
         p = next(p for p in incus.pools() if p['name'] == pool)
         source_dataset = p['config'].get('zfs.pool_name') or p['config']['source']
-        path = Path('/dev/zvol') / source_dataset / kind / ('default_' + vm_name + '.block')
+        path = Path('/dev/zvol') / source_dataset / kind / (vm_name + '.block' if kind == 'virtual-machines' else 'default_' + vm_name)
+        if not path.exists():
+            # Incus can leave a newly created stopped VM's zvol hidden. Only
+            # these uniquely named test volumes are exposed for marker checks.
+            run('zfs', 'set', 'volmode=dev', str(path.relative_to('/dev/zvol')))
+            run('udevadm', 'settle')
         assert path.exists(), str(path)
         return path
 
@@ -74,7 +79,7 @@ def main():
         network = next(n['name'] for n in inv['networks'] if n['provider'] == 'incus')
         task('POST', '/api/storage/blocks', dict(name=prefix, parent=pool, purpose='backup', size_gib=2))
         block = next(b for b in request('GET', '/api/inventory')['storage_blocks'] if b['name'] == prefix)
-        task('POST', '/api/vms', dict(name=source, cpu=1, memory_gib=1, disk_gib=1, pool=pool, network=network, extra_disks=[1]))
+        task('POST', '/api/vms', dict(name=source, cpu=1, memory_gib=1, disk_gib=4, pool=pool, network=network, extra_disks=[1]))
         root_path = volume_path(pool, 'virtual-machines', source)
         extra_path = volume_path(pool, 'custom', 'vmm-' + source + '-disk1')
         marker = b'CarrTech backup acceptance ' + prefix.encode()
