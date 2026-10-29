@@ -4,7 +4,9 @@ A self-hosted virtualization console for `ctlnxdbn001` (`192.168.8.235`). Manage
 
 ## Open the manager
 
-After deployment, open **https://192.168.8.235:8443** on the local network. The installer generates a server certificate for this address. Trust that certificate on your devices to avoid browser certificate warnings.
+Open **https://vmm.carrtech.dev** through the dedicated Cloudflare Tunnel and sign in with your existing VM Manager account. Public HTTPS uses Cloudflare's trusted certificate. The connector verifies the app's existing HTTPS certificate using a private certificate bundle; VM Manager continues to enforce its own login, permissions and same-origin checks.
+
+Local network access remains available at **https://192.168.8.235:8443**. The installer generates a server certificate for this address. Trust that certificate on your devices to avoid browser certificate warnings. Use this LAN address for large ISO uploads that exceed your Cloudflare plan's request-size limit.
 
 The first run creates `admin` with a random password in `/var/lib/vm-manager/initial-admin.txt` (readable by the service account and root). Retrieve it over your existing SSH connection:
 
@@ -86,6 +88,28 @@ ssh claude@192.168.8.235 'sudo systemctl status vm-manager'
 ssh claude@192.168.8.235 'sudo journalctl -u vm-manager --since "10 minutes ago"'
 ```
 
-The service runs as `vm-manager` in the existing `incus-admin` and `libvirt` groups. Its filesystem writes are restricted to its persistent state directory. Hypervisor group membership is powerful; protect administrator and operator accounts accordingly. This is a single-host LAN control plane, not an internet-facing multi-tenant service.
+### Cloudflare Tunnel
+
+One-time provisioning from clean, integrated `main`, using an operator Mac authenticated for the `carrtech.dev` Cloudflare zone:
+
+```sh
+brew install cloudflared
+cloudflared tunnel login
+python3 scripts/setup_tunnel.py
+python3 scripts/deploy.py
+```
+
+Provisioning creates or reuses the dedicated `vm-manager` tunnel and routes only `vmm.carrtech.dev`. Conflicting DNS records are not overwritten. The account certificate remains on the operator Mac; the tunnel credentials, configuration and origin certificate are installed outside Git under `/opt/carrtech/vm-manager/tunnel`, readable only by the connector's container user/root. Existing tunnel configuration is backed up before replacement. No Cloudflare Access policy is added; the application's existing accounts provide authentication.
+
+Deployment maintains the pinned connector container with automatic restart, validates ingress, checks connector readiness on host loopback port `20243`, and checks public HTTPS health against the deployed revision. The connector uses host networking to reach the existing LAN HTTPS listener, retains the public Host header for CSRF and console WebSocket checks, and returns 404 for unmatched hosts. Other applications' tunnels are independent. Docker is enabled at boot on the established host.
+
+```sh
+ssh claude@192.168.8.235 'sudo docker compose -p vm-manager -f /opt/carrtech/vm-manager/current/deploy/compose.tunnel.yaml logs --tail 50 tunnel'
+curl --fail https://vmm.carrtech.dev/health
+```
+
+To temporarily withdraw public access, stop only this connector with the same Compose file and `stop tunnel`; LAN access continues. A later deployment starts the configured connector again. Removing public access permanently also requires removing its DNS route and provisioning state; retain credentials securely for recovery.
+
+The service runs as `vm-manager` in the existing `incus-admin` and `libvirt` groups. Its filesystem writes are restricted to its persistent state directory. Hypervisor group membership is powerful; protect administrator and operator accounts accordingly. This is a single-host control plane.
 
 Frontend display software is bundled locally: noVNC (MPL-2.0, license in `app/static/vendor/novnc`), Inter (OFL, license in `app/static/fonts`) and the system `spice-html5` package (LGPL-3.0+).

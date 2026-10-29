@@ -62,12 +62,29 @@ def main():
                         "Verified live HTTPS health at https://192.168.8.235:8443 — revision "
                         + revision
                     )
-                    return
+                    break
         except Exception:
             time.sleep(1)
-    raise SystemExit(
-        "Deployment health verification failed; inspect vm-manager.service"
-    )
+    else:
+        raise SystemExit(
+            "Deployment health verification failed; inspect vm-manager.service"
+        )
+    tunnel_enabled = subprocess.run(
+        ["ssh", args.host, "sudo test -f /opt/carrtech/vm-manager/tunnel/credentials.json"]
+    ).returncode == 0
+    if tunnel_enabled:
+        for attempt in range(30):
+            try:
+                with urllib.request.urlopen("https://vmm.carrtech.dev/health", timeout=10) as response:
+                    health = json.load(response)
+                    if (health.get("status") == "ok" and health.get("service") == "vm-manager"
+                            and health.get("revision") == revision):
+                        print("Verified public HTTPS health at https://vmm.carrtech.dev — revision " + revision)
+                        return
+            except Exception:
+                pass
+            time.sleep(2)
+        raise SystemExit("LAN service healthy but public HTTPS verification failed; inspect the tunnel and DNS")
 
 
 if __name__ == "__main__":

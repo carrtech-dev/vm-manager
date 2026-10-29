@@ -1,0 +1,11 @@
+services:
+  tunnel:
+    image: cloudflare/cloudflared:2026.10.3@sha256:faa8e0a1475f137c910be6025f43c8e4092fdd35461b31e19fd1390657a1ff39
+    restart: unless-stopped
+    network_mode: host
+    command: [tunnel, --no-autoupdate, --config, /etc/cloudflared/config.yml, run]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - /opt/carrtech/vm-manager/tunnel:/etc/cloudflared:ro

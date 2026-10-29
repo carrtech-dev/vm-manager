@@ -158,4 +158,28 @@ if not healthy:
         "Service failed health check; previous source restored when available. Database backup retained."
     )
 (base / "deployed-revision").write_text(revision + "\n")
+if (base / "tunnel" / "credentials.json").exists():
+    tunnel = base / "tunnel"
+    subprocess.run(
+        ["install", "-o", "65532", "-g", "65532", "-m", "600",
+         str(certs / "server.crt"), str(tunnel / "origin.crt")],
+        check=True,
+    )
+    compose = ["docker", "compose", "-p", "vm-manager", "-f",
+               str(release / "deploy" / "compose.tunnel.yaml")]
+    subprocess.run(
+        compose + ["run", "--rm", "tunnel", "tunnel", "--config",
+                   "/etc/cloudflared/config.yml", "ingress", "validate"],
+        check=True,
+    )
+    subprocess.run(compose + ["up", "-d"], check=True)
+    for attempt in range(30):
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:20243/ready", timeout=3) as response:
+                if response.status == 200:
+                    break
+        except Exception:
+            time.sleep(1)
+    else:
+        raise SystemExit("App healthy but Cloudflare Tunnel is not ready; inspect vm-manager tunnel logs")
 print("Installed " + revision + "; persistent data and backups retained")
