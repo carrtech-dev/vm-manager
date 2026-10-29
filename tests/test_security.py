@@ -59,6 +59,16 @@ def test_password_hashes():
     assert hashed != hash_password("example-password")
 
 
+def test_frontend_uses_versioned_modules(client):
+    from app.main import ASSET_VERSION
+    response = client.get("/")
+    assert response.headers["cache-control"] == "no-store"
+    prefix = "/assets/" + ASSET_VERSION
+    assert prefix + "/app.js" in response.text
+    assert client.get(prefix + "/app.js").status_code == 200
+    assert client.get(prefix + "/core.js").status_code == 200
+
+
 def test_unauthenticated_inventory(client):
     assert client.get("/api/inventory").status_code == 401
     assert client.get("/api/users").status_code == 401

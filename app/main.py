@@ -33,7 +33,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -1871,6 +1871,12 @@ async def console(ws: WebSocket, vm_id: str):
 
 
 STATIC = Path(__file__).parent / "static"
+ASSET_VERSION = hashlib.sha256(b"".join(
+    p.read_bytes() for p in sorted(STATIC.iterdir()) if p.suffix in (".js", ".css")
+)).hexdigest()[:16]
+# Relative module imports share the same versioned prefix, avoiding old modules
+# in browser/CDN caches after a deployment.
+app.mount("/assets/" + ASSET_VERSION, StaticFiles(directory=STATIC), name="assets")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 if Path("/usr/share/spice-html5").exists():
     app.mount(
@@ -1880,12 +1886,17 @@ if Path("/usr/share/spice-html5").exists():
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html")
+    return frontend_page("index.html")
 
 
 @app.get("/console")
 def console_page(user=Depends(require("operate"))):
-    return FileResponse(STATIC / "console.html")
+    return frontend_page("console.html")
+
+
+def frontend_page(filename):
+    html = (STATIC / filename).read_text().replace("/static/", "/assets/" + ASSET_VERSION + "/")
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 from .limits import BodyLimit
