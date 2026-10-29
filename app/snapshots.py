@@ -103,7 +103,8 @@ class Snapshots:
                 raise HypervisorError("LVM snapshots require a thin pool to share unchanged blocks.")
             drivers[pool] = data["driver"]
         return {"root_pool": root_pool, "volumes": volumes, "disks": disks,
-                "drivers": drivers, "identity": vm.get("config", {}).get("volatile.uuid")}
+                "drivers": drivers, "identity": vm.get("config", {}).get("volatile.uuid"),
+                "description": vm.get("description", "")}
 
     @staticmethod
     def exclusive(volume, vm_name):
@@ -248,6 +249,9 @@ class Snapshots:
                         "config": original.get("config", {}), "description": original.get("description", ""),
                         "restore": manifest["volume_snapshot"]})
                 self.incus.request("PUT", "/1.0/instances/" + quote(vm_name), {"restore": snapshot, "stateful": False})
+                # Incus snapshot metadata contains config/devices but does not
+                # retain the instance description. Restore our saved value too.
+                self.incus.update(vm_name, lambda vm: vm.update(description=manifest.get("description", "")))
             else:
                 self.libvirt.cli("snapshot-revert", vm_name, snapshot)
             self.finish(vm_id, snapshot, "restore")

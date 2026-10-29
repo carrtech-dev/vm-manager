@@ -107,23 +107,30 @@ def main():
         vm_name = prefix + "-incus"
         vm_id = "incus:" + vm_name
         vm_ids.append(vm_id)
-        task("POST", "/api/vms", dict(name=vm_name, cpu=1, memory_gib=1, disk_gib=2,
+        task("POST", "/api/vms", dict(name=vm_name, cpu=1, memory_gib=1, disk_gib=4,
              pool=pool, network=network, extra_disks=[1], secure_boot=False))
         datasets = run("zfs", "list", "-H", "-t", "volume", "-o", "name").splitlines()
         extra = "vmm-" + vm_name + "-disk1"
         disks = [next(d for d in datasets if d.rsplit("/", 1)[-1] == vm_name + ".block"),
                  next(d for d in datasets if d.rsplit("/", 1)[-1] in (extra, "default_" + extra))]
 
+        def expose_zfs(dataset):
+            # Incus hides stopped VM zvols. Expose only our disposable test
+            # volumes to write/read markers without booting a guest filesystem.
+            run("zfs", "set", "volmode=dev", dataset)
+            run("udevadm", "settle", "--timeout=10")
+            return Path("/dev/zvol/" + dataset)
+
         def write_zfs(pattern):
             for dataset in disks:
-                with Path("/dev/zvol/" + dataset).open("r+b", buffering=0) as stream:
+                with expose_zfs(dataset).open("r+b", buffering=0) as stream:
                     stream.seek(4 * 1024**2)
                     stream.write(bytes([pattern]) * 4096)
                     os.fsync(stream.fileno())
 
         def verify_zfs(pattern):
             for dataset in disks:
-                with Path("/dev/zvol/" + dataset).open("rb", buffering=0) as stream:
+                with expose_zfs(dataset).open("rb", buffering=0) as stream:
                     stream.seek(4 * 1024**2)
                     assert stream.read(4096) == bytes([pattern]) * 4096, dataset
 

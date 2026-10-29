@@ -24,6 +24,9 @@ class FakeIncus:
     def vm(self, vm_name):
         return copy.deepcopy(self.instance)
 
+    def update(self, vm_name, transform):
+        transform(self.instance)
+
     def get(self, path):
         if path == "/1.0/storage-pools/pool":
             return {"driver": self.driver}
@@ -94,6 +97,14 @@ def test_btrfs_restore_can_branch_from_old_snapshot(engine):
     engine.restore("incus", "demo", "incus:demo", "one")
     create(engine, "branch")
     assert engine.row("incus:demo", "branch")["parent"] == "one"
+
+
+def test_incus_description_is_restored_from_durable_manifest(engine):
+    engine.incus.instance["description"] = "Before upgrade"
+    create(engine)
+    engine.incus.instance["description"] = "Changed after snapshot"
+    engine.restore("incus", "demo", "incus:demo", "one")
+    assert engine.incus.instance["description"] == "Before upgrade"
 
 
 @pytest.mark.parametrize("unsafe", ["running", "shared", "host-path", "full-copy"])
