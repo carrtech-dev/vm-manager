@@ -75,7 +75,11 @@ def main():
     if tunnel_enabled:
         for attempt in range(30):
             try:
-                with urllib.request.urlopen("https://vmm.carrtech.dev/health", timeout=10) as response:
+                request = urllib.request.Request(
+                    "https://vmm.carrtech.dev/health",
+                    headers={"User-Agent": "CarrTech-VM-Manager-Deploy/1.0"},
+                )
+                with urllib.request.urlopen(request, timeout=10) as response:
                     health = json.load(response)
                     if (health.get("status") == "ok" and health.get("service") == "vm-manager"
                             and health.get("revision") == revision):

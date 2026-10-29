@@ -31,7 +31,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -151,6 +151,14 @@ def require(permission="read"):
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    public_host = request.url.hostname == "vmm.carrtech.dev"
+    # Cloudflare sets this to the visitor's protocol. It is used only to upgrade
+    # public HTTP requests, never to establish identity or relax origin checks.
+    if public_host and request.headers.get("x-forwarded-proto") == "http":
+        return RedirectResponse(
+            str(request.url.replace(scheme="https", netloc="vmm.carrtech.dev")),
+            status_code=308,
+        )
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         origin = request.headers.get("origin")
         if origin and origin != str(request.base_url).rstrip("/"):
@@ -177,6 +185,8 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["Referrer-Policy"] = "same-origin"
+    if public_host:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' wss:; font-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
     )

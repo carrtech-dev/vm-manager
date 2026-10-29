@@ -4,7 +4,7 @@ A self-hosted virtualization console for `ctlnxdbn001` (`192.168.8.235`). Manage
 
 ## Open the manager
 
-Open **https://vmm.carrtech.dev** through the dedicated Cloudflare Tunnel and sign in with your existing VM Manager account. Public HTTPS uses Cloudflare's trusted certificate. The connector verifies the app's existing HTTPS certificate using a private certificate bundle; VM Manager continues to enforce its own login, permissions and same-origin checks.
+Open **https://vmm.carrtech.dev** through the dedicated Cloudflare Tunnel and sign in with your existing VM Manager account. Public HTTPS uses Cloudflare's trusted certificate. HTTP visitors are redirected to HTTPS, with HSTS on public HTTPS responses. The connector verifies the app's existing HTTPS certificate using a private certificate bundle; VM Manager continues to enforce its own login, permissions and same-origin checks.
 
 Local network access remains available at **https://192.168.8.235:8443**. The installer generates a server certificate for this address. Trust that certificate on your devices to avoid browser certificate warnings. Use this LAN address for large ISO uploads that exceed your Cloudflare plan's request-size limit.
 

@@ -64,6 +64,33 @@ def test_unauthenticated_inventory(client):
     assert client.get("/api/users").status_code == 401
 
 
+def test_public_tunnel_upgrades_http_and_keeps_https_origin_checks(client):
+    response = client.get(
+        "https://vmm.carrtech.dev/health?check=tunnel",
+        headers={"X-Forwarded-Proto": "http"}, follow_redirects=False,
+    )
+    assert response.status_code == 308
+    assert response.headers["location"] == "https://vmm.carrtech.dev/health?check=tunnel"
+    response = client.post(
+        "https://vmm.carrtech.dev/api/login", json={},
+        headers={"X-Forwarded-Proto": "http"}, follow_redirects=False,
+    )
+    assert response.status_code == 308
+    response = client.get(
+        "https://vmm.carrtech.dev/health", headers={"X-Forwarded-Proto": "https"}
+    )
+    assert response.status_code == 200
+    assert response.headers["strict-transport-security"] == "max-age=31536000"
+    response = client.post(
+        "https://vmm.carrtech.dev/api/login", json={},
+        headers={"Origin": "https://evil.example", "X-Forwarded-Proto": "https"},
+    )
+    assert response.status_code == 403
+    response = client.get("/health", headers={"X-Forwarded-Proto": "http"})
+    assert response.status_code == 200
+    assert "strict-transport-security" not in response.headers
+
+
 def test_csrf_and_origin(client):
     headers = login(client)
     assert client.post("/api/logout").status_code == 403
