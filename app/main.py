@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from websockets.asyncio.client import unix_connect
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote, urlparse, urlsplit
 
@@ -41,6 +42,7 @@ from .hypervisor import Incus, Libvirt, HypervisorError, name, run, bytes_size
 from .security import Store, ROLES, hash_password, verify_password, token_hash
 from . import organization
 from . import storage
+from . import backups
 from .power import PowerInterrupted, PowerRequests
 
 DATA = Path(os.environ.get("VM_MANAGER_DATA", "data")).resolve()
@@ -49,9 +51,30 @@ ISOS = DATA / "isos"
 ISOS.mkdir(exist_ok=True)
 store = Store(DATA)
 store.bootstrap(DATA)
+backups.initialize(store)
 incus, libvirt = Incus(), Libvirt()
+@asynccontextmanager
+async def backup_lifespan(application):
+    async def loop():
+        while True:
+            try:
+                await asyncio.to_thread(backup_tick)
+            except Exception:
+                logging.exception('Backup scheduler failed')
+            await asyncio.sleep(15)
+    scheduler = asyncio.create_task(loop())
+    try:
+        yield
+    finally:
+        scheduler.cancel()
+        try:
+            await scheduler
+        except asyncio.CancelledError:
+            pass
+
+
 app = FastAPI(
-    title="CarrTech VM Manager", docs_url=None, redoc_url=None, openapi_url=None
+    title="CarrTech VM Manager", docs_url=None, redoc_url=None, openapi_url=None, lifespan=backup_lifespan
 )
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hypervisor")
 stop_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="force-stop")
@@ -93,13 +116,23 @@ def task(user, action, resource, fn):
                     if provider == "incus"
                     else libvirt.cli("dumpxml", vm_name, "--inactive")
                 )
-                with storage.lock:
-                    backups = storage.directory(store, DATA, "backup")
-                    backup = backups / (
-                        task_id + (".json" if provider == "incus" else ".xml")
-                    )
-                    backup.write_text(original)
-                    backup.chmod(0o600)
+                # Emergency stop must not wait behind a full disk export or a
+                # failed backup mount. Its small config snapshot uses local state.
+                if action == 'vm.stop':
+                    directory = DATA / 'config-backups'
+                    directory.mkdir(mode=0o700, exist_ok=True)
+                    backup = directory / (task_id + ('.json' if provider == 'incus' else '.xml'))
+                    try:
+                        backup.write_text(original)
+                        backup.chmod(0o600)
+                    except OSError:
+                        logging.exception('Emergency stop configuration snapshot failed')
+                else:
+                    with storage.lock:
+                        directory = storage.directory(store, DATA, "backup")
+                        backup = directory / (task_id + (".json" if provider == "incus" else ".xml"))
+                        backup.write_text(original)
+                        backup.chmod(0o600)
             result = fn()
             status, message = "completed", (
                 result if isinstance(result, str) else "Completed successfully"
@@ -429,7 +462,7 @@ def get_inventory(user=Depends(require())):
     except HypervisorError as exc:
         blocks, error = [], str(exc)
     return dict(result, storage_blocks=blocks, storage_defaults=storage.defaults(store),
-                storage_error=error)
+                storage_error=error, backup_plans=backups.plans(store), vm_backups=backups.catalog(store))
 
 
 @app.post("/api/storage/blocks")
@@ -478,6 +511,10 @@ def delete_storage_block(block_id: str, body: StorageDelete, user=Depends(requir
             if block_id in storage.defaults(store).values():
                 raise HypervisorError("Change the default storage assignment before deleting this block")
             with store.db() as db:
+                if any(json.loads(r[0]).get('block_id') == block_id for r in db.execute('SELECT settings FROM backup_plans')):
+                    raise HypervisorError('Storage block is referenced by VM backup settings')
+                if db.execute('SELECT 1 FROM vm_backups WHERE block_id=?', (block_id,)).fetchone():
+                    raise HypervisorError('Storage block contains VM backup records')
                 if any(json.loads(r[0]).get("pool") == block["pool"] for r in
                        db.execute("SELECT body FROM pending_hardware")) and block["pool"]:
                     raise HypervisorError("Storage block is referenced by pending hardware changes")
@@ -688,6 +725,7 @@ def delete_vm(vm_id: str, body: Confirm, user=Depends(require("operate"))):
             libvirt.cli("undefine", vm_name, "--nvram")
         with store.db() as db:
             db.execute("DELETE FROM pending_hardware WHERE vm_id=?", (vm_id,))
+            db.execute("DELETE FROM backup_plans WHERE vm_id=?", (vm_id,))
             organization.clear(store, "vm", vm_id, db=db)
 
     return task(user, "vm.delete", vm_id, delete)
@@ -1868,6 +1906,122 @@ async def console(ws: WebSocket, vm_id: str):
             await writer.wait_closed()
         if group:
             await release_console_group(key, group)
+
+
+backup_manager = backups.Manager(store, DATA, incus, libvirt, power_requests, power_action)
+
+
+def check_backup_vms(vm_ids):
+    for vm_id in set(vm_ids):
+        provider, vm_name = vm_ref(vm_id)
+        if provider == 'incus':
+            if incus.vm(vm_name).get('type') != 'virtual-machine':
+                raise HypervisorError('Only virtual machines can be backed up')
+        else:
+            libvirt.xml(vm_name)
+
+
+@app.get('/api/backups')
+def list_backups(user=Depends(require())):
+    return {'backups': backups.catalog(store), 'plans': backups.plans(store)}
+
+
+def queue_backups(user, vm_ids, block_id, shutdown=False, trigger='manual', keep=None):
+    with backup_manager.lock:
+        now = time.time()
+        rows = [(uuid.uuid4().hex, vm_id) for vm_id in sorted(set(vm_ids))]
+        try:
+            with store.db() as db:
+                db.executemany("INSERT INTO vm_backups(id,vm_id,block_id,status,created,trigger) VALUES(?,?,?,'queued',?,?)",
+                               [(bid, vm_id, block_id, now, trigger) for bid, vm_id in rows])
+        except sqlite3.IntegrityError as exc:
+            raise HypervisorError('A selected VM already has a queued or running backup') from exc
+        result = []
+        for backup_id, vm_id in rows:
+            cancelled = power_requests.register(vm_id, 'backup')
+            def create(backup_id=backup_id, vm_id=vm_id, cancelled=cancelled):
+                message = backup_manager.create(backup_id, shutdown, cancelled)
+                if trigger == 'scheduled' and keep is not None:
+                    backup_manager.retain(vm_id, block_id, keep)
+                return message
+            queued = task(user, 'backup.create', vm_id, create)
+            with store.db() as db:
+                db.execute('UPDATE vm_backups SET task_id=? WHERE id=?', (queued['task_id'], backup_id))
+            result.append(dict(queued, backup_id=backup_id, vm_id=vm_id))
+        return {'tasks': result}
+
+
+@app.post('/api/backups')
+def create_backups(body: backups.BackupRequest, user=Depends(require('operate'))):
+    check_backup_vms(body.vm_ids)
+    with storage.lock:
+        backups.destination(store, DATA, body.block_id)
+    return queue_backups(user, body.vm_ids, body.block_id, body.shutdown)
+
+
+@app.put('/api/backups/plans')
+def save_backup_plans(body: backups.PlanRequest, user=Depends(require('operate'))):
+    check_backup_vms(body.vm_ids)
+    plan = backups.Plan.model_validate(body.model_dump())
+    with backup_manager.lock, storage.lock:
+        backups.destination(store, DATA, plan.block_id)
+        with store.db() as db:
+            for vm_id in set(body.vm_ids):
+                db.execute('INSERT INTO backup_plans(vm_id,settings,next_run) VALUES(?,?,?) ON CONFLICT(vm_id) DO UPDATE SET settings=excluded.settings,next_run=excluded.next_run',
+                           (vm_id, plan.model_dump_json(), backups.next_run(plan, time.time()) if plan.enabled else None))
+                store.audit(user['username'], 'backup.plan', vm_id, plan.model_dump_json(), db=db)
+    return {'ok': True}
+
+
+@app.delete('/api/backups/plans/{vm_id}')
+def remove_backup_plan(vm_id: str, user=Depends(require('operate'))):
+    vm_ref(vm_id)
+    with backup_manager.lock, store.db() as db:
+        db.execute('DELETE FROM backup_plans WHERE vm_id=?', (vm_id,))
+        store.audit(user['username'], 'backup.plan.remove', vm_id, db=db)
+    return {'ok': True}
+
+
+@app.post('/api/backups/{backup_id}/restore')
+def restore_backup(backup_id: str, body: backups.Restore, user=Depends(require('operate'))):
+    row = backup_manager.record(backup_id)
+    if row['status'] != 'completed':
+        raise HypervisorError('Only completed backups can be restored')
+    def restore():
+        try:
+            return backup_manager.restore(backup_id, body)
+        except Exception as exc:
+            raise HypervisorError(str(exc) + '. Inspect destination ' + body.name + ' for partial resources before retrying; source VM and backup are retained.') from exc
+    return task(user, 'backup.restore', row['vm_id'] + ' → ' + body.name, restore)
+
+
+@app.delete('/api/backups/{backup_id}')
+def delete_backup(backup_id: str, body: Confirm, user=Depends(require('operate'))):
+    row = backup_manager.record(backup_id)
+    if body.confirm_name != row['vm_id'].split(':', 1)[1]:
+        raise HTTPException(400, 'Type the source VM name to delete this backup')
+    return task(user, 'backup.delete', row['vm_id'], lambda: backup_manager.delete(backup_id))
+
+
+def backup_tick(now=None):
+    now = time.time() if now is None else now
+    with backup_manager.lock:
+        for entry in backups.plans(store):
+            if not entry['enabled'] or entry['next_run'] is None or entry['next_run'] > now:
+                continue
+            plan = backups.Plan.model_validate(entry)
+            # Persist the next calendar slot before dispatch. After downtime,
+            # run once, then skip missed slots instead of flooding the queue.
+            with store.db() as db:
+                db.execute('UPDATE backup_plans SET next_run=? WHERE vm_id=?', (backups.next_run(plan, now), entry['vm_id']))
+            try:
+                queued = queue_backups({'username': 'scheduler'}, [entry['vm_id']], plan.block_id, plan.shutdown, 'scheduled', plan.keep)
+                with store.db() as db:
+                    db.execute('UPDATE backup_plans SET last_task=? WHERE vm_id=?', (queued['tasks'][0]['task_id'], entry['vm_id']))
+            except Exception as exc:
+                store.audit('scheduler', 'backup.schedule.failed', entry['vm_id'], str(exc))
+
+
 
 
 STATIC = Path(__file__).parent / "static"

@@ -11,6 +11,7 @@ from pathlib import Path
 import pwd
 import re
 import socketserver
+import threading
 import uuid
 
 from .hypervisor import Incus, HypervisorError, run
@@ -21,6 +22,7 @@ MOUNTS = Path("/var/lib/vm-manager-storage/mounts")
 SOCKET = Path("/run/vm-manager-storage/control.sock")
 PROPERTY = "carrtech:vmm-block"
 incus = Incus()
+operation_lock = threading.RLock()
 
 
 def read_registry():
@@ -156,13 +158,24 @@ def dispatch(request):
     operation = request.get("operation")
     if operation == "list":
         return [stats(b) for b in read_registry()]
+    if operation == "libvirt_export":
+        from .backup_libvirt import export
+        block_id, backup_id = request.get('block_id', ''), request.get('backup_id', '')
+        if not all(isinstance(v, str) and re.fullmatch(r'[0-9a-f]{32}', v) for v in (block_id, backup_id)):
+            raise HypervisorError('Invalid backup reference')
+        _, block = find_block(block_id)
+        if block['purpose'] != 'backup' or stats(block)['status'] != 'ready':
+            raise HypervisorError('Backup storage is unavailable')
+        return export(block['path'], backup_id, request.get('vm_name', ''))
     if operation == "create":
-        return create(request.get("body"))
+        with operation_lock:
+            return create(request.get("body"))
     if operation in ("grow", "delete"):
         block_id = request.get("block_id", "")
         if not isinstance(block_id, str) or not re.fullmatch(r"[0-9a-f]{32}", block_id):
             raise HypervisorError("Invalid storage block reference")
-        return grow(block_id, request.get("body")) if operation == "grow" else delete(block_id)
+        with operation_lock:
+            return grow(block_id, request.get("body")) if operation == "grow" else delete(block_id)
     raise HypervisorError("Unsupported storage operation")
 
 
@@ -186,7 +199,7 @@ def main():
     os.chown(SOCKET.parent, 0, grp.getgrnam("vm-manager").gr_gid)
     MOUNTS.mkdir(mode=0o755, parents=True, exist_ok=True)
     SOCKET.unlink(missing_ok=True)
-    with socketserver.UnixStreamServer(str(SOCKET), Handler) as server:
+    with socketserver.ThreadingUnixStreamServer(str(SOCKET), Handler) as server:
         os.chown(SOCKET, 0, grp.getgrnam("vm-manager").gr_gid)
         os.chmod(SOCKET, 0o660)
         server.serve_forever()

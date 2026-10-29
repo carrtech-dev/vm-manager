@@ -42,7 +42,7 @@ def broker(operation, **arguments):
     path = os.environ.get("VM_MANAGER_STORAGE_SOCKET", "/run/vm-manager-storage/control.sock")
     try:
         with socket.socket(socket.AF_UNIX) as connection:
-            connection.settimeout(195)
+            connection.settimeout(86500 if operation == "libvirt_export" else 195)
             connection.connect(path)
             connection.sendall(json.dumps({"operation": operation, **arguments}).encode() + b"\n")
             with connection.makefile("rb") as stream:

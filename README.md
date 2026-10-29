@@ -118,7 +118,7 @@ Frontend display software is bundled locally: noVNC (MPL-2.0, license in `app/st
 
 Open **Storage → Create storage block**, choose an underlying ZFS pool, a name,
 capacity in GiB, and one purpose: **VM disks (Incus)**, **ISO images**, or
-**Configuration backups**. A block uses a dedicated dataset on the same physical
+**VM & configuration backups**. A block uses a dedicated dataset on the same physical
 ZFS storage as the chosen pool. ZFS enforces its capacity limit and reserves that
 capacity, so creating or expanding blocks reduces the underlying available space.
 The purpose is fixed at creation. Existing Btrfs pools remain usable for VM disks;
@@ -129,7 +129,7 @@ sets the initial VM storage selection, the destination for new ISO uploads, and
 the destination for configuration snapshots taken before VM operations. The ISO
 library also has an upload destination selector. Existing disks, ISOs and backups
 remain where they are; changing a default does not migrate data. Backup blocks
-hold VM configuration files, not full guest-disk backups. Existing libvirt disk
+hold full VM backups as well as automatic configuration snapshots. Existing libvirt disk
 creation continues to use application disk storage.
 
 Blocks can be expanded but cannot be shrunk. Deletion requires the exact name,
@@ -155,3 +155,65 @@ to the release directory. It creates temporary blocks, a VM and an ISO; checks
 actual hard quotas, capacity reservation, upload/backup routing, expansion and
 deletion guards; restores existing defaults and removes its own resources. It
 uses a temporary operator and never resets existing passwords.
+
+## VM backups and restore
+
+Create storage with purpose **VM & configuration backups** in **Storage**. Open a
+VM’s **Backups** tab or **Options → Backup settings** to select its destination,
+enable a daily or weekly schedule, set an IANA timezone and retention count.
+The global **Backups** screen supports selecting several VMs for immediate backup
+or applying settings to all selected VMs. Administrators and operators manage
+backups; viewers can inspect schedules and restore points. Settings and the
+backup catalog live in SQLite; archive files live on the selected backup block.
+Full backups always require an explicit backup block and never fall back to the
+system disk if it is missing, unmounted or full.
+
+Backups are offline. By default the VM must already be stopped. The optional
+**Gracefully shut down and restart** setting allows downtime for the entire
+backup. Shutdown has the existing 60-second timeout and never forces power off.
+After success or export failure the manager attempts to start a VM it shut down;
+it leaves pending hardware edits unapplied. Force stop cancels that automatic
+restart and stays available during exports. Its configuration snapshot always
+uses local application storage so a slow/full backup block cannot delay it.
+If the service/host stops during backup, the task and restore point become
+interrupted on startup; partial files are retained for inspection/deletion and
+the VM may remain stopped. Inspect its task and power state before retrying.
+
+Incus backups use portable instance exports plus separate exports for each
+attached private custom data volume. They include root/firmware and current VM
+configuration, excluding Incus snapshots and ISO installation media. Host-path
+data disks, shared volumes, passthrough devices and ephemeral/stateful instances
+require manual backup and cause an explicit failure. Libvirt exports support
+private raw/qcow2 file disks, flattening backing chains into standalone qcow2
+files, plus domain XML and file-based NVRAM. TPM, passthrough, shared filesystems,
+block/network disks and encrypted guest state require manual backup. Disk reads
+for libvirt exports run through the existing privileged storage broker; clients
+supply VM/block/backup identifiers, never host file paths or commands.
+
+The scheduler checks every 15 seconds while the service is running. It persists
+next-run timestamps, runs once after missed downtime, and skips additional missed
+slots. Calendar schedules account for the configured timezone and daylight saving
+changes; a repeated clock hour does not run twice. One backup per VM can be active;
+hypervisor tasks are serialized. Retention removes only older successful
+**scheduled** backups of that VM on the same destination, after a successful
+scheduled backup. Manual, failed and interrupted backups remain until deleted.
+Review failures in **Task history**; failure to queue an overlapping schedule is
+recorded in the audit trail.
+
+Select **Restore** on a completed backup, supply an unused VM name and (for Incus)
+a VM disk pool. SHA-256 and file sizes are verified before restoration. Restore
+creates independent disks and a stopped VM with new MAC addresses, autostart
+disabled and ISO media ejected; it never overwrites an existing VM. Libvirt disks
+restore to application disk storage. Network definitions and host firmware must
+still exist. Guest static IPs, hostnames, credentials and application identities
+remain in the disk data: review them before starting the restored VM alongside
+the original. A failed restore may retain partial destination resources for
+inspection; its source VM and backup remain available. Source VM deletion removes
+its schedule but retains restore points. A block referenced by backup settings or
+catalog records cannot be deleted.
+
+Deployment metadata backups contain the backup catalog/plans, not guest archives.
+Protect the selected backup storage independently against host/storage failure.
+`scripts/backup_check.py` is an opt-in host acceptance test using temporary VMs,
+a temporary backup block and a temporary operator. It checks disk content after
+Incus and libvirt restores, checksum rejection, schedules, retention and cleanup.
