@@ -38,7 +38,8 @@ def main():
 
     def request(method, path, body=None, **kwargs):
         response = client.request(method, path, json=body, **kwargs)
-        response.raise_for_status()
+        if response.is_error:
+            raise AssertionError(f"{method} {path}: {response.status_code} {response.text}")
         return response.json()
 
     def task(method, path, body, expected="completed"):
@@ -86,6 +87,9 @@ def main():
                 raise AssertionError("ZFS accepted writes beyond the block quota")
         finally:
             probe.unlink(missing_ok=True)
+            # ZFS frees quota asynchronously. Wait for that transaction before
+            # testing a new upload into the block we intentionally filled.
+            subprocess.run(["zpool", "sync", iso_block["dataset"].split("/")[0]], check=True)
         content = b"\0" * 32768 + b"CD001" + b"\0" * 32768
         uploaded = request("POST", "/api/isos", files={"file": (prefix + ".iso", content)})
         iso_id = uploaded["id"]
