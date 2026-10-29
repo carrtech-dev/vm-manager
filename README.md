@@ -181,7 +181,9 @@ the VM may remain stopped. Inspect its task and power state before retrying.
 
 Incus backups use portable instance exports plus separate exports for each
 attached private custom data volume. They include root/firmware and current VM
-configuration, excluding Incus snapshots and ISO installation media. Host-path
+configuration, excluding Incus snapshots and ISO installation media. Root exports
+stream through a metadata rewrite that removes original volume/profile/network
+references before import; no second full guest archive is staged locally. Host-path
 data disks, shared volumes, passthrough devices and ephemeral/stateful instances
 require manual backup and cause an explicit failure. Libvirt exports support
 private raw/qcow2 file disks, flattening backing chains into standalone qcow2

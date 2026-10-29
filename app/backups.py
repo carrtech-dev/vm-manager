@@ -1,10 +1,15 @@
 """Persistent backup plans and offline, independently restorable VM archives."""
 
 import hashlib
+import gzip
+import io
 import json
 import os
 import re
 import shutil
+import subprocess
+import tarfile
+import tempfile
 import threading
 import time
 import uuid
@@ -12,6 +17,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import yaml
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -134,6 +141,51 @@ def digest(path):
     return result.hexdigest()
 
 
+def portable_instance(source, target):
+    """Stream the root archive with a standalone import configuration.
+
+    The original full configuration lives in our manifest. Incus validates
+    attached custom volumes during import, before we can replace them, so both
+    copies of its import metadata must initially reference only the root disk.
+    """
+    patched = set()
+    with tarfile.open(fileobj=source, mode='r|*') as incoming, gzip.GzipFile(fileobj=target, mode='wb', compresslevel=1) as compressed:
+        with tarfile.open(fileobj=compressed, mode='w|', format=tarfile.PAX_FORMAT) as outgoing:
+            for member in incoming:
+                content = incoming.extractfile(member) if member.isfile() else None
+                if member.name in ('backup/index.yaml', 'backup/virtual-machine/backup.yaml'):
+                    if member.size > 4 * 1024**2:
+                        raise HypervisorError('Incus backup metadata is too large')
+                    document = yaml.safe_load(content.read())
+                    config = document['config'] if member.name == 'backup/index.yaml' else document
+                    vm = config.get('container', config.get('instance'))
+                    if not isinstance(vm, dict):
+                        raise HypervisorError('Unsupported Incus backup metadata')
+                    devices = vm.get('expanded_devices', vm.get('devices', {}))
+                    root = {k: d for k, d in devices.items() if d.get('type') == 'disk' and d.get('path') == '/'}
+                    if len(root) != 1:
+                        raise HypervisorError('Incus backup does not have one root disk')
+                    vm.update(devices=root, expanded_devices=root, profiles=[])
+                    # Import must never autostart a partially restored guest.
+                    conf = vm.get('expanded_config', vm.get('config', {}))
+                    conf = {k: v for k, v in conf.items() if not k.startswith('volatile.')}
+                    conf['boot.autostart'] = 'false'
+                    vm.update(config=conf, expanded_config=conf)
+                    payload = yaml.safe_dump(document).encode()
+                    member.size = len(payload)
+                    content = io.BytesIO(payload)
+                    patched.add(member.name)
+                # extractfile expands holes; remove sparse headers when writing
+                # a portable regular entry, keeping the reconstructed disk bytes.
+                if member.sparse is not None:
+                    member.sparse = None
+                    member.type = tarfile.REGTYPE
+                    member.pax_headers = {k: v for k, v in member.pax_headers.items() if not k.startswith('GNU.sparse.')}
+                outgoing.addfile(member, content)
+    if patched != {'backup/index.yaml', 'backup/virtual-machine/backup.yaml'}:
+        raise HypervisorError('Unsupported Incus archive: import metadata is missing')
+
+
 class Manager:
     def __init__(self, store, data, incus, libvirt, power_requests, power_action):
         self.store, self.data = store, data
@@ -220,6 +272,33 @@ class Manager:
             raise error
         return 'Backup completed: ' + backup_id
 
+    def export_root(self, vm_name, target):
+        # Stream directly to selected storage. Rewriting import metadata requires
+        # no second full archive or temporary guest data on the application disk.
+        with tempfile.TemporaryFile() as errors, target.open('xb') as output:
+            process = subprocess.Popen(['incus', '--force-local', '--quiet', '--project', 'default', 'export', vm_name, '-', '--instance-only', '--compression=gzip'], stdout=subprocess.PIPE, stderr=errors)
+            timer = threading.Timer(86400, process.kill)
+            timer.daemon = True
+            timer.start()
+            try:
+                portable_instance(process.stdout, output)
+                while process.stdout.read(65536):
+                    pass
+                if process.wait():
+                    errors.seek(0)
+                    raise HypervisorError(errors.read(2000).decode(errors='replace') or 'Incus export failed')
+            except Exception as exc:
+                process.kill()
+                process.wait()
+                errors.seek(0)
+                detail = errors.read(2000).decode(errors='replace').strip()
+                if detail:
+                    raise HypervisorError(detail) from exc
+                raise
+            finally:
+                timer.cancel()
+                process.stdout.close()
+
     def export_incus(self, vm_name, path, manifest):
         vm = self.incus.vm(vm_name)
         if vm.get('ephemeral') or vm.get('stateful'):
@@ -247,7 +326,7 @@ class Manager:
             volumes.append(dict(device=key, pool=pool, source=source, file=filename))
         # Portable exports include root disk/firmware. Snapshots and ISO media
         # are excluded; each attached writable volume is exported separately.
-        self.cli('export', vm_name, str(path / 'instance.tar.gz'), '--instance-only', '--compression=gzip')
+        self.export_root(vm_name, path / 'instance.tar.gz')
         for volume in volumes:
             self.cli('storage', 'volume', 'export', volume['pool'], volume['source'], str(path / volume['file']), '--volume-only', '--compression=gzip')
         manifest.update(config=vm, volumes=volumes, media=media)

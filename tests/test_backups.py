@@ -221,3 +221,31 @@ def test_bulk_queue_conflict_is_atomic_and_scheduler_does_not_duplicate(api_envi
     assert len(tasks) == 1
     assert backups.plans(store)[0]['last_task'] == '1'
     assert backups.catalog(store)[-1]['status'] == 'queued'
+
+
+def test_portable_incus_archive_removes_original_disk_and_network_dependencies():
+    import io
+    import tarfile
+    import yaml
+    root = {'path': '/', 'type': 'disk', 'pool': 'old'}
+    vm = {'devices': {'root': root, 'data': {'type': 'disk', 'source': 'original'}, 'nic': {'type': 'nic', 'network': 'original'}}, 'profiles': ['original'], 'config': {'boot.autostart': 'true', 'volatile.uuid': 'original', 'limits.cpu': '2'}}
+    source, target = io.BytesIO(), io.BytesIO()
+    with tarfile.open(fileobj=source, mode='w') as archive:
+        for filename, value in [('backup/index.yaml', {'config': {'container': vm}}), ('backup/virtual-machine/backup.yaml', {'container': vm})]:
+            content = yaml.safe_dump(value).encode()
+            info = tarfile.TarInfo(filename)
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+        info = tarfile.TarInfo('backup/virtual-machine.img')
+        info.size = 6
+        archive.addfile(info, io.BytesIO(b'guest!'))
+    source.seek(0)
+    backups.portable_instance(source, target)
+    target.seek(0)
+    with tarfile.open(fileobj=target, mode='r:gz') as archive:
+        doc = yaml.safe_load(archive.extractfile('backup/index.yaml').read())
+        restored = doc['config']['container']
+        assert set(restored['devices']) == {'root'}
+        assert restored['profiles'] == []
+        assert restored['config'] == {'boot.autostart': 'false', 'limits.cpu': '2'}
+        assert archive.extractfile('backup/virtual-machine.img').read() == b'guest!'
