@@ -951,7 +951,7 @@ function backupForm(vmIds, settings = false) {
 function restoreBackup(id) {
   const b = backupRows().find(b => b.id === id);
   if (!b) return;
-  modal("Restore VM backup", `<div class="warning">Creates a separate, stopped VM with independent disks and new network MAC addresses. ISO media is ejected and autostart is disabled. Guest hostnames, static IPs and application identities remain in the disks; review them before starting. Failed restores may leave partial resources for inspection.</div>` +
+  modal("Restore VM backup", `<div class="warning">Creates a separate, stopped VM with independent disks and new network MAC addresses. ISO media is ejected and autostart is disabled. Guest hostnames, static IPs, application identities and automatic external mounts/credentials remain in the disks; review them before starting. Failed restores may leave partial resources for inspection.</div>` +
     field("Restored VM name", "name", "", {hint: "A unique name, up to 63 letters, digits, underscores or hyphens; start with a letter."}) +
     (b.vm_id.startsWith("incus:") ? select("VM disk storage", "pool", poolOptions(), defaultVMPool()) : `<div class="hint">Restored libvirt disks use application disk storage.</div>`),
     f => queue("/backups/" + id + "/restore", "POST", {name: f.get("name"), pool: f.get("pool") || ""}), {submit: "Restore as new VM", wide: true});
