@@ -36,6 +36,74 @@ export const esc = (value) =>
         c
       ],
   );
+// Keep the value and its control together, including when an address list wraps.
+export const copyButton = (value, label = "value") =>
+  `<button type="button" class="copy-button" data-copy="${esc(value)}" aria-label="${esc(`Copy ${label} ${value}`)}" title="${esc(`Copy ${label}`)}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h4"/></svg></button>`;
+export const copyValue = (value, label = "hostname", content = esc(value)) =>
+  `<span class="copy-value">${content}${copyButton(value, label)}</span>`;
+const missingAddresses = new Set(["none", "auto", "disabled", "—"]);
+export const copyAddresses = (value, fallback = "None") => {
+  const values = (Array.isArray(value) ? value : String(value || "").split(","))
+    .map(v => String(v).trim()).filter(Boolean);
+  return values.length ? values.map(v => missingAddresses.has(v.toLowerCase())
+    ? esc(v) : copyValue(v, "IP address")).join(", ") : esc(fallback);
+};
+export async function copyText(value) {
+  try {
+    await navigator.clipboard.writeText(value);
+    return;
+  } catch {
+    // Also support older browsers and LAN HTTP sessions without Clipboard API.
+  }
+  const focused = document.activeElement;
+  const selection = document.getSelection();
+  const ranges = Array.from({ length: selection?.rangeCount || 0 }, (_, i) => selection.getRangeAt(i));
+  const inputSelection = focused && ["INPUT", "TEXTAREA"].includes(focused.tagName)
+    ? [focused.selectionStart, focused.selectionEnd, focused.selectionDirection] : null;
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.setAttribute("aria-label", "Copy to clipboard");
+  input.style.cssText = "position:fixed;opacity:0;pointer-events:none";
+  // A modal makes elements outside it inert, so the fallback must live inside it.
+  (document.querySelector("dialog[open]") || document.body).append(input);
+  try {
+    input.select();
+    if (!document.execCommand("copy")) throw new Error("Copy failed. Select the value and copy it manually.");
+  } finally {
+    input.remove();
+    focused?.focus({ preventScroll: true });
+    if (inputSelection?.[0] != null) focused.setSelectionRange(...inputSelection);
+    if (selection) {
+      selection.removeAllRanges();
+      ranges.forEach(range => selection.addRange(range));
+    }
+  }
+}
+function copyFeedback(message, type = "success") {
+  $$(".copy-feedback").forEach(element => element.remove());
+  toast(message, type, type === "success" ? 2500 : 7000).classList.add("copy-feedback");
+}
+export function bindCopyButtons() {
+  document.addEventListener("click", async event => {
+    const button = event.target.closest("[data-copy]");
+    if (!button) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (button.disabled) return;
+    if (button.dataset.copying) return;
+    button.dataset.copying = "true";
+    button.setAttribute("aria-busy", "true");
+    try {
+      await copyText(button.dataset.copy);
+      copyFeedback("Copied to clipboard");
+    } catch {
+      copyFeedback("Copy failed. Select the value and copy it manually.", "error");
+    } finally {
+      delete button.dataset.copying;
+      button.removeAttribute("aria-busy");
+    }
+  }, true);
+}
 export const size = (bytes, decimals = 1) => {
   if (!bytes) return "—";
   const k = Math.min(4, Math.floor(Math.log(bytes) / Math.log(1024)));
@@ -90,22 +158,23 @@ export async function api(path, method = "GET", body = null) {
   }
   return data;
 }
-export function toast(message, type = "success") {
+export function toast(message, type = "success", timeout = 7000) {
   const element = document.createElement("div");
   element.className = "toast " + type;
   element.textContent = message;
-  $("#toasts").append(element);
-  setTimeout(() => element.remove(), 7000);
+  ($("dialog[open] .dialog-toasts") || $("#toasts")).append(element);
+  setTimeout(() => element.remove(), timeout);
+  return element;
 }
 export function modal(
   title,
   content,
   onSubmit,
-  { wide = false, submit = "Save changes", danger = false } = {},
+  { wide = false, submit = "Save changes", danger = false, copyTitle = "" } = {},
 ) {
   const dialog = $("#modal");
   dialog.className = wide ? "wide" : "";
-  dialog.innerHTML = `<form id="dialog-form"><header><div><span class="eyebrow">CARRTECH VM MANAGER</span><h2>${esc(title)}</h2></div><button type="button" class="icon-button close-modal" aria-label="Close dialog">×</button></header><div class="dialog-content">${content}</div><div class="form-error" role="alert" hidden></div><footer><button type="button" class="button secondary close-modal">Cancel</button><button class="button ${danger ? "danger" : "primary"}" type="submit">${esc(submit)}</button></footer></form>`;
+  dialog.innerHTML = `<form id="dialog-form"><header><div><span class="eyebrow">CARRTECH VM MANAGER</span><h2>${esc(title)}${copyTitle ? copyButton(copyTitle, "hostname") : ""}</h2></div><button type="button" class="icon-button close-modal" aria-label="Close dialog">×</button></header><div class="dialog-content">${content}</div><div class="form-error" role="alert" hidden></div><div class="dialog-toasts" aria-live="polite"></div><footer><button type="button" class="button secondary close-modal">Cancel</button><button class="button ${danger ? "danger" : "primary"}" type="submit">${esc(submit)}</button></footer></form>`;
   $$(".close-modal", dialog).forEach((b) => (b.onclick = () => dialog.close()));
   $("#dialog-form").onsubmit = async (event) => {
     event.preventDefault();

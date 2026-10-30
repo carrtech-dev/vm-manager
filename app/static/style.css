@@ -1408,3 +1408,57 @@ dialog .warning {
 .workspace {
   min-height: 0;
 }
+
+/* Inline copy controls are siblings of links so copying never navigates. */
+.copy-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  vertical-align: middle;
+}
+.copy-value > a {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.copy-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  vertical-align: middle;
+}
+.copy-button:hover {
+  color: var(--text-primary);
+  background: var(--bg-surfaceRaised);
+  border-color: var(--border-default);
+}
+.tree-vm > .copy-value {
+  flex: 1;
+  min-width: 0;
+}
+.tree-vm > .copy-value > a {
+  flex: 1;
+}
+
+.dialog-toasts:empty {
+  display: none;
+}
+.dialog-toasts {
+  padding: 0 24px 16px;
+}
+
+.tree-host a,
+.tree-vm a {
+  color: inherit;
+}

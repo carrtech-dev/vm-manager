@@ -1,4 +1,6 @@
 import RFB from "/static/vendor/novnc/core/rfb.js";
+import { copyValue, bindCopyButtons } from "./core.js";
+bindCopyButtons();
 const vm = new URLSearchParams(location.search).get("vm");
 const status = document.getElementById("console-status");
 let connection, retryTimer, healthTimer;
@@ -35,7 +37,7 @@ async function connect() {
     message("Invalid virtual machine", true);
     return;
   }
-  document.getElementById("console-title").textContent = vm.split(":")[1];
+  document.getElementById("console-title").innerHTML = copyValue(vm.split(":")[1]);
   const response = await fetch("/api/me");
   if (!response.ok) {
     message(
