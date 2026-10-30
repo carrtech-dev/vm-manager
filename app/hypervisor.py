@@ -229,7 +229,9 @@ class Incus:
                 "path": "/",
                 "pool": spec["pool"],
                 "size": str(spec["disk_gib"]) + "GiB",
-                "boot.priority": "0",
+                # Match Incus's root-disk default: ahead of NICs/data disks (0),
+                # behind installation media (10). A tie lets PXE run first.
+                "boot.priority": "1",
             },
             "eth0": {"type": "nic", "name": "eth0", "network": spec["network"]},
         }

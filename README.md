@@ -25,6 +25,15 @@ Change the password through **Account** after signing in; the initial credential
 5. Eject its ISO through **Hardware**. For a running VM this is saved as a pending change; use **Restart** in VM Manager to apply it and boot from disk.
 6. CPU, memory, disks, network adapters, CD-ROMs, Secure Boot and autostart can be changed through the VM workspace. While running, hardware changes are saved persistently and shown as **Current → After restart** in the Hardware tab. Use **Restart** in VM Manager to shut down gracefully, apply the pending changes and start again, or shut down and use **Start**. Rebooting only inside the guest does not apply these pending changes. Stopped VMs apply edits immediately. Pending changes can be discarded before application. A failed change leaves the VM stopped with remaining changes retained; inspect the task log before retrying. Disk expansion does not expand the guest filesystem; complete that inside the guest.
 
+New Incus VMs boot installation media first (priority 10), then their system disk
+(priority 1), before network/PXE and extra data disks (default priority 0). Older
+VM Manager VMs created with root disk priority 0 can spend minutes waiting for
+IPv4 and IPv6 PXE to time out. Back up their configuration, then set
+`incus config device set <vm-name> root boot.priority=1` on the host. This takes
+effect at the next full shutdown/start, including **Restart** in VM Manager;
+rebooting inside the guest retains the existing QEMU device order. Preserve any
+deliberately customized boot priorities.
+
 VM summaries refresh CPU and memory usage every five seconds, separately from configured resource limits. CPU percentage is normalized across allocated vCPUs. Memory uses guest usage when reported; otherwise it is explicitly labelled as host VM resident memory, which includes VM overhead and is not guest application usage. Missing measurements are shown as unavailable.
 
 Console WebSockets send ping/pong keep-alives every 20 seconds. Idle input channels stay connected, permissions are rechecked every 20 seconds, and the browser reconnects broken display/input channels. The normal 12-hour sign-in expiry still applies.

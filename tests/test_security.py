@@ -497,6 +497,29 @@ def test_incus_update_uses_optimistic_lock(monkeypatch):
     assert headers == ['"version1"']
 
 
+@pytest.mark.parametrize("with_iso", [False, True])
+def test_new_vm_boots_root_before_pxe_and_data_disks(monkeypatch, with_iso):
+    from app.hypervisor import Incus
+
+    driver = Incus()
+    requests = []
+    monkeypatch.setattr(driver, "request", lambda *args: requests.append(args))
+    driver.create({
+        "name": "boot-order-check", "pool": "test-pool", "disk_gib": 8,
+        "network": "test-net", "cpu": 1, "memory_gib": 1,
+        "secure_boot": False, "extra_disks": [4],
+    }, {"name": "install.iso", "path": "/tmp/install.iso"} if with_iso else None)
+    devices = next(args[2]["devices"] for args in requests if args[1] == "/1.0/instances")
+    root_priority = int(devices["root"]["boot.priority"])
+    # Incus sorts higher priorities first. NICs and data disks default to 0;
+    # equal priorities put the NIC ahead of root on the affected host.
+    for key in ("eth0", "disk1"):
+        assert root_priority > int(devices[key].get("boot.priority", "0"))
+    if with_iso:
+        assert int(devices["cdrom"]["boot.priority"]) > root_priority
+        assert int(driver.cdrom({"name": "other.iso"}, False)["boot.priority"]) < root_priority
+
+
 def test_mounted_iso_boots_before_existing_high_priority_disk(client, monkeypatch):
     headers = login(client)
     vm = {
