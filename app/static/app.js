@@ -21,6 +21,7 @@ import {
   queue,
   matchesOrganization,
 } from "./core.js";
+import { watchTaskDetail } from "./task-detail.js";
 const pageNames = {
   overview: "Overview",
   vms: "Virtual machines",
@@ -1839,20 +1840,25 @@ async function action(name, id) {
     case "task-detail": {
       const t = state.tasks.find((t) => t.id === id);
       if (!t) break;
+      const renderDetails = t => properties([
+        ["Operation", esc(t.action)],
+        ["Resource", resourceName(t.resource)],
+        ["User", esc(t.username)],
+        ["Started", when(t.started)],
+        ["Finished", t.finished ? when(t.finished) : "In progress"],
+        ["Status", badge(t.status)],
+        ["Result", esc(t.message || (t.status === "queued" ? "Waiting for worker / resource" : "Waiting for the host"))],
+      ]);
       const dialog = modal(
         "Task details",
-        properties([
-          ["Operation", esc(t.action)],
-          ["Resource", resourceName(t.resource)],
-          ["User", esc(t.username)],
-          ["Started", when(t.started)],
-          ["Finished", t.finished ? when(t.finished) : "In progress"],
-          ["Status", badge(t.status)],
-          ["Result", esc(t.message || "Waiting for the host")],
-        ]),
+        `<div class="task-detail-properties">${renderDetails(t)}</div><p class="muted task-status-note" role="status">Updating status…</p>
+        <details class="task-output"><summary>Host output</summary>
+        <p class="muted task-output-status" role="status">Expand to connect. Output stops streaming when collapsed.</p>
+        <pre class="task-output-text" tabindex="0" aria-label="Host output"></pre></details>`,
         async () => {},
-        { submit: "Close" },
+        { submit: "Close", wide: true },
       );
+      watchTaskDetail(dialog, t, renderDetails);
       $("button[type=submit]", dialog).onclick = (e) => {
         e.preventDefault();
         dialog.close();

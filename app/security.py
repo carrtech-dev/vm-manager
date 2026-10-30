@@ -50,6 +50,10 @@ class Store:
                     csrf TEXT NOT NULL, expires REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, action TEXT, resource TEXT,
                     username TEXT, status TEXT, started REAL, finished REAL, message TEXT);
+                CREATE TABLE IF NOT EXISTS task_output(
+                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    seq INTEGER NOT NULL, at REAL NOT NULL, text TEXT NOT NULL,
+                    PRIMARY KEY(task_id,seq));
                 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, at REAL, username TEXT,
                     action TEXT, resource TEXT, detail TEXT);
                 CREATE TABLE IF NOT EXISTS isos(id TEXT PRIMARY KEY, name TEXT UNIQUE, path TEXT,

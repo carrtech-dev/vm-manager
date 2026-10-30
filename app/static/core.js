@@ -132,14 +132,14 @@ export const can = (permission) =>
   permission === "admin"
     ? state.user?.role === "administrator"
     : ["administrator", "operator"].includes(state.user?.role);
-export async function api(path, method = "GET", body = null) {
+export async function api(path, method = "GET", body = null, options = {}) {
   const headers = {};
   if (state.user?.csrf) headers["X-CSRF-Token"] = state.user.csrf;
   if (body !== null) {
     headers["Content-Type"] = "application/json";
     body = JSON.stringify(body);
   }
-  const response = await fetch("/api" + path, { method, headers, body });
+  const response = await fetch("/api" + path, { ...options, method, headers, body });
   let data;
   try {
     data = await response.json();
@@ -173,6 +173,7 @@ export function modal(
   { wide = false, submit = "Save changes", danger = false, copyTitle = "" } = {},
 ) {
   const dialog = $("#modal");
+  dialog.dispatchEvent(new Event("modal-replace"));
   dialog.className = wide ? "wide" : "";
   dialog.innerHTML = `<form id="dialog-form"><header><div><span class="eyebrow">CARRTECH VM MANAGER</span><h2>${esc(title)}${copyTitle ? copyButton(copyTitle, "hostname") : ""}</h2></div><button type="button" class="icon-button close-modal" aria-label="Close dialog">×</button></header><div class="dialog-content">${content}</div><div class="form-error" role="alert" hidden></div><div class="dialog-toasts" aria-live="polite"></div><footer><button type="button" class="button secondary close-modal">Cancel</button><button class="button ${danger ? "danger" : "primary"}" type="submit">${esc(submit)}</button></footer></form>`;
   $$(".close-modal", dialog).forEach((b) => (b.onclick = () => dialog.close()));

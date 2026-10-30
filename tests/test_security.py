@@ -1614,3 +1614,74 @@ def test_vm_creation_and_backup_restore_reserve_correct_vm_keys(client, monkeypa
     monkeypatch.setattr(main.backup_manager, 'record', lambda _: {'status': 'completed', 'vm_id': 'libvirt:source'})
     main.restore_backup('backup', main.backups.Restore(name='restored'), {'username': 'operator'})
     assert submitted[-1] == {'libvirt:source', 'libvirt:restored'}
+
+
+def test_task_detail_and_output_permissions_cursors_and_legacy_tasks(client):
+    from app.task_output import Recorder
+    task_id = 'output-api-check'
+    legacy_id = 'output-legacy-check'
+    with store.db() as db:
+        for value in (task_id, legacy_id):
+            db.execute('INSERT OR REPLACE INTO tasks VALUES(?,?,?,?,?,?,?,?)',
+                       (value, 'test', 'incus:demo', 'operator', 'completed', 0, 1, 'Done'))
+        db.execute('DELETE FROM task_output WHERE task_id=?', (task_id,))
+    recorder = Recorder(store, task_id)
+    recorder('first\n')
+    recorder('<script>unsafe host text</script>\n')
+    path = '/api/tasks/' + task_id
+    assert client.get(path).status_code == 401
+    assert client.get(path + '/output').status_code == 401
+    login(client, 'viewer')
+    detail = client.get(path).json()
+    assert detail['status'] == 'completed' and 'entries' not in detail
+    assert client.get('/api/tasks/missing').status_code == 404
+    assert client.get('/api/tasks/missing/output').status_code == 404
+    response = client.get(path + '/output')
+    assert response.status_code == 200
+    assert response.headers['cache-control'] == 'no-store'
+    assert response.headers['x-accel-buffering'] == 'no'
+    assert 'text/event-stream' in response.headers['content-type']
+    assert 'first' in response.text and 'event: done' in response.text
+    assert 'first' not in client.get(path + '/output?after=1').text
+    assert 'first' not in client.get(path + '/output', headers={'Last-Event-ID': '1'}).text
+    assert 'event: output' not in client.get(path + '/output?after=2').text
+    assert client.get(path + '/output?after=-1').status_code == 422
+    assert client.get(path + '/output?after=9223372036854775808').status_code == 422
+    assert client.get(path + '/output', headers={'Last-Event-ID': '9223372036854775808'}).status_code == 400
+    assert client.get(path + '/output', headers={'Last-Event-ID': 'bad'}).status_code == 400
+    assert 'event: done' in client.get('/api/tasks/' + legacy_id + '/output').text
+    with store.db() as db:
+        db.execute("UPDATE users SET enabled=0 WHERE username='viewer'")
+    assert client.get(path + '/output').status_code == 401
+
+
+def test_task_records_running_output_and_terminal_failure(client):
+    import app.main as main
+    import threading
+    import time
+    from app.task_output import emit
+    login(client, 'operator')
+    entered, release = threading.Event(), threading.Event()
+    def work():
+        emit('early host output\n')
+        entered.set()
+        assert release.wait(5)
+        raise ValueError('injected host failure')
+    task_id = main.task({'username': 'operator'}, 'test.output', 'disposable', work)['task_id']
+    try:
+        assert entered.wait(3)
+        assert client.get('/api/tasks/' + task_id).json()['status'] == 'running'
+        with store.db() as db:
+            assert any('early host output' in row[0] for row in db.execute(
+                'SELECT text FROM task_output WHERE task_id=?', (task_id,)))
+    finally:
+        release.set()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if client.get('/api/tasks/' + task_id).json()['status'] == 'failed':
+            break
+        time.sleep(.01)
+    else:
+        pytest.fail('Task did not finish')
+    text = client.get('/api/tasks/' + task_id + '/output').text
+    assert 'early host output' in text and 'Failed: injected host failure' in text

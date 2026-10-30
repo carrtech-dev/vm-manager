@@ -6,10 +6,13 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 import httpx
+
+from .task_output import emit, capturing, stream_command, command_label
 
 NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,62}$")
 
@@ -32,14 +35,20 @@ def name(value):
 
 def run(*args, timeout=180, stdin=None):
     try:
-        p = subprocess.run(
-            args,
-            input=stdin,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
+        label = command_label(args) if capturing() else None
+        if label:
+            emit(f"Host: {label} started\n")
+            p = stream_command(args, timeout, stdin)
+            emit(f"Host: {label} exited with code {p.returncode}\n")
+        else:
+            p = subprocess.run(
+                args,
+                input=stdin,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
     except (OSError, subprocess.TimeoutExpired) as e:
         raise HypervisorError(str(e)) from e
     if p.returncode:
@@ -72,6 +81,9 @@ class Incus:
         self.socket = os.environ.get("INCUS_SOCKET", "/var/lib/incus/unix.socket")
 
     def request(self, method, path, data=None, wait=True, etag=None):
+        mutating = method != "GET" and capturing()
+        if mutating:
+            emit(f"Incus: {method} {urlsplit(path).path}\n")
         with httpx.Client(
             transport=httpx.HTTPTransport(uds=self.socket),
             base_url="http://incus",
@@ -89,21 +101,34 @@ class Incus:
                 raise error(result.get("error", "Incus request failed"))
             if result.get("type") == "async" and wait:
                 operation_url = urlsplit(result["operation"])
-                operation = client.get(
-                    operation_url.path
-                    + "/wait?timeout=180"
-                    + ("&" + operation_url.query if operation_url.query else "")
-                ).json()
-                meta = operation.get("metadata") or {}
-                if operation.get("type") == "error":
-                    raise HypervisorError(
-                        operation.get("error", "Failed waiting for operation")
-                    )
-                if meta.get("status_code") != 200:
-                    raise HypervisorError(
-                        meta.get("err")
-                        or "Incus operation is still running; inspect the resource before retrying."
-                    )
+                deadline = time.monotonic() + 180
+                previous = None
+                while True:
+                    operation = client.get(
+                        operation_url.path
+                        + ("/wait?timeout=1" if mutating else "/wait?timeout=180")
+                        + ("&" + operation_url.query if operation_url.query else "")
+                    ).json()
+                    meta = operation.get("metadata") or {}
+                    if operation.get("type") == "error":
+                        raise HypervisorError(operation.get("error", "Failed waiting for operation"))
+                    progress = meta.get("metadata") or {}
+                    # Progress strings are host messages. Never expose API bodies,
+                    # configuration, console credentials, or arbitrary metadata.
+                    detail = "; ".join(str(v) for k, v in progress.items()
+                                       if k.endswith('_progress') and isinstance(v, str))
+                    message = f"Incus: {meta.get('status', 'Waiting for host')}" + (f" · {detail}" if detail else "")
+                    if mutating and message != previous:
+                        emit(message + "\n")
+                        previous = message
+                    if meta.get("status_code") == 200:
+                        break
+                    if (not mutating or meta.get("status_code") not in (100, 103, 104, 105)
+                            or time.monotonic() >= deadline):
+                        raise HypervisorError(meta.get("err") or
+                            "Incus operation is still running; inspect the resource before retrying.")
+            elif mutating:
+                emit("Incus: request completed\n")
             result["_etag"] = response.headers.get("etag")
             return result
 

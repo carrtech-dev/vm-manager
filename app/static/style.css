@@ -1466,3 +1466,26 @@ dialog .warning {
 .vm-select-cell { width: 36px; }
 .vm-select-cell input, #vm-select-all, input[name="preserve_backups"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent-orange); }
 .bulk-vm-toolbar { margin-bottom: 16px; }
+
+.task-output {
+  margin-top: 18px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  padding: 12px;
+}
+.task-output summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.task-output-text {
+  background: var(--bg-taskLog);
+  color: var(--text-primary);
+  padding: 12px;
+  border-radius: 4px;
+  max-height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px/1.6 ui-monospace, monospace;
+}
+.task-output-text:empty { display: none; }
