@@ -35,6 +35,11 @@ def pending(config):
         with urllib.request.urlopen(req, timeout=10) as response:
             stats = json.load(response)
     except Exception as exc:
+        cache_path = ROOT / config.get('id', '') / 'cache'
+        if config.get('path') and not os.path.ismount(config['path']) and not any(p.is_file() for p in cache_path.rglob('*')):
+            # A first mount that failed authentication cannot have dirty data
+            # when neither a mount nor any persistent cache files exist.
+            return
         raise RuntimeError('Cannot verify pending S3 uploads. Keep the mount and cache, restore its service, then retry.') from exc
     cache = stats.get('diskCache') or {}
     if cache.get('uploadsInProgress', 0) or cache.get('uploadsQueued', 0) or cache.get('erroredFiles', 0):
@@ -75,6 +80,8 @@ def execute(body):
         command('timeout', '15', 'ls', '-A', str(target), timeout=20)
         return 'Mounted at ' + str(target)
     if body['operation'] == 'detach':
+        if not config_path.exists() and os.path.ismount(target):
+            raise RuntimeError('Mount configuration is missing; inspect the guest before detaching')
         if config_path.exists():
             config = json.loads(config_path.read_text())
             if busy(target):

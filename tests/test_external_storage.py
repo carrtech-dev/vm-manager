@@ -136,7 +136,7 @@ def test_incident_payload_uses_stdin_and_never_argv(registry, monkeypatch):
         return SimpleNamespace(returncode=0, stdout='Mounted')
     monkeypatch.setattr(ext.subprocess, 'run', execute)
     ext.guest('incus:one', {'source': {'password': 'SECRET-CREDENTIAL'}})
-    args, kwargs = calls[0]
+    args, kwargs = calls[-1]
     assert 'SECRET-CREDENTIAL' not in repr(args)
     assert 'SECRET-CREDENTIAL' in kwargs['input']
 
@@ -208,6 +208,20 @@ def test_s3_mount_reference_count_is_not_an_open_file(monkeypatch):
         def read(self): return b'{"inUse":1,"diskCache":{"uploadsQueued":0,"uploadsInProgress":0,"erroredFiles":0}}'
     monkeypatch.setattr(guest_storage.urllib.request, 'urlopen', lambda *a, **k: Response())
     guest_storage.pending(dict(source=dict(kind='s3'), rc_port=1234, rc_password='secret'))
+
+
+def test_failed_s3_setup_with_no_mount_or_cache_can_be_detached(tmp_path, monkeypatch):
+    monkeypatch.setattr(guest_storage, 'ROOT', tmp_path)
+    monkeypatch.setattr(guest_storage.os.path, 'ismount', lambda _: False)
+    def fail(*args, **kwargs): raise OSError('Connection refused')
+    monkeypatch.setattr(guest_storage.urllib.request, 'urlopen', fail)
+    config = dict(id='a' * 32, path='/mnt/cloud', source=dict(kind='s3'), rc_port=1234, rc_password='secret')
+    guest_storage.pending(config)
+    cache = tmp_path / config['id'] / 'cache'
+    cache.mkdir(parents=True)
+    (cache / 'pending').write_bytes(b'unsent')
+    with pytest.raises(RuntimeError, match='Cannot verify'):
+        guest_storage.pending(config)
 
 
 def test_broker_rejects_malformed_external_request_without_echoing_secret(registry):

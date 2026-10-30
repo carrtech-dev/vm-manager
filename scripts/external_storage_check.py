@@ -38,6 +38,16 @@ def main():
         vms.append('libvirt:' + args.libvirt_vm)
     if any(not vm.split(':', 1)[1].startswith('vmm-external-check-') for vm in vms):
         raise SystemExit('Use disposable guests named vmm-external-check-*')
+    for vm_id in vms:
+        provider, vm_name = vm_id.split(':', 1)
+        command = (['incus', 'exec', vm_name, '--mode=non-interactive', '--', 'true'] if provider == 'incus'
+                   else ['virsh', 'qemu-agent-command', vm_name, '{"execute":"guest-ping"}'])
+        for attempt in range(90):
+            if subprocess.run(command, capture_output=True, timeout=20).returncode == 0:
+                break
+            time.sleep(1)
+        else:
+            raise SystemExit('Guest agent is not ready: ' + vm_id)
     if args.sources.stat().st_mode & 0o077:
         raise SystemExit('The source configuration file must be readable only by root')
     definitions = json.loads(args.sources.read_text())
@@ -144,6 +154,10 @@ def main():
             # mounts and saved credentials never connect to the source storage.
             if subprocess.run(['incus', 'info', copy], capture_output=True).returncode == 0:
                 task('DELETE', '/api/vms/incus:' + copy, {'confirm_name': copy})
+        # Include incomplete intent records from a setup that failed before its
+        # task returned successfully, so recovery does not leave hidden refs.
+        mounts = [(m['vm_id'], m) for m in request('GET', '/api/storage/sources')['mounts']
+                  if m['source_id'] in {s['id'] for s in sources}]
         for vm_id, mount in reversed(mounts):
             task('DELETE', '/api/vms/' + vm_id + '/mounts/' + mount['id'], {'confirm_name': mount['id']})
         for source in sources:

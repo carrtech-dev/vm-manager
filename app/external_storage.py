@@ -265,6 +265,15 @@ def guest(vm_id, body):
         if vm.get('type') != 'virtual-machine' or vm['status'].lower() != 'running':
             raise HypervisorError('Start the Linux VM before configuring its mounted storage')
         try:
+            ready = time.monotonic() + 30
+            while True:
+                probe = subprocess.run(['incus', '--force-local', '--project', 'default', 'exec', vm_name,
+                    '--mode=non-interactive', '--', '/usr/bin/true'], capture_output=True, timeout=10)
+                if probe.returncode == 0:
+                    break
+                if time.monotonic() >= ready:
+                    raise HypervisorError('Automatic mounting requires a running Linux VM with its Incus agent, Python 3 and systemd')
+                time.sleep(1)
             result = subprocess.run(['incus', '--force-local', '--project', 'default', 'exec', vm_name,
                 '--mode=non-interactive', '--', '/usr/bin/python3', '-c', script],
                 input=json.dumps(body), capture_output=True, text=True, timeout=1100)
@@ -289,6 +298,15 @@ def guest(vm_id, body):
                 raise HypervisorError('Start the Linux VM before configuring its mounted storage')
             def agent(command):
                 return json.loads(libvirt_qemu.qemuAgentCommand(domain, json.dumps(command), 15, 0))['return']
+            ready = time.monotonic() + 30
+            while True:
+                try:
+                    agent({'execute': 'guest-ping'})
+                    break
+                except Exception:
+                    if time.monotonic() >= ready:
+                        raise
+                    time.sleep(1)
             process = agent({'execute': 'guest-exec', 'arguments': {'path': '/usr/bin/python3', 'arg': ['-c', script],
                 'input-data': base64.b64encode(json.dumps(body).encode()).decode(), 'capture-output': True}})
             deadline = time.monotonic() + 1100
