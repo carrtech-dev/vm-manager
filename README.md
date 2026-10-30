@@ -308,8 +308,10 @@ block/network disks and encrypted guest state require manual backup. Live libvir
 backups use the native point-in-time push backup API, verify successful job
 completion, and include every supported data disk. NVRAM is copied during a brief
 pause at capture. The broker grants QEMU access to the selected backup directory
-for the job and restores the original directory ACLs afterward. Disk reads
-for libvirt exports run through the existing privileged storage broker; clients
+for the job and restores the original directory ACLs afterward.
+On first live libvirt export, the broker enables POSIX ACL support on an owned
+backup block if it was disabled; existing files and permissions are retained.
+Disk reads for libvirt exports run through the existing privileged storage broker; clients
 supply VM/block/backup identifiers, never host file paths or commands.
 
 The scheduler checks every 15 seconds while the service is running. It persists

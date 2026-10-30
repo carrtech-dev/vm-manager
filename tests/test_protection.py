@@ -79,3 +79,18 @@ def test_restart_failure_reports_original_capture_failure(power):
     with pytest.raises(HypervisorError, match='Storage full; Automatic restart failed: Cannot start'):
         with manager.operation('incus:demo', 'shutdown'):
             raise HypervisorError('Storage full')
+
+
+def test_resume_sent_when_incus_metadata_still_reports_running(power):
+    manager, state = power
+    qemu = {'paused': False}
+    actions = []
+    def request(method, path, data):
+        actions.append(data['action'])
+        qemu['paused'] = data['action'] == 'freeze'
+    manager.incus.request = request
+    with manager.pause_incus('demo'):
+        assert qemu['paused']
+        assert state['status'] == 'Running'
+    assert not qemu['paused']
+    assert actions == ['freeze', 'unfreeze']

@@ -66,6 +66,9 @@ class ProtectionPower:
         finally:
             if paused:
                 with self.requests.transition(vm_id, cancelled):
-                    if self.status('incus', vm_name) == 'frozen':
+                    # Incus 6.0 can keep reporting Running in instance metadata
+                    # after QMP stop. Always send cont for our own pause, unless
+                    # it was stopped or an emergency stop cancelled the request.
+                    if self.status('incus', vm_name) in ('frozen', 'running'):
                         self.incus.request('PUT', '/1.0/instances/' + vm_name + '/state',
                                            {'action': 'unfreeze', 'timeout': 60})

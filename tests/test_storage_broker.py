@@ -70,3 +70,22 @@ def test_no_arbitrary_commands_paths_or_parent_driver(registry, monkeypatch):
         broker.dispatch(dict(operation="delete", block_id="../../etc"))
     with pytest.raises(HypervisorError, match="Unsupported"):
         broker.dispatch(dict(operation="exec", command="anything"))
+
+
+def test_live_export_enables_acl_support_only_on_owned_backup_block(registry, monkeypatch):
+    from app import backup_libvirt
+    block, calls = registry
+    block['purpose'] = 'backup'
+    broker.save_registry([block])
+    previous = broker.run
+    def run(*args, **kwargs):
+        if 'acltype' in args:
+            calls.append(args)
+            return 'off'
+        return previous(*args)
+    monkeypatch.setattr(broker, 'run', run)
+    exports = []
+    monkeypatch.setattr(backup_libvirt, 'export', lambda *a, **k: exports.append((a, k)) or {})
+    broker.dispatch(dict(operation='libvirt_export', block_id=block['id'], backup_id='b' * 32, vm_name='demo', live=True))
+    assert ('zfs', 'set', 'acltype=posixacl', block['dataset']) in calls
+    assert exports[0][1] == {'live': True}
