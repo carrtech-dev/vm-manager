@@ -28,11 +28,14 @@ Change the password through **Account** after signing in; the initial credential
 New Incus VMs boot installation media first (priority 10), then their system disk
 (priority 1), before network/PXE and extra data disks (default priority 0). Older
 VM Manager VMs created with root disk priority 0 can spend minutes waiting for
-IPv4 and IPv6 PXE to time out. Back up their configuration, then set
-`incus config device set <vm-name> root boot.priority=1` on the host. This takes
-effect at the next full shutdown/start, including **Restart** in VM Manager;
-rebooting inside the guest retains the existing QEMU device order. Preserve any
-deliberately customized boot priorities.
+IPv4 and IPv6 PXE to time out. VM Manager repairs that legacy setting during the
+next **Start** or **Restart**, after the VM has stopped and its configuration has
+been backed up. Other explicit priorities and VMs created outside VM Manager are
+retained. Rebooting inside the guest retains the existing QEMU device order.
+For a manual repair, back up the configuration, shut down the VM, set
+`incus config device set <vm-name> root boot.priority=1` on the host, then start
+it again. Do not change boot priority on a running VM: Incus 6.0 attempts to
+hot-remove and re-add its root disk.
 
 VM summaries refresh CPU and memory usage every five seconds, separately from configured resource limits. CPU percentage is normalized across allocated vCPUs. Memory uses guest usage when reported; otherwise it is explicitly labelled as host VM resident memory, which includes VM overhead and is not guest application usage. Missing measurements are shown as unavailable.
 

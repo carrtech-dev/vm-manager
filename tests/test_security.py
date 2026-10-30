@@ -520,6 +520,50 @@ def test_new_vm_boots_root_before_pxe_and_data_disks(monkeypatch, with_iso):
         assert int(driver.cdrom({"name": "other.iso"}, False)["boot.priority"]) < root_priority
 
 
+@pytest.mark.parametrize("status,managed,priority,repair", [
+    ("Stopped", "true", "0", True),
+    ("Running", "true", "0", False),
+    ("Stopped", "false", "0", False),
+    ("Stopped", "true", "20", False),
+    ("Stopped", "true", None, False),
+])
+def test_start_repairs_only_stopped_legacy_managed_vms(monkeypatch, status, managed, priority, repair):
+    from app.hypervisor import Incus
+    driver = Incus()
+    root = {"type": "disk", "path": "/"}
+    if priority is not None:
+        root["boot.priority"] = priority
+    vm = {"status": status, "config": {"user.vm-manager": managed}, "devices": {"root": root}}
+    calls = []
+    monkeypatch.setattr(driver, "vm", lambda _: vm)
+    def update(_, transform):
+        assert vm["status"] == "Stopped"
+        calls.append("repair")
+        transform(vm)
+    monkeypatch.setattr(driver, "update", update)
+    monkeypatch.setattr(driver, "request", lambda *args: calls.append(args[2]["action"]))
+    driver.action("legacy-vm", "start")
+    assert calls == (["repair", "start"] if repair else ["start"])
+    assert root.get("boot.priority") == ("1" if repair else priority)
+
+
+def test_boot_order_repair_failure_prevents_start(monkeypatch):
+    from app.hypervisor import Incus
+    driver = Incus()
+    vm = {"status": "Stopped", "config": {"user.vm-manager": "true"},
+          "devices": {"root": {"path": "/", "boot.priority": "0"}}}
+    monkeypatch.setattr(driver, "vm", lambda _: vm)
+    def update(_, transform):
+        vm["status"] = "Running"
+        transform(vm)
+    monkeypatch.setattr(driver, "update", update)
+    requests = []
+    monkeypatch.setattr(driver, "request", lambda *args: requests.append(args))
+    with pytest.raises(HypervisorError, match="must be stopped"):
+        driver.action("legacy-vm", "start")
+    assert not requests
+
+
 def test_mounted_iso_boots_before_existing_high_priority_disk(client, monkeypatch):
     headers = login(client)
     vm = {

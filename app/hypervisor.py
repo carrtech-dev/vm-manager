@@ -305,6 +305,25 @@ class Incus:
         return device
 
     def action(self, vm_name, action):
+        if action == "start":
+            vm = self.vm(vm_name)
+            root = vm.get("devices", {}).get("root", {})
+            if (
+                vm.get("status", "").lower() == "stopped"
+                and vm.get("config", {}).get("user.vm-manager") == "true"
+                and root.get("path") == "/"
+                and root.get("boot.priority") == "0"
+            ):
+                def repair_boot_order(current):
+                    if current.get("status", "").lower() != "stopped":
+                        raise HypervisorError("VM must be stopped to repair its boot order")
+                    device = current.get("devices", {}).get("root", {})
+                    if device.get("path") == "/" and device.get("boot.priority") == "0":
+                        device["boot.priority"] = "1"
+
+                # Incus 6.0 hot-removes/re-adds disks on a priority change.
+                # Repair only while stopped, before QEMU builds the device order.
+                self.update(vm_name, repair_boot_order)
         self.request(
             "PUT",
             "/1.0/instances/" + quote(name(vm_name)) + "/state",
