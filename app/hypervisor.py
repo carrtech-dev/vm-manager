@@ -115,9 +115,9 @@ class Incus:
         for vm in self.get("/1.0/instances?recursion=2"):
             if vm["type"] != "virtual-machine":
                 continue
-            conf = vm.get("expanded_config", vm.get("config", {}))
+            conf = vm.get("expanded_config") or vm.get("config") or {}
             state = vm.get("state") or {}
-            devices = vm.get("expanded_devices", vm.get("devices", {}))
+            devices = vm.get("expanded_devices") or vm.get("devices") or {}
             addresses = []
             for nic in (state.get("network") or {}).values():
                 addresses.extend(

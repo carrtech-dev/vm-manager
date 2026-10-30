@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from app import backups, main, storage
 from app.backup_libvirt import validate
-from app.hypervisor import HypervisorError
+from app.hypervisor import HypervisorError, HypervisorNotFound
 from app.power import PowerInterrupted, PowerRequests
 from app.security import Store, hash_password
 import xml.etree.ElementTree as ET
@@ -142,7 +142,9 @@ def test_restore_uses_independent_incus_volumes_and_clears_identity(environment,
     vm = {'devices': {'root': {'type': 'disk', 'path': '/', 'pool': 'old'}, 'data': {'type': 'disk', 'pool': 'old', 'source': 'original'}, 'eth0': {'type': 'nic', 'network': 'net', 'hwaddr': 'old'}, 'cdrom': {'type': 'disk', 'readonly': 'true', 'source': '/old.iso'}}, 'config': {'volatile.uuid': 'old', 'limits.cpu': '2', 'boot.autostart': 'true'}}
     manifest = {'config': vm, 'volumes': [{'device': 'data', 'file': 'volume-0.tar.gz'}], 'media': ['cdrom']}
     imported, updates = [], []
-    manager.incus.vms = lambda: []
+    def missing(vm_name):
+        raise HypervisorNotFound('No instance with this name')
+    manager.incus.vm = missing
     def update(vm_name, transform):
         state = json.loads(json.dumps(vm))
         transform(state)

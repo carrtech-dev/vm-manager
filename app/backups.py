@@ -454,7 +454,11 @@ class Manager:
         if not spec.pool:
             raise HypervisorError('Choose a VM storage pool')
         storage.check_vm_pool(spec.pool)
-        if any(v['name'] == spec.name for v in self.incus.vms()):
+        try:
+            self.incus.vm(spec.name)
+        except HypervisorNotFound:
+            pass
+        else:
             raise HypervisorError('A VM with this name already exists')
         # Never auto-delete on failed import: the operator can inspect partial
         # resources using the unique destination name and task message.
