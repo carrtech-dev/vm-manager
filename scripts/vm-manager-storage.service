@@ -17,7 +17,7 @@ NoNewPrivileges=yes
 # isolation (including implicit namespaces from ProtectSystem/ProtectHome and
 # ProtectKernel* options) would hide newly created ZFS mounts from consumers.
 PrivateMounts=no
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

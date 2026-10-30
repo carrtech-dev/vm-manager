@@ -42,6 +42,7 @@ from .hypervisor import Incus, Libvirt, HypervisorError, name, run, bytes_size
 from .security import Store, ROLES, hash_password, verify_password, token_hash
 from . import organization
 from . import storage
+from . import external_storage
 from . import backups
 from .power import PowerInterrupted, PowerRequests
 from .protection import ProtectionPower
@@ -473,8 +474,120 @@ def get_inventory(user=Depends(require())):
         error = ""
     except HypervisorError as exc:
         blocks, error = [], str(exc)
-    return dict(result, storage_blocks=blocks, storage_defaults=storage.defaults(store),
+    try:
+        external = storage.broker('external_list')
+        # Reconcile derived deletion guards after an interrupted app/broker
+        # operation. The root-owned attachment registry is authoritative.
+        if isinstance(external, dict):
+            with store.db() as db:
+                db.execute('DELETE FROM external_vm_refs')
+                db.executemany('INSERT OR IGNORE INTO external_vm_refs VALUES(?)',
+                               [(m['vm_id'],) for m in external['mounts']])
+        external_error = ''
+    except HypervisorError as exc:
+        external, external_error = {'sources': [], 'mounts': []}, str(exc)
+    return dict(result, external_storage=external, external_storage_error=external_error,
+                storage_blocks=blocks, storage_defaults=storage.defaults(store),
                 storage_error=error, backup_plans=backups.plans(store), vm_backups=backups.catalog(store))
+
+
+@app.get('/api/storage/sources')
+def list_external_sources(user=Depends(require())):
+    return storage.broker('external_list')
+
+
+class ExternalConfirm(BaseModel):
+    confirm_name: str = Field(max_length=128)
+
+
+@app.post('/api/storage/sources')
+def add_external_source(body: external_storage.Source, user=Depends(require('operate'))):
+    def create():
+        source = storage.broker('external_create', body=body.model_dump())
+        return storage.broker('external_test', source_id=source['id'])
+    return task(user, 'storage.external.create', body.name, create)
+
+
+def external_backup_references(source_id):
+    with store.db() as db:
+        return (db.execute('SELECT 1 FROM vm_backups WHERE block_id=?', (source_id,)).fetchone()
+                or any(json.loads(r[0]).get('block_id') == source_id for r in db.execute('SELECT settings FROM backup_plans')))
+
+
+@app.put('/api/storage/sources/{source_id}')
+def edit_external_source(source_id: str, body: external_storage.Source, user=Depends(require('operate'))):
+    external_storage.identifier(source_id)
+    def edit():
+        with storage.lock:
+            if external_backup_references(source_id):
+                source = next((s for s in storage.broker('external_list')['sources'] if s['id'] == source_id), None)
+                if source is None or any(source[k] != body.model_dump()[k] for k in ('kind', 'server', 'share', 'port', 'endpoint', 'bucket', 'prefix', 'readonly')):
+                    raise HypervisorError('This source contains backup records or settings; its location and access mode cannot change')
+            storage.broker('external_update', source_id=source_id, body=body.model_dump())
+            return storage.broker('external_test', source_id=source_id)
+    return task(user, 'storage.external.edit', source_id, edit)
+
+
+@app.post('/api/storage/sources/{source_id}/test')
+def test_external_source(source_id: str, user=Depends(require('operate'))):
+    external_storage.identifier(source_id)
+    return task(user, 'storage.external.test', source_id,
+                lambda: storage.broker('external_test', source_id=source_id))
+
+
+@app.delete('/api/storage/sources/{source_id}')
+def remove_external_source(source_id: str, body: ExternalConfirm, user=Depends(require('operate'))):
+    external_storage.identifier(source_id)
+    def remove():
+        with storage.lock:
+            if external_backup_references(source_id):
+                raise HypervisorError('Remove this source from backup settings and delete its backup records before removing it')
+            return storage.broker('external_delete', source_id=source_id, confirm_name=body.confirm_name)
+    return task(user, 'storage.external.delete', source_id, remove)
+
+
+@app.post('/api/vms/{vm_id}/mounts')
+def add_external_mount(vm_id: str, body: external_storage.Mount, user=Depends(require('operate'))):
+    vm_ref(vm_id)
+    def attach():
+        snapshots.guard_start(vm_id)
+        with store.db() as db:
+            db.execute('INSERT OR IGNORE INTO external_vm_refs VALUES(?)', (vm_id,))
+        try:
+            return storage.broker('external_attach', vm_id=vm_id, body=body.model_dump())
+        finally:
+            sync_external_vm(vm_id)
+    return task(user, 'vm.external.attach', vm_id, attach)
+
+
+def sync_external_vm(vm_id):
+    mounts = storage.broker('external_list')['mounts']
+    with store.db() as db:
+        if any(m['vm_id'] == vm_id for m in mounts):
+            db.execute('INSERT OR IGNORE INTO external_vm_refs VALUES(?)', (vm_id,))
+        else:
+            db.execute('DELETE FROM external_vm_refs WHERE vm_id=?', (vm_id,))
+
+
+@app.post('/api/vms/{vm_id}/mounts/{mount_id}/test')
+def test_external_mount(vm_id: str, mount_id: str, user=Depends(require('operate'))):
+    vm_ref(vm_id)
+    external_storage.identifier(mount_id)
+    return task(user, 'vm.external.test', vm_id,
+                lambda: storage.broker('external_status', vm_id=vm_id, mount_id=mount_id))
+
+
+@app.delete('/api/vms/{vm_id}/mounts/{mount_id}')
+def detach_external_mount(vm_id: str, mount_id: str, body: ExternalConfirm, user=Depends(require('operate'))):
+    vm_ref(vm_id)
+    external_storage.identifier(mount_id)
+    if body.confirm_name != mount_id:
+        raise HTTPException(400, 'Confirm the storage attachment before detaching it')
+    def detach():
+        result = storage.broker('external_detach', vm_id=vm_id, mount_id=mount_id)
+        sync_external_vm(vm_id)
+        return result
+    return task(user, 'vm.external.detach', vm_id, detach)
 
 
 @app.post("/api/storage/blocks")
@@ -829,6 +942,9 @@ def remove_vm(vm_id, cleanup=False, preserve_backups=True, actor='system'):
 def remove_vm_contents(vm_id, cleanup, preserve_backups, actor):
     provider, vm_name = vm_ref(vm_id)
     ensure_stopped(provider, vm_name)
+    with store.db() as db:
+        if db.execute('SELECT 1 FROM external_vm_refs WHERE vm_id=?', (vm_id,)).fetchone():
+            raise HypervisorError('Detach external storage before deleting this VM. Start the guest to close files and flush pending uploads first.')
     if cleanup:
         snapshots.guard_start(vm_id)
         snapshots.delete_all(provider, vm_name, vm_id)

@@ -82,6 +82,11 @@ const networkMode = (n) =>
       ? "Isolated"
       : "Routed";
 const storageBlocks = () => state.inventory.storage_blocks || [];
+const externalSources = () => state.inventory.external_storage?.sources || [];
+const externalMounts = (vmId) => (state.inventory.external_storage?.mounts || []).filter(m => !vmId || m.vm_id === vmId);
+const externalSource = id => externalSources().find(s => s.id === id);
+const externalLocation = s => s.kind === "smb" ? `//${s.server}/${s.share}${s.prefix ? "/" + s.prefix : ""}` : `${s.endpoint}/${s.bucket}${s.prefix ? "/" + s.prefix : ""}`;
+
 const storagePurposes = [["vm", "VM disks (Incus)"], ["iso", "ISO images"], ["backup", "VM & configuration backups"]];
 const storageOptions = (purpose) => [
   ["", purpose === "vm" ? "Existing pool selection" : "Original application storage"],
@@ -731,6 +736,7 @@ function renderVM() {
         )
         .join(""),
     ) +
+    renderExternalMounts(v) +
     `<p class="subtle" style="font-size:11px">Disk expansion increases the virtual device. Extend partitions and filesystems inside the guest afterwards.</p>`
   );
 }
@@ -880,8 +886,11 @@ function renderISOs() {
 const backupPlans = () => state.inventory.backup_plans || [];
 const backupRows = () => state.inventory.vm_backups || [];
 const selectedBackupVMs = new Set();
-const backupDestinations = () => storageBlocks().filter(b => b.purpose === "backup" && b.status === "ready").map(b => [b.id, `${b.name} · ${b.size_gib} GiB`]);
-const backupBlockName = id => storageBlocks().find(b => b.id === id)?.name || "Unavailable storage";
+const backupDestinations = () => [
+  ...storageBlocks().filter(b => b.purpose === "backup" && b.status === "ready").map(b => [b.id, `${b.name} · ${b.size_gib} GiB`]),
+  ...externalSources().filter(s => s.status === "ready" && !s.readonly).map(s => [s.id, `${s.name} · ${s.kind.toUpperCase()}`]),
+];
+const backupBlockName = id => storageBlocks().find(b => b.id === id)?.name || externalSource(id)?.name || "Unavailable storage";
 const backupPlan = id => backupPlans().find(p => p.vm_id === id);
 const planSummary = p => !p ? "Not configured" : !p.enabled ? "Schedule disabled" : `${p.frequency === "weekly" ? ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][p.weekday] : "Daily"} at ${p.time} · ${p.timezone}`;
 function renderBackupPlan(v) {
@@ -905,7 +914,7 @@ function renderVMBackups(v) {
 function renderBackups() {
   const vms = state.inventory.vms.filter(matchesOrganization);
   return title("Backups", "Create restore points and manage each VM’s automatic backup schedule", can() ? btn("Back up selected", "backup-selected", "", "primary") + btn("Configure selected", "backup-settings-selected") : "") +
-    `<div class="hint">Backups use storage blocks with the backup purpose. Create one in Storage first. Choose live backup or graceful shutdown and restart. Existing schedules retain their saved capture mode. Schedules run while this manager is available; after downtime, one missed run is queued. Times below use your browser timezone; schedules use their configured timezone.</div>` +
+    `<div class="hint">Backups use local backup blocks or writable SMB/S3 sources configured in Storage. External backups require local staging space and are verified remotely before completion. Choose live backup or graceful shutdown and restart. Existing schedules retain their saved capture mode. Schedules run while this manager is available; after downtime, one missed run is queued. Times below use your browser timezone; schedules use their configured timezone.</div>` +
     panel("Virtual machines & schedules", table([can() ? '<input type="checkbox" id="backup-select-all" aria-label="Select all visible VMs">' : "", "VM", "Schedule", "Destination", "Next run", "Last scheduled task", "Actions"], vms.map(v => {
       const p = backupPlan(v.id), last = state.tasks.find(t => t.id === p?.last_task);
       return `<tr><td>${can() ? `<input type="checkbox" class="backup-vm-select" value="${esc(v.id)}" aria-label="Select ${esc(v.name)}" ${selectedBackupVMs.has(v.id) ? "checked" : ""}>` : ""}</td><td>${copyValue(v.name, "hostname", `<a class="name" href="#vm/${encodeURIComponent(v.id)}/backups">${esc(v.name)}</a>`)}<small>${esc(v.provider)} · ${esc(v.status)}</small></td><td>${esc(planSummary(p))}</td><td>${p ? esc(backupBlockName(p.block_id)) : "—"}</td><td>${p?.next_run ? when(p.next_run) : "—"}</td><td>${last ? badge(last.status) : p?.last_task ? smallAction("View task history", "tasks", "") : "—"}</td><td><div class="actions">${can() ? smallAction("Back up", "backup-now", v.id) + smallAction("Settings", "backup-settings", v.id) + (p ? smallAction("Remove settings", "remove-backup-settings", v.id) : "") : ""}</div></td></tr>`;
@@ -919,7 +928,7 @@ function protectionMode(value) {
 function backupForm(vmIds, settings = false) {
   vmIds = [...new Set(vmIds)].filter(id => currentVM(id) && matchesOrganization(currentVM(id)));
   if (!vmIds.length) throw new Error("Select at least one VM");
-  if (!backupDestinations().length) throw new Error("Create a backup storage block in Storage first");
+  if (!backupDestinations().length) throw new Error("Add a backup block or writable external source in Storage first");
   const p = vmIds.length === 1 ? backupPlan(vmIds[0]) : null;
   const content = `<p>${vmIds.map(id => copyValue(currentVM(id).name)).join(", ")}</p><div class="warning">Live backups capture a point in time while the VM keeps running; a brief pause may occur. They are crash-consistent and exclude memory, so unsaved application data may be absent. Choose shutdown and restart for a clean guest shutdown. Force stop cancels automatic restart. Already stopped VMs stay stopped; pending hardware edits remain saved.</div>` +
     select("Backup storage", "block_id", [...(p && !backupDestinations().some(b => b[0] === p.block_id) ? [[p.block_id, "Unavailable destination — select another block"]] : []), ...backupDestinations()], p?.block_id || state.inventory.storage_defaults?.backup || backupDestinations()[0][0]) +
@@ -951,10 +960,11 @@ function renderStorage() {
   return (
     title(
       "Storage",
-      "Capacity-limited blocks for VM disks, ISO images and backups",
-      can() ? btn("Create storage block", "create-storage", "", "primary", !!state.inventory.storage_error) + btn("Assign defaults", "storage-defaults") : "",
+      "Local storage and reusable SMB / S3 sources for mounted drives and backups",
+      can() ? btn("Add external source", "add-external-source", "", "primary", !!state.inventory.external_storage_error) + btn("Create storage block", "create-storage", "", "secondary", !!state.inventory.storage_error) + btn("Assign defaults", "storage-defaults") : "",
     ) +
     (state.inventory.storage_error ? `<div class="warning">${esc(state.inventory.storage_error)}</div>` : "") +
+    renderExternalSources() +
     panel("Storage blocks", table(["Name", "Purpose", "Underlying pool", "Used / capacity", "Status", "Actions"], storageBlocks().map(b =>
       `<tr><td class="name">${esc(b.name)}${Object.values(state.inventory.storage_defaults || {}).includes(b.id) ? ' <small>Default destination</small>' : ""}</td><td>${esc(storagePurposes.find(p => p[0] === b.purpose)?.[1])}</td><td>${esc(b.parent)}</td><td>${size(b.used)} / ${size(b.capacity || b.size_gib * 1024 ** 3)}<small>${size(b.available)} available</small></td><td>${badge(b.status)}${b.error ? `<small>${esc(b.error)}</small>` : ""}</td><td>${can() ? smallAction("Expand", "grow-storage", b.id, b.status !== "ready") + smallAction("Delete", "delete-storage", b.id, b.status !== "ready") : "Read only"}</td></tr>`))) +
     `<div class="hint">Blocks reserve capacity on the underlying ZFS storage and enforce a hard limit. Create blocks from a ZFS pool; existing Btrfs pools remain available for VM disks. Defaults direct new writes. Existing disks and files stay in place. Backup blocks store full VM backups and configuration snapshots.</div>` +
@@ -985,6 +995,43 @@ function renderStorage() {
     ) +
     `<div class="hint">Choose an existing pool when creating a VM or adding a disk. Application deployment preserves VM storage and uploaded ISO files.</div>`
   );
+}
+function renderExternalSources() {
+  const warning = state.inventory.external_storage_error ? `<div class="warning">${esc(state.inventory.external_storage_error)}</div>` : "";
+  return warning + panel("External storage sources", table(["Name", "Type / location", "Connection", "VM attachments", "Actions"], externalSources().map(s => {
+    const mounts = externalMounts().filter(m => m.source_id === s.id);
+    return `<tr><td class="name">${esc(s.name)}${s.readonly ? "<small>Read only</small>" : ""}</td><td>${esc(s.kind.toUpperCase())}<small>${esc(externalLocation(s))}</small></td><td>${badge(s.status)}<small>${s.tested ? "Checked " + when(s.tested) : "Not tested"}</small>${s.error ? `<small>${esc(s.error)}</small>` : ""}</td><td>${mounts.map(m => `<a href="#vm/${encodeURIComponent(m.vm_id)}/hardware">${esc(m.vm_id.split(":")[1])}</a>`).join(", ") || "None"}</td><td><div class="actions">${can() ? smallAction("Test connection", "test-external-source", s.id) + smallAction("Edit", "edit-external-source", s.id, !!mounts.length) + smallAction("Remove", "delete-external-source", s.id, !!mounts.length) : "Read only"}</div></td></tr>`;
+  }))) + `<div class="hint">Configure SMB shares or S3-compatible buckets, including Amazon S3 and Cloudflare R2. Reuse a source in multiple VMs through Add disk, or select a writable source for backups. Limits remain with the storage provider. Credentials are stored on the host and in root-only files inside attached guests.</div>`;
+}
+function renderExternalMounts(v) {
+  const mounts = externalMounts(v.id);
+  return panel("Mounted external storage", table(["Source", "Guest path", "Access", "Last result", "Actions"], mounts.map(m => `<tr><td class="name">${esc(externalSource(m.source_id)?.name || "Unavailable source")}</td><td>${esc(m.path)}</td><td>${m.readonly ? "Read only" : "Read / write"}</td><td>${badge(m.status)}<small>${m.checked ? "Last verified " + when(m.checked) : "Setup incomplete"}</small></td><td><div class="actions">${can() ? smallAction("Check mount", "test-external-mount", v.id + "|" + m.id, v.status !== "running") + (m.status !== "mounted" ? smallAction("Retry setup", "retry-external-mount", v.id + "|" + m.id, v.status !== "running") : "") + smallAction("Detach", "detach-external-mount", v.id + "|" + m.id, v.status !== "running") : "Read only"}</div></td></tr>`))) + `<div class="hint">Add mounted storage through Add disk. Checks and detach require a running Linux guest and its agent. A mounted result records the last successful check; use Check mount to verify current access. Remote files are shared independently of VM disks and snapshots.</div>`;
+}
+function externalSourceForm(source = null) {
+  const value = (key, fallback = "") => source?.[key] ?? fallback;
+  const dialog = modal(source ? "Edit external source" : "Add external source",
+    `<div class="form-grid">${field("Source name", "name", value("name"))}${select("Type", "kind", [["smb", "SMB share"], ["s3", "S3-compatible bucket"]], value("kind", "smb"))}</div>` +
+    `<div id="smb-source-fields" class="form-grid">${field("Server", "server", value("server"), {placeholder: "nas.example.local"})}${field("Share", "share", value("share"), {placeholder: "documents"})}${field("Username", "username", value("username"))}${field("Password", "password", "", {type: "password", required: !source, hint: source ? "Leave blank to retain the saved password." : ""})}${field("Domain (optional)", "domain", value("domain"), {required: false})}${field("Port", "port", value("port", 445), {type: "number", min: 1, max: 65535})}</div>` +
+    `<div id="s3-source-fields" class="form-grid">${field("S3 endpoint", "endpoint", value("endpoint"), {type: "url", placeholder: "https://s3.eu-west-2.amazonaws.com"})}${field("Bucket", "bucket", value("bucket"))}${field("Access key", "access_key", "", {type: "password", required: !source, hint: source ? "Leave blank to retain the saved key." : ""})}${field("Secret key", "secret_key", "", {type: "password", required: !source, hint: source ? "Leave blank to retain the saved secret." : ""})}${field("Region", "region", value("region", "us-east-1"), {hint: "Use auto for Cloudflare R2."})}</div>` +
+    field("Subfolder / prefix (optional)", "prefix", value("prefix"), {required: false, hint: "Relative path without a leading or trailing slash."}) + check("Read-only source", "readonly", value("readonly", false)) +
+    `<div class="hint">Use credentials restricted to the selected share or bucket. Connection details cannot change while attached to a VM. Removing a source retains remote files.</div>`,
+    f => {
+      const body = {name: f.get("name"), kind: f.get("kind") || source.kind, prefix: f.get("prefix") || "", readonly: f.has("readonly")};
+      const fields = body.kind === "smb" ? ["server", "share", "username", "password", "domain", "port"] : ["endpoint", "bucket", "access_key", "secret_key", "region"];
+      for (const key of fields) body[key] = key === "port" ? +f.get(key) : f.get(key) || "";
+      return queue("/storage/sources" + (source ? "/" + source.id : ""), source ? "PUT" : "POST", body);
+    }, {wide: true, submit: "Save and test"});
+  const choose = () => {
+    const kind = $('[name="kind"]', dialog).value;
+    for (const type of ["smb", "s3"]) {
+      const section = $("#" + type + "-source-fields", dialog);
+      section.hidden = kind !== type;
+      $$("input", section).forEach(el => el.disabled = kind !== type);
+    }
+  };
+  $('[name="kind"]', dialog).onchange = choose;
+  if (source) $('[name="kind"]', dialog).disabled = true;
+  choose();
 }
 function createStorageBlock() {
   const parents = state.inventory.pools.filter(p => p.driver === "zfs" && !p.name.startsWith("vmm-block-"));
@@ -1337,17 +1384,38 @@ function editVM(v) {
   );
 }
 function addDisk(v) {
-  modal(
+  const dialog = modal(
     "Add disk · " + v.name,
-    `<div class="form-grid">${field("Disk size (GiB)", "size_gib", 16, { type: "number", min: 1, max: 4096 })}${v.provider === "incus" ? select("Storage pool", "pool", poolOptions(), defaultVMPool()) : field("Storage", "storage", "Application disk storage", { readonly: true })}</div><div class="hint" style="margin-top:18px">A new blank disk will be attached. Partition and format it inside the guest.</div>`,
-    async (f) =>
-      queue(ref(v.id) + "/disks", "POST", {
-        size_gib: +f.get("size_gib"),
-        pool: f.get("pool") || "hdd-pool",
-      }),
-    { submit: "Add disk", copyTitle: v.name },
+    select("Storage source", "source_id", [["", "Local virtual disk"], ...externalSources().map(s => [s.id, `${s.name} · ${s.kind.toUpperCase()}`])]) +
+    `<div id="local-drive-fields"><div class="form-grid">${field("Disk size (GiB)", "size_gib", 16, { type: "number", min: 1, max: 4096 })}${v.provider === "incus" ? select("Storage pool", "pool", poolOptions(), defaultVMPool()) : field("Storage", "storage", "Application disk storage", { readonly: true })}</div><div class="hint">A new blank disk will be attached. Partition and format it inside the guest.</div></div>` +
+    `<div id="external-drive-fields" hidden>${field("Mount path inside Linux", "path", "/mnt/shared", {hint: "An empty folder below /mnt or /media. Existing files are never covered."})}${check("Read-only access", "readonly")}<div class="hint">VM Manager installs the mount tools and enables automatic mounting after reboot. The Linux VM must be running with its guest agent, Python 3 and systemd. Mounted data is separate from VM disk backups.</div><div id="external-drive-note" class="hint"></div></div>`,
+    async f => {
+      if (f.get("source_id")) {
+        if (v.status !== "running") throw new Error("Start the Linux VM before adding mounted storage.");
+        return queue(ref(v.id) + "/mounts", "POST", { source_id: f.get("source_id"), path: f.get("path"), readonly: f.has("readonly") });
+      }
+      return queue(ref(v.id) + "/disks", "POST", {size_gib: +f.get("size_gib"), pool: f.get("pool") || "hdd-pool"});
+    },
+    { submit: "Add drive", copyTitle: v.name },
   );
+  const choose = () => {
+    const source = externalSource($('[name="source_id"]', dialog).value);
+    for (const [selector, active] of [["#local-drive-fields", !source], ["#external-drive-fields", !!source]]) {
+      const section = $(selector, dialog);
+      section.hidden = !active;
+      $$("input, select", section).forEach(el => el.disabled = !active);
+    }
+    if (source) {
+      $('[name="path"]', dialog).value = "/mnt/" + source.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
+      $('[name="readonly"]', dialog).checked = source.readonly;
+      $('[name="readonly"]', dialog).disabled = source.readonly;
+      $("#external-drive-note", dialog).textContent = source.kind === "s3" ? "S3 uses a local cache and background uploads. Avoid concurrent editing of the same file across VMs. Cache settings do not impose a remote quota." : "The same share can be attached to multiple VMs. Permissions and any quotas are enforced by the SMB server.";
+    }
+  };
+  $('[name="source_id"]', dialog).onchange = choose;
+  choose();
 }
+
 function editNIC(v, device = "") {
   modal(
     (device ? "Edit network adapter" : "Add network adapter") + " · " + v.name,
@@ -1599,6 +1667,31 @@ async function action(name, id) {
     case "remove-backup-settings":
       confirmAction("Remove backup settings", id, "Disable the schedule and remove these settings. Existing restore points are retained.", async () => { await api("/backups/plans/" + encodeURIComponent(id), "DELETE"); await refresh(true); });
       break;
+    case "add-external-source": externalSourceForm(); break;
+    case "edit-external-source": externalSourceForm(externalSource(id)); break;
+    case "test-external-source": await queue("/storage/sources/" + id + "/test", "POST", {}); break;
+    case "delete-external-source": {
+      const source = externalSource(id);
+      confirmAction("Remove external source", source.name, "Remove this connection from VM Manager? Remote files are retained. VM attachments and backup references must be removed first.", () => queue("/storage/sources/" + id, "DELETE", {confirm_name: source.name}));
+      break;
+    }
+    case "test-external-mount": {
+      const [vmId, mountId] = id.split("|");
+      await queue(ref(vmId) + "/mounts/" + mountId + "/test", "POST", {});
+      break;
+    }
+    case "retry-external-mount": {
+      const [vmId, mountId] = id.split("|");
+      const mount = externalMounts(vmId).find(m => m.id === mountId);
+      await queue(ref(vmId) + "/mounts", "POST", {source_id: mount.source_id, path: mount.path, readonly: mount.readonly});
+      break;
+    }
+    case "detach-external-mount": {
+      const [vmId, mountId] = id.split("|");
+      const mount = externalMounts(vmId).find(m => m.id === mountId);
+      confirmAction("Detach mounted storage", mount.path, "Unmount this storage and disable automatic mounting in the guest. Remote files are retained. Close files first; pending S3 uploads prevent detachment.", () => queue(ref(vmId) + "/mounts/" + mountId, "DELETE", {confirm_name: mountId}));
+      break;
+    }
     case "create-storage":
       createStorageBlock();
       break;

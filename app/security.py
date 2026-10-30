@@ -69,6 +69,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS storage_defaults(
                     purpose TEXT PRIMARY KEY CHECK(purpose IN ('vm','iso','backup')),
                     block_id TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS external_vm_refs(vm_id TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,
                     name TEXT NOT NULL, name_key TEXT UNIQUE NOT NULL);
                 CREATE TABLE IF NOT EXISTS tags(id TEXT PRIMARY KEY,

@@ -349,3 +349,31 @@ def test_qemu_acl_failure_unwinds_already_granted_parents(monkeypatch, tmp_path)
             permissions.enter_context(backup_libvirt.qemu_directory(tmp_path / 'child', 'rwx'))
     assert sum('--restore=-' in args for args in calls) == 2
     assert not backup_libvirt.acl_users
+
+
+def test_external_backup_success_waits_for_verified_upload(environment, monkeypatch, tmp_path):
+    store, manager, _ = environment
+    source = tmp_path / 'external-staging' / BLOCK
+    source.mkdir(parents=True)
+    monkeypatch.setattr(backups, 'destination', lambda *a: source)
+    monkeypatch.setattr(manager, 'export_incus', lambda vm, path, manifest: (path / 'disk').write_bytes(b'disk'))
+    calls = []
+    def broker(operation, **kwargs):
+        calls.append(operation)
+        assert manager.record(kwargs['backup_id'])['status'] == 'running'
+        assert (source / 'vm-backups' / kwargs['backup_id'] / 'manifest.json').exists()
+        raise HypervisorError('Remote verification failed')
+    monkeypatch.setattr(storage, 'broker', broker)
+    bid = add(store)
+    with pytest.raises(HypervisorError, match='Remote verification'):
+        manager.create(bid, False, None)
+    assert manager.record(bid)['status'] == 'failed'
+    assert calls == ['external_backup_push']
+    assert (source / 'vm-backups' / bid / 'disk').exists()  # Recoverable staging.
+    def success(operation, **kwargs):
+        assert manager.record(kwargs['backup_id'])['status'] == 'running'
+    monkeypatch.setattr(storage, 'broker', success)
+    bid = add(store)
+    manager.create(bid, False, None)
+    assert manager.record(bid)['status'] == 'completed'
+    assert not (source / 'vm-backups' / bid).exists()

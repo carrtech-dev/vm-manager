@@ -1349,6 +1349,8 @@ def storage_blocks(monkeypatch, tmp_path):
     calls = []
     def broker(operation, **kwargs):
         calls.append((operation, kwargs))
+        if operation == 'external_list':
+            return {'sources': [], 'mounts': []}
         return blocks if operation == "list" else {"ok": True}
     monkeypatch.setattr(storage, "broker", broker)
     monkeypatch.setattr(storage.os.path, "ismount", lambda p: str(p) == blocks[0]["path"])
@@ -1614,3 +1616,46 @@ def test_vm_creation_and_backup_restore_reserve_correct_vm_keys(client, monkeypa
     monkeypatch.setattr(main.backup_manager, 'record', lambda _: {'status': 'completed', 'vm_id': 'libvirt:source'})
     main.restore_backup('backup', main.backups.Restore(name='restored'), {'username': 'operator'})
     assert submitted[-1] == {'libvirt:source', 'libvirt:restored'}
+
+
+def test_external_sources_permissions_secrets_and_validation(client, monkeypatch):
+    import app.main as main
+    source_id = 'c' * 32
+    source = dict(id=source_id, name='Shared files', kind='smb', server='nas.local', share='files',
+                  username='user', domain='', port=445, prefix='', readonly=False,
+                  endpoint='', bucket='', region='us-east-1', status='ready')
+    calls = []
+    def broker(operation, **kwargs):
+        calls.append((operation, kwargs))
+        if operation == 'external_list':
+            return {'sources': [source], 'mounts': []}
+        if operation == 'external_create':
+            return source
+        return 'Verified'
+    monkeypatch.setattr(main.storage, 'broker', broker)
+    endpoint = '/api/storage/sources'
+    assert client.get(endpoint).status_code == 401
+    headers = login(client, 'viewer')
+    assert client.get(endpoint).status_code == 200
+    body = dict(name='Shared files', kind='smb', server='nas.local', share='files', username='user', password='Secret-for-test')
+    assert client.post(endpoint, json=body, headers=headers).status_code == 403
+    assert client.post('/api/vms/incus:demo/mounts', json={'source_id': source_id, 'path': '/mnt/files'}, headers=headers).status_code == 403
+    headers = login(client, 'operator')
+    assert client.post(endpoint, json=body).status_code == 403
+    assert client.post(endpoint, json=body | {'size_gib': 10}, headers=headers).status_code == 422
+    assert client.post('/api/vms/incus:demo/mounts', json={'source_id': source_id, 'path': '/etc'}, headers=headers).status_code == 422
+    queued = []
+    def task(user, action, resource, fn, **kwargs):
+        queued.append((action, resource))
+        return {'result': fn()}
+    monkeypatch.setattr(main, 'task', task)
+    assert client.post(endpoint, json=body, headers=headers).status_code == 200
+    assert [c[0] for c in calls[-2:]] == ['external_create', 'external_test']
+    assert 'Secret-for-test' not in repr(queued)
+    with store.db() as db:
+        db.execute('INSERT INTO vm_backups(id,vm_id,block_id,status,created,trigger) VALUES(?,?,?,?,?,?)',
+                   ('d' * 32, 'incus:demo', source_id, 'completed', 1, 'manual'))
+    response = client.request('DELETE', endpoint + '/' + source_id, json={'confirm_name': 'Shared files'}, headers=headers)
+    assert response.status_code == 409 and 'backup' in response.json()['detail']
+    with store.db() as db:
+        db.execute('DELETE FROM vm_backups WHERE id=?', ('d' * 32,))

@@ -145,6 +145,12 @@ def digest(path):
     return result.hexdigest()
 
 
+def external_destination(path):
+    # External destinations always stage under this generated application path.
+    # Avoid probing the broker for ordinary local backups or test destinations.
+    return path.parent.parent.parent.name == 'external-staging'
+
+
 class ArchiveLoader(yaml.SafeLoader):
     """Keep RFC3339 timestamp scalars intact for the Incus Go decoder."""
 
@@ -262,9 +268,13 @@ class Manager:
                         with file.open('rb') as stream:
                             os.fsync(stream.fileno())
                 size = sum(f['size'] for f in manifest['files'].values())
+                if external_destination(path):
+                    storage.broker('external_backup_push', source_id=row['block_id'], backup_id=backup_id)
                 message = 'Verified SHA-256; ' + ('live crash-consistent backup' if live else 'full offline backup')
                 self.update(backup_id, 'completed', message, size)
                 complete = True
+                if external_destination(path):
+                    shutil.rmtree(path)
         except Exception as exc:
             if complete:
                 self.update(backup_id, 'completed', 'Backup complete; automatic restart failed: ' + str(exc), size)
@@ -407,6 +417,8 @@ class Manager:
             if row['status'] in ('queued', 'running'):
                 raise HypervisorError('Wait for the backup to finish')
             path = archive_dir(self.store, self.data, row)
+            if external_destination(path):
+                storage.broker('external_backup_delete', source_id=row['block_id'], backup_id=backup_id)
             if path.exists():
                 shutil.rmtree(path)
             with self.store.db() as db:
@@ -443,11 +455,15 @@ class Manager:
             if row['status'] != 'completed':
                 raise HypervisorError('Only completed backups can be restored')
             path = archive_dir(self.store, self.data, row)
+            if external_destination(path):
+                storage.broker('external_backup_pull', source_id=row['block_id'], backup_id=backup_id)
         manifest = self.verify(path)
         if manifest['provider'] == 'incus':
             self.restore_incus(path, manifest, spec)
         else:
             self.restore_libvirt(path, manifest, spec)
+        if external_destination(path):
+            shutil.rmtree(path)
         return 'Restored as ' + spec.name + ' (stopped). Check guest identity and network settings before starting.'
 
     def restore_incus(self, path, manifest, spec):

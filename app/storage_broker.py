@@ -16,6 +16,7 @@ import uuid
 
 from .hypervisor import Incus, HypervisorError, run
 from .storage import BlockCreate, BlockSize
+from . import external_storage
 
 REGISTRY = Path("/var/lib/vm-manager-storage/blocks.json")
 MOUNTS = Path("/var/lib/vm-manager-storage/mounts")
@@ -156,6 +157,8 @@ def delete(block_id):
 
 def dispatch(request):
     operation = request.get("operation")
+    if isinstance(operation, str) and operation.startswith('external_'):
+        return external_storage.dispatch(operation, request)
     if operation == "list":
         return [stats(b) for b in read_registry()]
     if operation == "libvirt_export":
@@ -163,12 +166,15 @@ def dispatch(request):
         block_id, backup_id = request.get('block_id', ''), request.get('backup_id', '')
         if not all(isinstance(v, str) and re.fullmatch(r'[0-9a-f]{32}', v) for v in (block_id, backup_id)):
             raise HypervisorError('Invalid backup reference')
-        _, block = find_block(block_id)
-        if block['purpose'] != 'backup' or stats(block)['status'] != 'ready':
-            raise HypervisorError('Backup storage is unavailable')
         live = request.get('live', False)
         if not isinstance(live, bool):
             raise HypervisorError('Invalid live backup policy')
+        if not any(b['id'] == block_id for b in read_registry()):
+            path = external_storage.backup_directory(block_id)
+            return export(path, backup_id, request.get('vm_name', ''), live=live)
+        _, block = find_block(block_id)
+        if block['purpose'] != 'backup' or stats(block)['status'] != 'ready':
+            raise HypervisorError('Backup storage is unavailable')
         if live:
             # Existing blocks predate native QEMU writers. Enabling POSIX ACLs
             # preserves their data/modes and permits temporary per-job access.
@@ -196,6 +202,8 @@ class Handler(socketserver.StreamRequestHandler):
         try:
             request = json.loads(self.rfile.readline(16385))
             response = {"result": dispatch(request)}
+        except (KeyError, ValueError, TypeError):
+            response = {"error": "Invalid storage request"}
         except Exception as exc:
             response = {"error": str(exc)[:1500]}
         try:
@@ -206,6 +214,7 @@ class Handler(socketserver.StreamRequestHandler):
 
 def main():
     os.umask(0o077)
+    external_storage.initialize()
     SOCKET.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
     os.chown(SOCKET.parent, 0, grp.getgrnam("vm-manager").gr_gid)
     MOUNTS.mkdir(mode=0o755, parents=True, exist_ok=True)

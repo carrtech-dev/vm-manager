@@ -348,3 +348,99 @@ Protect the selected backup storage independently against host/storage failure.
 `scripts/backup_check.py` is an opt-in host acceptance test using temporary VMs,
 a temporary backup block and a temporary operator. It checks disk content after
 Incus and libvirt restores, checksum rejection, schedules, retention and cleanup.
+
+## External SMB and S3 storage
+
+In **Storage → Add external source**, save a named SMB share or S3-compatible
+bucket. Multiple connections can coexist. SMB accepts a hostname/IPv4 address,
+share, username/password, optional domain, port and subfolder. S3 accepts an HTTP(S)
+API endpoint, bucket, access/secret keys, region and optional prefix. For Amazon
+S3, use the appropriate regional S3 endpoint/region; for Cloudflare R2, use the
+account's S3 endpoint and region `auto`. HTTPS is recommended outside a trusted
+LAN. Saving tests read/list access; backup or guest writes also require write
+permissions. Failed connections remain listed for correction or retesting.
+
+Sources have no VM Manager quota, size or reservation. Any configured SMB server
+quotas and permissions continue to apply. A source can be read-only. Credentials
+are kept in the root-owned `/var/lib/vm-manager-storage/external.json` registry
+and generated root-only files, never returned by inventory or included in task
+bodies/audit logs. Deployment backs up this registry as a mode-0600 `.external.json`
+file beside the existing database backup. Protect these files as credentials.
+
+On a VM's **Hardware → Add disk**, choose a source and an empty mount path below
+`/mnt` or `/media`, and optionally choose read-only access. The Linux guest must
+be running with its **Incus agent** or, for libvirt, an enabled **QEMU guest agent
+channel/service**, plus `/usr/bin/python3` and systemd. This is the one-time guest
+integration prerequisite; VM Manager cannot configure an arbitrary OS without a
+working guest agent. Windows guests are not supported by this mount installer.
+For new Linux VMs, use an image with the appropriate agent prepared.
+
+VM Manager installs `cifs-utils` for SMB or `rclone`/`fuse3` for S3 when necessary,
+using apt or dnf. Those guests need access to their package repositories, or the
+packages must already be installed (some distributions require an additional
+repository for rclone). Connection credentials travel over the guest agent's
+stdin, and are installed beneath `/etc/vm-manager/mounts/<generated-id>` with
+root-only permissions. Each source mounts directly inside the guest; credentials
+must therefore be trusted to the guest's administrators. Root disk backups also
+contain these files, just as they contain other OS credentials.
+
+A generated `vm-manager-share-<id>.service` mounts the source at boot, after
+network-online, and retries failures. SMB uses the kernel's SMB3 client, preserving
+server-side file locking between separate VMs. Sources can be attached to several
+VMs with different paths and read-only settings. These are mounted filesystems,
+not partitionable block devices. Guest users can access the mounted files subject
+to the source credentials' remote permissions; use separate restricted sources
+when VMs need different permissions.
+
+S3 mounts use rclone with a persistent local read/write cache and background
+uploads. The 5 GiB cache target is an eviction setting, not a hard quota; open or
+pending files can exceed it and need sufficient guest disk space. A local save
+can finish before its upload completes. S3 does not provide SMB's coordinated
+shared-file editing semantics; avoid multiple writers to the same object and
+workloads requiring strict POSIX locking, such as database data files. Other
+clients' changes can remain cached. Cache/configuration survive service failures
+and reboot. Do not delete a guest's cache while uploads are outstanding.
+
+**Mounted external storage** shows the last setup/check result, not continuous
+guest telemetry. **Check mount** tests current access. Incomplete setup retains
+its attachment ID and configuration for **Retry setup**. **Detach** requires a
+running guest, disables its generated service and retains remote files. Open S3
+files, queued/failed uploads or an inaccessible upload-status service prevent
+detachment; restore the connection/service, close files, wait and retry. Normal
+unmount refuses busy SMB mounts. Detach all external storage before deleting a VM.
+A VM restored/cloned from its system disk can retain these automatic mounts and
+credentials; review them before booting it alongside the original VM.
+
+Writable, successfully tested sources also appear in **Backups** alongside local
+backup blocks. External backups use local staging below
+`/var/lib/vm-manager/external-staging/<source-id>`; allow enough host space for the
+full archive and concurrent jobs. Only VM disks/configuration are exported, not
+files mounted inside the guest. The archive uploads into
+`vm-manager-backups/<backup-id>` beneath the configured share/prefix. Remote file
+contents are read back and verified before the completion manifest is published;
+the complete remote archive is checked again before success is recorded. Local
+staging is removed after success. Failed/interrupted staging remains recoverable
+and can be removed by deleting its backup record. Restore downloads a fresh copy
+and validates its SHA-256 manifest before importing. Retention uses the same
+verified-upload-before-deletion policy as local backups.
+
+Removing a source requires exact-name confirmation and no VM attachments, backup
+settings or backup records. Remote files are retained when removing a connection;
+deleting a backup explicitly deletes only that generated backup directory/prefix.
+A source's location/access mode cannot change while backup records/settings refer
+to it. Host CIFS mounts used for backup transfers are created on demand, checked
+before use, and unmounted before editing/removing an unused source. Local staging
+is never treated as a successful substitute for unavailable remote storage.
+
+`scripts/external_storage_check.py --sources <root-only-json> --incus-vms
+<disposable-vm-one> <disposable-vm-two> [--libvirt-vm <disposable-vm>]` is an opt-in
+acceptance check for this feature. Run it as root with the release environment
+and `PYTHONPATH` set. Its source JSON must contain `smb` and `s3` connection bodies
+for disposable test endpoints; guests must be running Linux VMs named
+`vmm-external-check-*`. It uses a temporary operator, unique mounts and files,
+checks shared SMB access, mounts through both agents when supplied, and performs
+real VM remote backups and stopped restores on both storage types. It cleans up
+its own sources, mounts, backups, restores and account. It does not provision or
+remove the supplied guests/endpoints. `--browser-state <path>` pauses before
+cleanup for a browser check; protect/remove that session file, and create
+`<path>.continue` to resume cleanup. Do not supply production datasets or VMs.

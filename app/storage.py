@@ -42,7 +42,9 @@ def broker(operation, **arguments):
     path = os.environ.get("VM_MANAGER_STORAGE_SOCKET", "/run/vm-manager-storage/control.sock")
     try:
         with socket.socket(socket.AF_UNIX) as connection:
-            connection.settimeout(86500 if operation == "libvirt_export" else 195)
+            long_transfer = operation == 'libvirt_export' or operation in ('external_backup_push', 'external_backup_pull', 'external_backup_delete')
+            guest_operation = operation in ('external_attach', 'external_detach', 'external_status')
+            connection.settimeout(86500 if long_transfer else 1200 if guest_operation else 195)
             connection.connect(path)
             connection.sendall(json.dumps({"operation": operation, **arguments}).encode() + b"\n")
             with connection.makefile("rb") as stream:
@@ -67,6 +69,8 @@ def directory(store, data, purpose, block_id=None):
         path.mkdir(exist_ok=True, mode=0o700 if purpose == "backup" else 0o755)
         return path
     block = next((b for b in broker("list") if b["id"] == block_id), None)
+    if block is None and purpose == 'backup':
+        return Path(broker('external_backup_directory', source_id=block_id))
     if not block or block["purpose"] != purpose or block["status"] != "ready":
         raise HypervisorError("Selected storage block is unavailable or has the wrong purpose")
     path = Path(block["path"])

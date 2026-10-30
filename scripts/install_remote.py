@@ -23,6 +23,9 @@ base.mkdir(parents=True, exist_ok=True)
 release.mkdir(parents=True, exist_ok=True)
 if not shutil.which("incus") or not shutil.which("virsh"):
     raise SystemExit("Incus and libvirt must already be installed")
+if any(not shutil.which(tool) for tool in ('rclone', 'mount.cifs', 'smbclient')):
+    subprocess.run(['apt-get', 'install', '-y', '--no-install-recommends',
+                    'rclone', 'cifs-utils', 'smbclient', 'fuse3'], check=True)
 if not shutil.which('setfacl') or subprocess.run(
     ['python3', '-c', 'import libvirt'], capture_output=True
 ).returncode:
@@ -63,7 +66,7 @@ except KeyError:
     account = pwd.getpwnam("vm-manager")
 state.mkdir(mode=0o755, exist_ok=True)
 os.chown(state, account.pw_uid, account.pw_gid)
-for directory in ["isos", "disks", "tmp"]:
+for directory in ["isos", "disks", "tmp", "external-staging"]:
     target = state / directory
     target.mkdir(mode=0o755, exist_ok=True)
     os.chown(target, account.pw_uid, account.pw_gid)
@@ -137,6 +140,10 @@ if (state / "manager.sqlite3").exists():
         registry_backup = backup.with_suffix(".storage.json")
         shutil.copyfile(storage_state / "blocks.json", registry_backup)
         registry_backup.chmod(0o600)
+    if (storage_state / "external.json").exists():
+        external_backup = backup.with_suffix(".external.json")
+        shutil.copyfile(storage_state / "external.json", external_backup)
+        external_backup.chmod(0o600)
 unit = (release / "scripts" / "vm-manager.service").read_text()
 Path("/etc/systemd/system/vm-manager.service").write_text(unit)
 Path("/etc/systemd/system/vm-manager-storage.service").write_text(
