@@ -104,7 +104,9 @@ def test_incus_reports_async_host_progress_without_configuration(monkeypatch):
     statuses = iter([(105, 'Pending', '0%'), (103, 'Running', '50%'), (200, 'Success', '100%')])
     def handler(request):
         if request.method == 'PUT':
-            return httpx.Response(202, json={'type': 'async', 'operation': '/1.0/operations/test'})
+            return httpx.Response(202, json={'type': 'async', 'operation': '/1.0/operations/test?project=default'})
+        if '/wait' in request.url.path:
+            return httpx.Response(500, json={'type': 'error', 'error': 'context deadline exceeded'})
         waits.append(str(request.url))
         code, status, progress = next(statuses)
         return httpx.Response(200, json={'type': 'sync', 'metadata': {
@@ -113,9 +115,10 @@ def test_incus_reports_async_host_progress_without_configuration(monkeypatch):
     factory = httpx.Client
     monkeypatch.setattr(hypervisor.httpx, 'Client', lambda **kwargs:
                         factory(transport=httpx.MockTransport(handler), base_url='http://incus'))
+    monkeypatch.setattr(hypervisor.time, 'sleep', lambda _: None)
     with capture(messages.append):
         Incus().request('PUT', '/1.0/instances/demo/state', {'action': 'start', 'password': 'private'})
-    assert len(waits) == 3 and all('timeout=1' in path for path in waits)
+    assert len(waits) == 3 and all('/wait' not in path and 'project=default' in path for path in waits)
     assert '50%' in ''.join(messages) and '100%' in ''.join(messages)
     assert 'secret' not in ''.join(messages) and 'private' not in ''.join(messages)
 

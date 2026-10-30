@@ -104,11 +104,13 @@ class Incus:
                 deadline = time.monotonic() + 180
                 previous = None
                 while True:
-                    operation = client.get(
-                        operation_url.path
-                        + ("/wait?timeout=1" if mutating else "/wait?timeout=180")
-                        + ("&" + operation_url.query if operation_url.query else "")
-                    ).json()
+                    # Incus 6.0 returns an error when a short /wait expires,
+                    # even though the operation is still healthy. Poll the
+                    # operation itself when streaming progress instead.
+                    operation_path = operation_url.path + ("" if mutating else "/wait?timeout=180")
+                    if operation_url.query:
+                        operation_path += ("?" if mutating else "&") + operation_url.query
+                    operation = client.get(operation_path).json()
                     meta = operation.get("metadata") or {}
                     if operation.get("type") == "error":
                         raise HypervisorError(operation.get("error", "Failed waiting for operation"))
@@ -127,6 +129,7 @@ class Incus:
                             or time.monotonic() >= deadline):
                         raise HypervisorError(meta.get("err") or
                             "Incus operation is still running; inspect the resource before retrying.")
+                    time.sleep(1)
             elif mutating:
                 emit("Incus: request completed\n")
             result["_etag"] = response.headers.get("etag")
