@@ -18,7 +18,7 @@
 .console-toolbar strong {
   margin-right: 12px;
 }
-.console-toolbar span {
+.console-toolbar > #console-status {
   flex: 1;
   color: #9caac0;
 }
@@ -47,4 +47,10 @@
 }
 #console-status.error {
   color: #f07878;
+}
+
+.console-toolbar .copy-button {
+  padding: 4px;
+  border-color: transparent;
+  background: transparent;
 }

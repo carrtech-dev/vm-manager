@@ -1,5 +1,8 @@
 import {
   state,
+  copyValue,
+  copyAddresses,
+  bindCopyButtons,
   $,
   $$,
   esc,
@@ -104,6 +107,8 @@ const isoOptions = (vm = null) => [
 const ref = (id) => "/vms/" + encodeURIComponent(id);
 const currentVM = (id) =>
   state.inventory?.vms.find((v) => v.id === (id || state.vm));
+const resourceName = (id) => /^(incus|libvirt):[a-zA-Z][\w-]{0,62}$/.test(id)
+  ? copyValue(id.split(":")[1], "hostname", esc(id)) : esc(id);
 const smallAction = (label, action, id, disabled = false) =>
   btn(label, action, id, "small link", disabled);
 function normalizeOrganizationFilters() {
@@ -270,7 +275,7 @@ function navigate() {
 }
 function renderLogin(message = "") {
   $("#app").innerHTML =
-    `<main class="login-screen"><form class="login-card" id="login-form"><div class="login-brand">▣ CARRTECH</div><span class="product">VM MANAGER</span><h1>Sign in to your infrastructure</h1><p class="host-address">ctlnxdbn001 · 192.168.8.235</p>${field("Username", "username", "", { placeholder: "Your username" })}${field("Password", "password", "", { type: "password", placeholder: "Your password" })}<div class="form-error" role="alert" ${message ? "" : "hidden"}>${esc(message)}</div><button class="button primary" type="submit">Sign in</button><p class="login-foot">Local accounts · Session protected</p></form></main>`;
+    `<main class="login-screen"><form class="login-card" id="login-form"><div class="login-brand">▣ CARRTECH</div><span class="product">VM MANAGER</span><h1>Sign in to your infrastructure</h1><p class="host-address">${copyValue("ctlnxdbn001")} · ${copyAddresses("192.168.8.235")}</p>${field("Username", "username", "", { placeholder: "Your username" })}${field("Password", "password", "", { type: "password", placeholder: "Your password" })}<div class="form-error" role="alert" ${message ? "" : "hidden"}>${esc(message)}</div><button class="button primary" type="submit">Sign in</button><p class="login-foot">Local accounts · Session protected</p></form></main>`;
   $("input[name=username]").autocomplete = "username";
   $("input[name=password]").autocomplete = "current-password";
   $("#login-form").onsubmit = async (event) => {
@@ -323,13 +328,13 @@ function render() {
       )
       .join(
         "",
-      )}</nav><div class="nav-heading">RESOURCE TREE</div><div class="resource-tree" id="resource-tree">${renderTree()}</div><div class="host-online"><strong>● HOST CONNECTED</strong><small>${esc(inv.host.address)}</small></div></aside><section class="workspace"><header class="topbar"><button class="icon-button mobile-menu" data-action="toggle-sidebar" aria-label="Toggle navigation">☰</button><div class="breadcrumb"><a href="#overview">Datacenter</a><span>/</span><span>${esc(inv.host.name)}</span><span>/</span><strong>${esc(state.page === "vm" ? vm?.name || "VM" : pageNames[state.page] || "Overview")}</strong></div>${can() ? btn("+ Create VM", "create-vm", "", "primary") : ""}<button class="icon-button" data-action="help" aria-label="Help">?</button><button class="account-button" data-action="account" aria-label="Your account"><span class="avatar">${esc(state.user.username.slice(0, 2).toUpperCase())}</span><span class="account-name">${esc(state.user.username)}</span><span class="role-label">${esc(state.user.role)}</span></button></header><main class="content" id="main-content">${inv.warnings.length ? `<div class="error-banner"><strong>Some host information is unavailable.</strong><br>${inv.warnings.map(esc).join("<br>")}</div>` : ""}${renderOrganizationFilters()}${renderPage()}</main><section class="task-dock" aria-label="Recent tasks" id="task-dock">${renderDock()}</section></section></div>`;
+      )}</nav><div class="nav-heading">RESOURCE TREE</div><div class="resource-tree" id="resource-tree">${renderTree()}</div><div class="host-online"><strong>● HOST CONNECTED</strong><small>${copyAddresses(inv.host.address)}</small></div></aside><section class="workspace"><header class="topbar"><button class="icon-button mobile-menu" data-action="toggle-sidebar" aria-label="Toggle navigation">☰</button><div class="breadcrumb"><a href="#overview">Datacenter</a><span>/</span><span>${copyValue(inv.host.name)}</span><span>/</span><strong>${state.page === "vm" && vm ? copyValue(vm.name) : esc(pageNames[state.page] || "Overview")}</strong></div>${can() ? btn("+ Create VM", "create-vm", "", "primary") : ""}<button class="icon-button" data-action="help" aria-label="Help">?</button><button class="account-button" data-action="account" aria-label="Your account"><span class="avatar">${esc(state.user.username.slice(0, 2).toUpperCase())}</span><span class="account-name">${esc(state.user.username)}</span><span class="role-label">${esc(state.user.role)}</span></button></header><main class="content" id="main-content">${inv.warnings.length ? `<div class="error-banner"><strong>Some host information is unavailable.</strong><br>${inv.warnings.map(esc).join("<br>")}</div>` : ""}${renderOrganizationFilters()}${renderPage()}</main><section class="task-dock" aria-label="Recent tasks" id="task-dock">${renderDock()}</section></section></div>`;
   bindPage();
   if ($("#resource-tree")) $("#resource-tree").scrollTop = treeScroll;
   if ($("#main-content")) $("#main-content").scrollTop = contentScroll;
 }
 function renderTree() {
-  return `<a class="tree-host" href="#overview">⌄ &nbsp;${esc(state.inventory.host.name)}</a>${[
+  return `<div class="tree-host">${copyValue(state.inventory.host.name, "hostname", `<a href="#overview">⌄ &nbsp;${esc(state.inventory.host.name)}</a>`)}</div>${[
     "incus",
     "libvirt",
   ]
@@ -341,7 +346,7 @@ function renderTree() {
           (!state.search ||
             v.name.toLowerCase().includes(state.search.toLowerCase())),
       );
-      return `<details class="tree-group" open><summary>${provider === "incus" ? "Incus" : "libvirt"} <span class="subtle">(${vms.length})</span></summary>${vms.map((v) => `<a class="tree-vm ${state.page === "vm" && state.vm === v.id ? "active" : ""}" href="#vm/${encodeURIComponent(v.id)}/summary" title="${esc(v.name)}"><span class="dot ${v.status}"></span><span>${esc(v.name)}</span></a>`).join("")}${!vms.length ? '<div class="tree-vm subtle">No matching VMs</div>' : ""}</details>`;
+      return `<details class="tree-group" open><summary>${provider === "incus" ? "Incus" : "libvirt"} <span class="subtle">(${vms.length})</span></summary>${vms.map((v) => `<div class="tree-vm ${state.page === "vm" && state.vm === v.id ? "active" : ""}"><span class="dot ${v.status}"></span>${copyValue(v.name, "hostname", `<a href="#vm/${encodeURIComponent(v.id)}/summary" title="${esc(v.name)}">${esc(v.name)}</a>`)}</div>`).join("")}${!vms.length ? '<div class="tree-vm subtle">No matching VMs</div>' : ""}</details>`;
     })
     .join("")}`;
 }
@@ -405,8 +410,8 @@ function renderOverview() {
     )}${panel(
       "Host summary",
       properties([
-        ["Hostname", esc(host.name)],
-        ["Address", esc(host.address)],
+        ["Hostname", copyValue(host.name)],
+        ["Address", copyAddresses(host.address)],
         ["Uptime", duration(host.uptime)],
         ["Load average", host.load.map((v) => v.toFixed(2)).join(" / ")],
         ["Hypervisors", "Incus + libvirt"],
@@ -433,7 +438,7 @@ function vmTable(vms, compact = false) {
         ],
     vms.map(
       (v) =>
-        `<tr class="clickable" data-action="open-vm" data-id="${esc(v.id)}"><td class="vm-name-cell"><a class="name" href="#vm/${encodeURIComponent(v.id)}/summary">${esc(v.name)}</a>${organizationChips(v)}${!compact && v.description ? `<small>${esc(v.description.slice(0, 70))}</small>` : ""}</td><td>${badge(v.provider)}</td><td>${badge(v.status)}</td><td class="numeric">${esc(v.cpu)}</td><td class="numeric">${size(v.memory)}</td>${compact ? "" : `<td class="numeric">${Object.values(v.devices).filter((d) => d.type === "disk" && d.readonly !== "true" && !d.source?.endsWith(".iso") && d.kind !== "cdrom").length} disk(s)</td><td class="mono">${esc(v.addresses.join(", ") || "Not reported")}</td><td><div class="actions">${smallAction("Open", "open-vm", v.id)}${can() ? smallAction(v.status === "running" ? "Shutdown" : "Start", v.status === "running" ? "shutdown" : "start", v.id, !["stopped", "running"].includes(v.status)) : ""}</div></td>`}</tr>`,
+        `<tr class="clickable" data-action="open-vm" data-id="${esc(v.id)}"><td class="vm-name-cell">${copyValue(v.name, "hostname", `<a class="name" href="#vm/${encodeURIComponent(v.id)}/summary">${esc(v.name)}</a>`)}${organizationChips(v)}${!compact && v.description ? `<small>${esc(v.description.slice(0, 70))}</small>` : ""}</td><td>${badge(v.provider)}</td><td>${badge(v.status)}</td><td class="numeric">${esc(v.cpu)}</td><td class="numeric">${size(v.memory)}</td>${compact ? "" : `<td class="numeric">${Object.values(v.devices).filter((d) => d.type === "disk" && d.readonly !== "true" && !d.source?.endsWith(".iso") && d.kind !== "cdrom").length} disk(s)</td><td class="mono">${copyAddresses(v.addresses, "Not reported")}</td><td><div class="actions">${smallAction("Open", "open-vm", v.id)}${can() ? smallAction(v.status === "running" ? "Shutdown" : "Start", v.status === "running" ? "shutdown" : "start", v.id, !["stopped", "running"].includes(v.status)) : ""}</div></td>`}</tr>`,
     ),
   );
 }
@@ -518,7 +523,7 @@ function createSnapshot(v) {
     textarea("Description (optional)", "description", "") +
     '<div class="hint">Includes the VM configuration and all supported writable disks. The VM must be stopped. Unchanged blocks are shared with earlier snapshots.</div>',
     f => queue(ref(v.id) + "/snapshots", "POST", { name: f.get("name"), description: f.get("description") }),
-    { submit: "Take snapshot" });
+    { submit: "Take snapshot", copyTitle: v.name });
 }
 function renderVM() {
   const v = currentVM();
@@ -532,7 +537,7 @@ function renderVM() {
   const running = v.status === "running";
   const editDisabled = v.status !== "stopped";
   let html = title(
-    `<span class="title-status">${esc(v.name)} ${badge(v.status)}</span>`,
+    `<span class="title-status">${copyValue(v.name)} ${badge(v.status)}</span>`,
     `${v.provider === "incus" ? "Incus" : "libvirt"} virtual machine${v.managed ? " · Created in VM Manager" : ""}`,
     can()
       ? `${btn("Console", "console", v.id, "secondary", !running)}${btn(running ? "Shutdown" : "Start", running ? "shutdown" : "start", v.id, "primary", !["running", "stopped"].includes(v.status))}${btn(v.pending?.length ? "Restart & apply" : "Restart", "restart", v.id, "secondary", !running)}${btn("Force stop", "force-stop", v.id, "danger", !running)}`
@@ -564,12 +569,12 @@ function renderVM() {
       `<div id="vm-live-metrics" class="resource-cards">${renderVMMetrics(v)}</div><div class="overview-columns">${panel(
         "VM information",
         properties([
-          ["Name", esc(v.name)],
+          ["Name", copyValue(v.name)],
           ["Hypervisor", badge(v.provider)],
           ["Status", badge(v.status)],
           [
             "IP addresses",
-            esc(v.addresses.join(", ") || "Not reported by guest"),
+            copyAddresses(v.addresses, "Not reported by guest"),
           ],
           ["Description", esc(v.description || "No description")],
           ["Project & tags", organizationChips(v) || "Unassigned · No tags"],
@@ -772,7 +777,7 @@ function renderNetworks() {
         ],
         nets.map(
           (n) =>
-            `<tr class="clickable" data-action="network-detail" data-id="${esc(n.id)}"><td><span class="name">${esc(n.name)}</span>${organizationChips(n)}${n.description ? `<small>${esc(n.description)}</small>` : ""}</td><td>${badge(n.provider)}</td><td>${badge(networkMode(n), "incus")}</td><td class="mono">${esc(n.config["ipv4.address"] || "None")}</td><td>${n.config["ipv4.dhcp"] === "false" ? "Disabled" : "Enabled"}</td><td>${n.used_by.length}</td><td><div class="actions">${smallAction("Details", "network-detail", n.id)}${can() ? smallAction("Organize", "organize-network", n.id) : ""}${can() && n.provider === "incus" ? `${smallAction("Edit", "edit-network", n.id, !!n.used_by.length)}${smallAction("Delete", "delete-network", n.id, !!n.used_by.length)}` : ""}</div></td></tr>`,
+            `<tr class="clickable" data-action="network-detail" data-id="${esc(n.id)}"><td><span class="name">${esc(n.name)}</span>${organizationChips(n)}${n.description ? `<small>${esc(n.description)}</small>` : ""}</td><td>${badge(n.provider)}</td><td>${badge(networkMode(n), "incus")}</td><td class="mono">${copyAddresses(n.config["ipv4.address"])}</td><td>${n.config["ipv4.dhcp"] === "false" ? "Disabled" : "Enabled"}</td><td>${n.used_by.length}</td><td><div class="actions">${smallAction("Details", "network-detail", n.id)}${can() ? smallAction("Organize", "organize-network", n.id) : ""}${can() && n.provider === "incus" ? `${smallAction("Edit", "edit-network", n.id, !!n.used_by.length)}${smallAction("Delete", "delete-network", n.id, !!n.used_by.length)}` : ""}</div></td></tr>`,
         ),
       ),
     ) +
@@ -788,7 +793,7 @@ function renderNetworks() {
                   ? "Isolated · no IP forwarding"
                   : "Routed · No NAT",
             ],
-            ["Gateway", esc(selected.config["ipv4.address"] || "None")],
+            ["Gateway", copyAddresses(selected.config["ipv4.address"])],
             [
               "Project & tags",
               organizationChips(selected) || "Unassigned · No tags",
@@ -799,13 +804,11 @@ function renderNetworks() {
             ],
             [
               "DHCP range",
-              esc(
-                selected.config["ipv4.dhcp.ranges"] || "Managed automatically",
-              ),
+              copyAddresses(selected.config["ipv4.dhcp.ranges"], "Managed automatically"),
             ],
             [
               "DNS domain",
-              esc(selected.config["dns.domain"] || "Managed by hypervisor"),
+              selected.config["dns.domain"] ? copyValue(selected.config["dns.domain"], "DNS domain") : "Managed by hypervisor",
             ],
             [
               "References",
@@ -863,7 +866,7 @@ function renderBackupPlan(v) {
   ]), can() ? btn("Configure backups", "backup-settings", v.id) : "");
 }
 function backupTable(rows) {
-  return table(["Source VM", "Created", "Storage", "Status", "Size", "Actions"], rows.map(b => `<tr><td class="name">${esc(b.vm_id)}<small>${esc(b.trigger)} · ${esc(b.id.slice(0, 8))}</small></td><td>${when(b.created)}</td><td>${esc(backupBlockName(b.block_id))}</td><td>${badge(b.status)}${b.message ? `<small title="${esc(b.message)}">${esc(b.message)}</small>` : ""}</td><td>${size(b.size)}</td><td><div class="actions">${can() ? smallAction("Restore", "restore-backup", b.id, b.status !== "completed") + smallAction("Delete", "delete-backup", b.id, ["running", "queued"].includes(b.status)) : ""}</div></td></tr>`));
+  return table(["Source VM", "Created", "Storage", "Status", "Size", "Actions"], rows.map(b => `<tr><td class="name">${resourceName(b.vm_id)}<small>${esc(b.trigger)} · ${esc(b.id.slice(0, 8))}</small></td><td>${when(b.created)}</td><td>${esc(backupBlockName(b.block_id))}</td><td>${badge(b.status)}${b.message ? `<small title="${esc(b.message)}">${esc(b.message)}</small>` : ""}</td><td>${size(b.size)}</td><td><div class="actions">${can() ? smallAction("Restore", "restore-backup", b.id, b.status !== "completed") + smallAction("Delete", "delete-backup", b.id, ["running", "queued"].includes(b.status)) : ""}</div></td></tr>`));
 }
 function renderVMBackups(v) {
   return `<div class="hint">Full offline backups include the root disk, attached private data disks and VM configuration. ISO media, snapshots, shared storage and passthrough devices are excluded or require manual backup. Restores create a separate, stopped VM.</div>` +
@@ -875,9 +878,9 @@ function renderBackups() {
     `<div class="hint">Backups use storage blocks with the backup purpose. Create one in Storage first. Backups require stopped VMs unless graceful shutdown and restart is enabled. Schedules run while this manager is available; after downtime, one missed run is queued. Times below use your browser timezone; schedules use their configured timezone.</div>` +
     panel("Virtual machines & schedules", table([can() ? '<input type="checkbox" id="backup-select-all" aria-label="Select all visible VMs">' : "", "VM", "Schedule", "Destination", "Next run", "Last scheduled task", "Actions"], vms.map(v => {
       const p = backupPlan(v.id), last = state.tasks.find(t => t.id === p?.last_task);
-      return `<tr><td>${can() ? `<input type="checkbox" class="backup-vm-select" value="${esc(v.id)}" aria-label="Select ${esc(v.name)}" ${selectedBackupVMs.has(v.id) ? "checked" : ""}>` : ""}</td><td><a class="name" href="#vm/${encodeURIComponent(v.id)}/backups">${esc(v.name)}</a><small>${esc(v.provider)} · ${esc(v.status)}</small></td><td>${esc(planSummary(p))}</td><td>${p ? esc(backupBlockName(p.block_id)) : "—"}</td><td>${p?.next_run ? when(p.next_run) : "—"}</td><td>${last ? badge(last.status) : p?.last_task ? smallAction("View task history", "tasks", "") : "—"}</td><td><div class="actions">${can() ? smallAction("Back up", "backup-now", v.id) + smallAction("Settings", "backup-settings", v.id) + (p ? smallAction("Remove settings", "remove-backup-settings", v.id) : "") : ""}</div></td></tr>`;
+      return `<tr><td>${can() ? `<input type="checkbox" class="backup-vm-select" value="${esc(v.id)}" aria-label="Select ${esc(v.name)}" ${selectedBackupVMs.has(v.id) ? "checked" : ""}>` : ""}</td><td>${copyValue(v.name, "hostname", `<a class="name" href="#vm/${encodeURIComponent(v.id)}/backups">${esc(v.name)}</a>`)}<small>${esc(v.provider)} · ${esc(v.status)}</small></td><td>${esc(planSummary(p))}</td><td>${p ? esc(backupBlockName(p.block_id)) : "—"}</td><td>${p?.next_run ? when(p.next_run) : "—"}</td><td>${last ? badge(last.status) : p?.last_task ? smallAction("View task history", "tasks", "") : "—"}</td><td><div class="actions">${can() ? smallAction("Back up", "backup-now", v.id) + smallAction("Settings", "backup-settings", v.id) + (p ? smallAction("Remove settings", "remove-backup-settings", v.id) : "") : ""}</div></td></tr>`;
     }))) +
-    (backupPlans().some(p => !state.inventory.vms.some(v => v.id === p.vm_id)) ? panel("Unavailable VM schedules", table(["VM", "Schedule", "Actions"], backupPlans().filter(p => !state.inventory.vms.some(v => v.id === p.vm_id)).map(p => `<tr><td>${esc(p.vm_id)}</td><td>${esc(planSummary(p))}</td><td>${can() ? smallAction("Remove settings", "remove-backup-settings", p.vm_id) : ""}</td></tr>`))) : "") +
+    (backupPlans().some(p => !state.inventory.vms.some(v => v.id === p.vm_id)) ? panel("Unavailable VM schedules", table(["VM", "Schedule", "Actions"], backupPlans().filter(p => !state.inventory.vms.some(v => v.id === p.vm_id)).map(p => `<tr><td>${resourceName(p.vm_id)}</td><td>${esc(planSummary(p))}</td><td>${can() ? smallAction("Remove settings", "remove-backup-settings", p.vm_id) : ""}</td></tr>`))) : "") +
     panel("Restore points", backupTable(backupRows().filter(b => { const v = state.inventory.vms.find(v => v.id === b.vm_id); return v ? matchesOrganization(v) : state.project === "all" && state.tag === "all"; })));
 }
 function backupForm(vmIds, settings = false) {
@@ -885,7 +888,7 @@ function backupForm(vmIds, settings = false) {
   if (!vmIds.length) throw new Error("Select at least one VM");
   if (!backupDestinations().length) throw new Error("Create a backup storage block in Storage first");
   const p = vmIds.length === 1 ? backupPlan(vmIds[0]) : null;
-  const content = `<p>${esc(vmIds.map(id => currentVM(id).name).join(", "))}</p><div class="warning">A running VM can be shut down gracefully for the full duration of its backup, then restarted. A shutdown timeout fails the backup. Force stop cancels automatic restart. Pending hardware edits remain saved.</div>` +
+  const content = `<p>${vmIds.map(id => copyValue(currentVM(id).name)).join(", ")}</p><div class="warning">A running VM can be shut down gracefully for the full duration of its backup, then restarted. A shutdown timeout fails the backup. Force stop cancels automatic restart. Pending hardware edits remain saved.</div>` +
     select("Backup storage", "block_id", [...(p && !backupDestinations().some(b => b[0] === p.block_id) ? [[p.block_id, "Unavailable destination — select another block"]] : []), ...backupDestinations()], p?.block_id || state.inventory.storage_defaults?.backup || backupDestinations()[0][0]) +
     check("Gracefully shut down and restart running VMs", "shutdown", p?.shutdown || false) +
     (settings ? check("Enable automatic backups", "enabled", p?.enabled || false) +
@@ -1008,7 +1011,7 @@ function renderUsers() {
 function taskRows(items) {
   return items.map(
     (t) =>
-      `<tr class="clickable" data-action="task-detail" data-id="${t.id}"><td class="numeric">${when(t.started)}</td><td>${esc(t.username)}</td><td title="${esc(t.resource)}">${esc(t.resource)}</td><td>${esc(t.action.replaceAll(".", " → "))}</td><td>${badge(t.status)}</td></tr>`,
+      `<tr class="clickable" data-action="task-detail" data-id="${t.id}"><td class="numeric">${when(t.started)}</td><td>${esc(t.username)}</td><td title="${esc(t.resource)}">${resourceName(t.resource)}</td><td>${esc(t.action.replaceAll(".", " → "))}</td><td>${badge(t.status)}</td></tr>`,
   );
 }
 function renderDock() {
@@ -1056,7 +1059,7 @@ function renderAudit() {
         ["Time", "User", "Action", "Resource", "Detail"],
         state.audit.map(
           (a) =>
-            `<tr><td class="numeric">${when(a.at)}</td><td>${esc(a.username)}</td><td>${esc(a.action)}</td><td class="vm-name-cell">${esc(a.resource)}</td><td>${esc(a.detail)}</td></tr>`,
+            `<tr><td class="numeric">${when(a.at)}</td><td>${esc(a.username)}</td><td>${esc(a.action)}</td><td class="vm-name-cell">${resourceName(a.resource)}</td><td>${esc(a.detail)}</td></tr>`,
         ),
       ),
     )
@@ -1210,7 +1213,7 @@ function createVM() {
       const review = (title, entries) => `<h4>${title}</h4>${properties(entries)}`;
       $("#vm-create-review", dialog).innerHTML =
         review("General", [
-          ["VM name", value("name")], ["Hypervisor", "Incus"],
+          ["VM name", copyValue(form.elements.namedItem("name").value)], ["Hypervisor", "Incus"],
           ["Description", value("description") || "—"], ["Start with host", enabled("autostart")],
         ]) + review("Hardware", [
           ["CPU cores", value("cpu")], ["Memory", value("memory_gib") + " GiB"],
@@ -1291,6 +1294,7 @@ function editVM(v) {
         secure_boot: f.has("secure_boot"),
         autostart: f.has("autostart"),
       }),
+    { copyTitle: v.name },
   );
 }
 function addDisk(v) {
@@ -1302,7 +1306,7 @@ function addDisk(v) {
         size_gib: +f.get("size_gib"),
         pool: f.get("pool") || "hdd-pool",
       }),
-    { submit: "Add disk" },
+    { submit: "Add disk", copyTitle: v.name },
   );
 }
 function editNIC(v, device = "") {
@@ -1317,7 +1321,7 @@ function editNIC(v, device = "") {
     ),
     async (f) =>
       queue(ref(v.id) + "/nics", "POST", { network: f.get("network"), device }),
-    { submit: device ? "Save network" : "Add adapter" },
+    { submit: device ? "Save network" : "Add adapter", copyTitle: v.name },
   );
 }
 function editCDROM(v) {
@@ -1336,7 +1340,7 @@ function editCDROM(v) {
         iso_id: f.get("iso_id"),
         boot: f.has("boot"),
       }),
-    { submit: "Apply media" },
+    { submit: "Apply media", copyTitle: v.name },
   );
 }
 function networkForm(net = null) {
@@ -1796,7 +1800,7 @@ async function action(name, id) {
         "Task details",
         properties([
           ["Operation", esc(t.action)],
-          ["Resource", esc(t.resource)],
+          ["Resource", resourceName(t.resource)],
           ["User", esc(t.username)],
           ["Started", when(t.started)],
           ["Finished", t.finished ? when(t.finished) : "In progress"],
@@ -1827,6 +1831,7 @@ async function action(name, id) {
     }
   }
 }
+bindCopyButtons();
 document.addEventListener("click", (event) => {
   const button = event.target.closest("[data-action]");
   if (!button || button.disabled) return;
