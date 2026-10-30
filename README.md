@@ -156,6 +156,22 @@ Console access requires the ability to operate VMs. Roles are checked on every A
 
 Authentication uses salted scrypt password hashes and 12-hour, opaque, server-side sessions in HttpOnly/SameSite cookies. HTTPS cookies are Secure. Mutations require a session CSRF token and same-origin requests. Login failures are throttled. All management tasks and account changes are audited. Task failures are visible in the task log; an interrupted task is never reported as completed.
 
+Select a row in **Task log** or **Task history** to view live task status, updated
+every second while the dialog is open. Expand **Host output** to connect to the
+live output stream; collapsing it, closing the dialog or hiding the browser tab
+disconnects the output stream. Reopening resumes from the last received entry.
+The task continues running independently of the stream. Completed tasks display
+saved output. Tasks from before this feature have their existing result only.
+
+Output includes task milestones, Incus operation status/progress when provided
+by the host, and stdout/stderr from supported host mutation commands. Quiet
+operations may only report milestones; this is management output, not the guest
+console. Configuration/query responses, command arguments, standard input and
+binary backup data are excluded. Each task retains its latest 256 output entries
+(up to 1,024 characters each) in SQLite, included in deployment metadata backups.
+Omitted older output is indicated when catching up. Output is sent only to signed-in
+users with task read permission; active connections recheck access continuously.
+
 ## Development and tests
 
 ```sh

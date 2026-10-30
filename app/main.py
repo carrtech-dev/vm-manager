@@ -29,12 +29,13 @@ from fastapi import (
     Response,
     HTTPException,
     Depends,
+    Query,
     UploadFile,
     Form,
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -46,6 +47,7 @@ from . import external_storage
 from . import backups
 from .power import PowerInterrupted, PowerRequests
 from .protection import ProtectionPower
+from .task_output import Recorder, capture, emit
 from .task_queue import ResourceExecutor
 from .snapshots import Snapshots
 
@@ -113,9 +115,17 @@ def task(user, action, resource, fn, resources=None):
             ),
         )
 
+    output = Recorder(store, task_id)
+    output("Queued; waiting for an available worker and resource.\n")
+
     def execute():
+        with capture(output):
+            execute_with_output()
+
+    def execute_with_output():
         with store.db() as db:
             db.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
+        emit("Task running on host.\n")
         try:
             if action.startswith("vm.") and ":" in resource:
                 provider, vm_name = vm_ref(resource)
@@ -133,14 +143,17 @@ def task(user, action, resource, fn, resources=None):
                     try:
                         backup.write_text(original)
                         backup.chmod(0o600)
+                        emit("Configuration backup saved.\n")
                     except OSError:
                         logging.exception('Emergency stop configuration snapshot failed')
+                        emit("Configuration backup failed; emergency stop continues.\n")
                 else:
                     with storage.lock:
                         directory = storage.directory(store, DATA, "backup")
                         backup = directory / (task_id + (".json" if provider == "incus" else ".xml"))
                         backup.write_text(original)
                         backup.chmod(0o600)
+                        emit("Configuration backup saved.\n")
             result = fn()
             status, message = "completed", (
                 result if isinstance(result, str) else "Completed successfully"
@@ -150,6 +163,7 @@ def task(user, action, resource, fn, resources=None):
         except Exception as error:
             logging.exception("Task %s failed for %s", action, resource)
             status, message = "failed", str(error)[:2000]
+        emit(f"{status.capitalize()}: {message}\n")
         invalidate()
         with store.db() as db:
             db.execute(
@@ -1960,6 +1974,71 @@ def tasks(user=Depends(require())):
             dict(r)
             for r in db.execute("SELECT * FROM tasks ORDER BY started DESC LIMIT 100")
         ]
+
+
+def task_detail(task_id):
+    with store.db() as db:
+        row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Task not found")
+    return dict(row)
+
+
+@app.get("/api/tasks/{task_id}")
+def get_task(task_id: str, user=Depends(require())):
+    return task_detail(task_id)
+
+
+def output_batch(task_id, after):
+    # Read status first: a terminal status is only stored after the final output.
+    detail = task_detail(task_id)
+    with store.db() as db:
+        rows = [dict(row) for row in db.execute(
+            "SELECT seq,at,text FROM task_output WHERE task_id=? AND seq>? ORDER BY seq",
+            (task_id, after))]
+    return detail, rows
+
+
+async def task_output_events(request, task_id, after):
+    heartbeat = time.monotonic()
+    while not await request.is_disconnected():
+        try:
+            # Recheck expiry, disabled accounts and revoked sessions throughout.
+            user = await asyncio.to_thread(session, request)
+            if 'read' not in ROLES.get(user['role'], set()):
+                raise HTTPException(403, "Task access revoked")
+        except HTTPException:
+            yield 'event: denied\ndata: {}\n\n'
+            return
+        detail, rows = await asyncio.to_thread(output_batch, task_id, after)
+        if rows:
+            payload = {'entries': rows, 'truncated': rows[0]['seq'] > after + 1}
+            after = rows[-1]['seq']
+            yield f"id: {after}\nevent: output\ndata: {json.dumps(payload)}\n\n"
+            heartbeat = time.monotonic()
+        if detail['status'] not in ('queued', 'running'):
+            yield 'event: done\ndata: {}\n\n'
+            return
+        if time.monotonic() - heartbeat >= 15:
+            yield ': keep-alive\n\n'
+            heartbeat = time.monotonic()
+        await asyncio.sleep(0.5)
+
+
+@app.get("/api/tasks/{task_id}/output")
+async def stream_task_output(request: Request, task_id: str,
+                             after: int = Query(default=0, ge=0, le=2**63 - 1), user=Depends(require())):
+    await asyncio.to_thread(task_detail, task_id)
+    try:
+        cursor = int(request.headers.get('last-event-id', '0'))
+        if not 0 <= cursor <= 2**63 - 1:
+            raise ValueError('Cursor out of range')
+        after = max(after, cursor)
+    except ValueError:
+        raise HTTPException(400, "Invalid output cursor")
+    return StreamingResponse(task_output_events(request, task_id, after),
+                             media_type='text/event-stream',
+                             headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
 
 
 @app.get("/api/audit")

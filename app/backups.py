@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+
 import tarfile
 import tempfile
 import threading
@@ -22,6 +23,7 @@ import yaml
 
 from pydantic import BaseModel, Field, field_validator
 
+from .task_output import emit
 from . import storage
 from .hypervisor import HypervisorError, HypervisorNotFound, name, run
 from .power import PowerInterrupted
@@ -284,6 +286,7 @@ class Manager:
         return 'Backup completed: ' + backup_id
 
     def export_root(self, vm_name, target):
+        emit("Incus: exporting VM archive to backup storage\n")
         # Stream directly to selected storage. Rewriting import metadata requires
         # no second full archive or temporary guest data on the application disk.
         with tempfile.TemporaryFile() as errors, target.open('xb') as output:
@@ -309,6 +312,8 @@ class Manager:
             finally:
                 timer.cancel()
                 process.stdout.close()
+
+        emit("Incus: VM archive export completed\n")
 
     def inspect_incus(self, vm_name):
         vm = self.incus.vm(vm_name)

@@ -10,6 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 from .hypervisor import HypervisorError, name
+from .task_output import emit
 
 Purpose = Literal["vm", "iso", "backup"]
 lock = threading.RLock()
@@ -40,6 +41,8 @@ class DefaultBlock(BaseModel):
 
 def broker(operation, **arguments):
     path = os.environ.get("VM_MANAGER_STORAGE_SOCKET", "/run/vm-manager-storage/control.sock")
+    if operation != 'list':
+        emit(f"Storage host: {operation} started\n")
     try:
         with socket.socket(socket.AF_UNIX) as connection:
             long_transfer = operation == 'libvirt_export' or operation in ('external_backup_push', 'external_backup_pull', 'external_backup_delete')
@@ -51,6 +54,8 @@ def broker(operation, **arguments):
                 response = json.loads(stream.readline(1024 * 1024))
         if "error" in response:
             raise HypervisorError(response["error"])
+        if operation != 'list':
+            emit(f"Storage host: {operation} completed\n")
         return response["result"]
     except (OSError, ValueError) as exc:
         raise HypervisorError("Storage service unavailable: " + str(exc)) from exc
