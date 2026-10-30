@@ -1462,3 +1462,7 @@ dialog .warning {
 .tree-vm a {
   color: inherit;
 }
+
+.vm-select-cell { width: 36px; }
+.vm-select-cell input, #vm-select-all, input[name="preserve_backups"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent-orange); }
+.bulk-vm-toolbar { margin-bottom: 16px; }

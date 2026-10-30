@@ -43,6 +43,25 @@ Console WebSockets send ping/pong keep-alives every 20 seconds. Idle input chann
 
 Normal shutdown asks the guest to power off. Boot menus and unresponsive guests may ignore this request; the task reports a failure if the guest does not shut down. Force stop bypasses the normal task queue and powers off without guest cooperation, cancelling earlier power requests for that VM so a pending restart cannot start it again. Unapplied hardware changes remain saved for the next Start. Force stop is separately confirmed and may lose unsaved guest data. Deleting a VM requires its exact name and a stopped VM. Incus deletion removes its root volume and attached extra volumes created by this application. Detached volumes are retained. Deleting an existing libvirt definition retains its disk files. VM configurations are backed up before operations in `/var/lib/vm-manager/config-backups`.
 
+
+On **Virtual machines**, select the checkboxes beside one or more VMs (or select
+all visible rows), then choose **Shutdown**, **Restart**, **Force Stop**, or
+**Delete** from the operation dropdown. Review the listed VMs and confirm once
+for the entire selection. Up to four operations run concurrently; each VM has
+its own task, result and audit entry. A failure does not stop the other VMs.
+Changing filters removes hidden VMs from the selection.
+
+Bulk deletion requires stopped VMs and removes all managed snapshots, including
+attached data-volume snapshots, and native VM snapshots created outside the
+manager. Backups are also deleted by default. In the confirmation dialog, check
+**Preserve backups** beside each VM whose independent restore points should
+remain in **Backups** after deletion. Snapshots cannot be preserved with a deleted
+VM. Backup schedules are removed in either case. Active backups and incomplete
+snapshot restores block deletion. Cleanup stops on an error for that VM; inspect
+its task before retrying because already deleted restore points cannot be
+recovered. Automatic configuration backups are retained. Existing libvirt disk
+files and detached Incus volumes remain retained as with individual deletion.
+
 Networks and ISO media that are still referenced cannot be deleted. Existing libvirt networks are listed for visibility; new networks are managed by Incus and can also be attached to libvirt VMs as bridges. Existing Incus ISO volumes can be used directly by Incus VMs; libvirt VMs use uploaded ISO files. The app does not modify host physical interfaces.
 
 ## Projects and tags
@@ -116,6 +135,14 @@ to the release directory. It creates disposable Incus/ZFS and libvirt/qcow2 VMs,
 writes and restores known contents on root and data disks, verifies restored
 configuration, shared storage, parent chains, permissions and deletion guards,
 then removes its resources and temporary operator. Existing VMs are retained.
+
+`scripts/bulk_check.py` is an opt-in check against the deployed service. Run as
+root with the release Python environment and `PYTHONPATH`. It creates disposable
+Incus/ZFS and libvirt/qcow2 VMs and backup storage, verifies simultaneous power
+operations and Force Stop cancellation, deletes snapshot chains and backups,
+restores a preserved backup after its source VM is gone, and removes its resources
+and temporary operator. `--browser-state <path>` allows a temporary browser check
+before deletion; protect and remove the generated authentication file.
 
 ## Permissions
 

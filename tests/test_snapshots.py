@@ -255,3 +255,24 @@ def test_live_capture_pauses_all_disks_and_resumes_even_after_failure(engine, fa
     assert engine.incus.instance['status'] == 'Running'
     actions = [c[2]['action'] for c in engine.incus.changes if c[1].endswith('/state')]
     assert actions == ['freeze', 'unfreeze']
+
+
+def test_bulk_snapshot_cleanup_removes_branches_data_disks_and_external_snapshots(engine):
+    engine.incus.driver = 'btrfs'
+    create(engine, 'root')
+    create(engine, 'branch-one')
+    engine.restore('incus', 'demo', 'incus:demo', 'root')
+    create(engine, 'branch-two')
+    engine.incus.request('POST', '/1.0/instances/demo/snapshots', {'name': 'external'})
+    engine.delete_all('incus', 'demo', 'incus:demo')
+    assert not engine.rows('incus:demo')
+    assert not engine.incus.snapshots
+
+
+def test_bulk_snapshot_cleanup_blocks_incomplete_restore_before_deleting_anything(engine):
+    create(engine)
+    engine.set_state('incus:demo', 'one', 'incomplete', 'restore')
+    before = dict(engine.incus.snapshots)
+    with pytest.raises(HypervisorError, match='restore'):
+        engine.delete_all('incus', 'demo', 'incus:demo')
+    assert engine.incus.snapshots == before

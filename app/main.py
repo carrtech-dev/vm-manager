@@ -88,13 +88,14 @@ power_requests = PowerRequests()
 DUMMY_PASSWORD_HASH = hash_password("dummy-password-for-timing-only")
 cache_lock = threading.Lock()
 cache = {"at": 0, "data": None}
+deleting_vms = set()  # Guarded by backup_manager.lock.
 
 
 def invalidate():
     cache["at"] = 0
 
 
-def task(user, action, resource, fn):
+def task(user, action, resource, fn, submit=None):
     task_id = uuid.uuid4().hex
     with store.db() as db:
         db.execute(
@@ -158,7 +159,9 @@ def task(user, action, resource, fn):
                 user["username"], action, resource, status + ": " + message, db=db
             )
 
-    (stop_executor if action == "vm.stop" else executor).submit(execute)
+    if submit is None:
+        submit = (stop_executor if action == "vm.stop" else executor).submit
+    submit(execute)
     return {"task_id": task_id}
 
 
@@ -695,6 +698,46 @@ class Action(BaseModel):
     confirm_name: str = ""
 
 
+class BulkVMAction(BaseModel):
+    vm_ids: list[str] = Field(min_length=1, max_length=200)
+    action: Literal["shutdown", "restart", "stop", "delete"]
+    confirmed: bool = False
+    preserve_backups: list[str] = Field(default_factory=list, max_length=200)
+
+
+def run_bulk_tasks(functions):
+    # Occupy the normal queue until the entire batch finishes, so unrelated
+    # hardware, snapshot and backup tasks cannot race these VM operations.
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="vm-bulk") as pool:
+        futures = [pool.submit(fn) for fn in functions]
+        for future in futures:
+            future.result()
+
+
+@app.post("/api/vms/bulk/action")
+def bulk_vm_action(body: BulkVMAction, user=Depends(require("operate"))):
+    if not body.confirmed:
+        raise HTTPException(400, "Confirm the bulk operation before continuing")
+    vm_ids = list(dict.fromkeys(body.vm_ids))
+    for vm_id in vm_ids:
+        vm_ref(vm_id)
+    if not set(body.preserve_backups).issubset(vm_ids) or (body.preserve_backups and body.action != "delete"):
+        raise HTTPException(400, "Backup preservation applies only to VMs selected for deletion")
+    known = {v["id"] for v in inventory()["vms"]}
+    if any(vm_id not in known for vm_id in vm_ids):
+        raise HTTPException(404, "A selected VM no longer exists; refresh the VM list")
+    functions, results = [], []
+    for vm_id in vm_ids:
+        if body.action == "delete":
+            fn = lambda vm_id=vm_id: remove_vm(vm_id, cleanup=True, preserve_backups=vm_id in body.preserve_backups, actor=user['username'])
+        else:
+            cancelled = power_requests.register(vm_id, body.action)
+            fn = lambda vm_id=vm_id, cancelled=cancelled: power_action(vm_id, body.action, cancelled)
+        results.append(dict(vm_id=vm_id, **task(user, "vm." + body.action, vm_id, fn, submit=functions.append)))
+    (stop_executor if body.action == "stop" else executor).submit(run_bulk_tasks, functions)
+    return {"tasks": results}
+
+
 @app.post("/api/vms/{vm_id}/action")
 def vm_action(vm_id: str, body: Action, user=Depends(require("operate"))):
     provider, vm_name = vm_ref(vm_id)
@@ -773,22 +816,48 @@ def delete_vm(vm_id: str, body: Confirm, user=Depends(require("operate"))):
     if body.confirm_name != vm_name:
         raise HTTPException(400, "Type the VM name to confirm deletion")
 
-    def delete():
-        ensure_stopped(provider, vm_name)
-        if snapshots.rows(vm_id):
-            raise HypervisorError("Delete the VM's snapshots first, newest first, before deleting the VM.")
-        if provider == "incus":
-            incus.delete(vm_name)
-        else:
-            # Existing VM storage is preserved; undefine never deletes a disk.
-            libvirt.cli("undefine", vm_name, "--nvram")
-        with store.db() as db:
-            db.execute("DELETE FROM pending_hardware WHERE vm_id=?", (vm_id,))
-            db.execute("DELETE FROM snapshot_heads WHERE vm_id=?", (vm_id,))
-            db.execute("DELETE FROM backup_plans WHERE vm_id=?", (vm_id,))
-            organization.clear(store, "vm", vm_id, db=db)
+    return task(user, "vm.delete", vm_id, lambda: remove_vm(vm_id))
 
-    return task(user, "vm.delete", vm_id, delete)
+
+def remove_vm(vm_id, cleanup=False, preserve_backups=True, actor='system'):
+    with backup_manager.lock:
+        with store.db() as db:
+            if db.execute("SELECT 1 FROM vm_backups WHERE vm_id=? AND status IN ('queued','running')", (vm_id,)).fetchone():
+                raise HypervisorError("Wait for the VM's active backup to finish before deleting it.")
+        deleting_vms.add(vm_id)
+    try:
+        return remove_vm_contents(vm_id, cleanup, preserve_backups, actor)
+    finally:
+        with backup_manager.lock:
+            invalidate()
+            deleting_vms.discard(vm_id)
+
+
+def remove_vm_contents(vm_id, cleanup, preserve_backups, actor):
+    provider, vm_name = vm_ref(vm_id)
+    ensure_stopped(provider, vm_name)
+    if cleanup:
+        snapshots.guard_start(vm_id)
+        snapshots.delete_all(provider, vm_name, vm_id)
+        if not preserve_backups:
+            with store.db() as db:
+                backup_ids = [r['id'] for r in db.execute("SELECT id FROM vm_backups WHERE vm_id=?", (vm_id,))]
+            for backup_id in backup_ids:
+                backup_manager.delete(backup_id)
+                store.audit(actor, 'backup.delete', backup_id, 'Bulk VM deletion: ' + vm_id)
+    elif snapshots.rows(vm_id):
+        raise HypervisorError("Delete the VM's snapshots first, newest first, before deleting the VM.")
+    if provider == "incus":
+        incus.delete(vm_name)
+    else:
+        # Existing VM storage is preserved; undefine never deletes a disk.
+        libvirt.cli("undefine", vm_name, "--nvram")
+    with store.db() as db:
+        db.execute("DELETE FROM pending_hardware WHERE vm_id=?", (vm_id,))
+        db.execute("DELETE FROM snapshot_heads WHERE vm_id=?", (vm_id,))
+        db.execute("DELETE FROM backup_plans WHERE vm_id=?", (vm_id,))
+        organization.clear(store, "vm", vm_id, db=db)
+    return "VM deleted." + (" Backups preserved." if cleanup and preserve_backups else " Snapshots and backups deleted." if cleanup else "")
 
 
 class Disk(BaseModel):
@@ -1992,6 +2061,9 @@ def list_backups(user=Depends(require())):
 
 def queue_backups(user, vm_ids, block_id, shutdown=False, trigger='manual', keep=None, mode=None):
     with backup_manager.lock:
+        if deleting_vms.intersection(vm_ids):
+            raise HypervisorError('A selected VM is being deleted; wait for deletion to finish')
+        check_backup_vms(vm_ids)
         now = time.time()
         rows = [(uuid.uuid4().hex, vm_id) for vm_id in sorted(set(vm_ids))]
         try:

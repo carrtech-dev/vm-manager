@@ -1437,3 +1437,128 @@ def test_storage_pending_disk_reference_blocks_delete(client, storage_blocks):
     finally:
         with store.db() as db:
             db.execute("DELETE FROM pending_hardware WHERE id='storage-pending'")
+
+
+def test_bulk_vm_api_requires_permission_confirmation_and_valid_selection(client, monkeypatch):
+    import app.main as main
+    monkeypatch.setattr(main, 'inventory', lambda: {'vms': [{'id': 'incus:one'}]})
+    body = {'vm_ids': ['incus:one'], 'action': 'stop', 'confirmed': True}
+    path = '/api/vms/bulk/action'
+    assert client.post(path, json=body).status_code == 401
+    headers = login(client, 'viewer')
+    assert client.post(path, headers=headers, json=body).status_code == 403
+    headers = login(client, 'operator')
+    assert client.post(path, json=body).status_code == 403
+    assert client.post(path, headers=headers, json={**body, 'confirmed': False}).status_code == 400
+    assert client.post(path, headers=headers, json={**body, 'vm_ids': []}).status_code == 422
+    assert client.post(path, headers=headers, json={**body, 'vm_ids': ['incus:missing']}).status_code == 404
+    assert client.post(path, headers=headers, json={**body, 'vm_ids': ['other:one']}).status_code == 400
+    assert client.post(path, headers=headers, json={**body, 'preserve_backups': ['incus:one']}).status_code == 400
+    assert client.post(path, headers=headers, json={**body, 'action': 'delete', 'preserve_backups': ['incus:other']}).status_code == 400
+    with store.db() as db:
+        before = db.execute('SELECT count(*) FROM tasks').fetchone()[0]
+    assert client.post(path, headers=headers, json={**body, 'vm_ids': ['incus:one', 'incus:missing']}).status_code == 404
+    with store.db() as db:
+        assert db.execute('SELECT count(*) FROM tasks').fetchone()[0] == before
+
+
+@pytest.mark.parametrize('action', ['shutdown', 'restart', 'stop'])
+def test_bulk_power_runs_concurrently_once_per_vm_and_isolates_failures(client, monkeypatch, action):
+    import threading
+    import time
+    import app.main as main
+    ids = ['incus:bulk-one', 'libvirt:bulk-two']
+    monkeypatch.setattr(main, 'inventory', lambda: {'vms': [{'id': vm} for vm in ids]})
+    monkeypatch.setattr(incus, 'vm', lambda _: {'status': 'Stopped'})
+    monkeypatch.setattr(libvirt, 'cli', lambda *args: '<domain/>')
+    barrier = threading.Barrier(2)
+    calls = []
+    def operate(vm_id, operation, cancelled):
+        calls.append((vm_id, operation))
+        barrier.wait(timeout=5)  # Serial execution fails this test.
+        if vm_id == ids[0]:
+            raise HypervisorError('Injected guest failure')
+    monkeypatch.setattr(main, 'power_action', operate)
+    headers = login(client, 'operator')
+    response = client.post('/api/vms/bulk/action', headers=headers, json={'vm_ids': ids + ids, 'action': action, 'confirmed': True})
+    assert response.status_code == 200, response.text
+    tasks = response.json()['tasks']
+    assert len(tasks) == 2
+    main.stop_executor.submit(lambda: None).result(timeout=10)
+    main.executor.submit(lambda: None).result(timeout=10)
+    with store.db() as db:
+        rows = [dict(db.execute('SELECT * FROM tasks WHERE id=?', (t['task_id'],)).fetchone()) for t in tasks]
+        for vm in ids:
+            assert db.execute('SELECT 1 FROM audit WHERE action=? AND resource=?', ('vm.' + action, vm)).fetchone()
+    assert [r['status'] for r in rows] == ['failed', 'completed']
+    assert sorted(calls) == sorted((vm, action) for vm in ids)
+
+
+def test_bulk_delete_defaults_to_cleanup_and_preserves_only_checked_vm(client, monkeypatch):
+    import app.main as main
+    ids = ['incus:delete-one', 'libvirt:delete-two']
+    monkeypatch.setattr(main, 'inventory', lambda: {'vms': [{'id': vm} for vm in ids]})
+    monkeypatch.setattr(incus, 'vm', lambda _: {'status': 'Stopped'})
+    monkeypatch.setattr(libvirt, 'cli', lambda *args: '<domain/>')
+    calls = []
+    monkeypatch.setattr(main, 'remove_vm', lambda vm, **options: calls.append((vm, options)))
+    headers = login(client, 'operator')
+    response = client.post('/api/vms/bulk/action', headers=headers, json={'vm_ids': ids, 'action': 'delete', 'confirmed': True, 'preserve_backups': [ids[1]]})
+    assert response.status_code == 200
+    main.executor.submit(lambda: None).result(timeout=10)
+    assert sorted(calls) == [(ids[0], {'cleanup': True, 'preserve_backups': False, 'actor': 'operator'}), (ids[1], {'cleanup': True, 'preserve_backups': True, 'actor': 'operator'})]
+
+
+def test_bulk_delete_cleanup_stopped_guards_backup_retention_and_failure(client, monkeypatch):
+    import app.main as main
+    vm = 'incus:delete-content-check'
+    events = []
+    monkeypatch.setattr(main, 'ensure_stopped', lambda *args: events.append('stopped'))
+    monkeypatch.setattr(main.snapshots, 'guard_start', lambda *args: events.append('guard'))
+    monkeypatch.setattr(main.snapshots, 'delete_all', lambda *args: events.append('snapshots'))
+    monkeypatch.setattr(incus, 'delete', lambda *args: events.append('vm'))
+    with store.db() as db:
+        db.execute("INSERT INTO vm_backups(id,vm_id,block_id,status,created,trigger) VALUES('bulk-check',?,'block','completed',0,'manual')", (vm,))
+        db.execute("INSERT INTO backup_plans(vm_id,settings) VALUES(?,'{}')", (vm,))
+    def delete_backup(backup_id):
+        events.append('backup')
+        with store.db() as db:
+            db.execute('DELETE FROM vm_backups WHERE id=?', (backup_id,))
+    monkeypatch.setattr(main.backup_manager, 'delete', delete_backup)
+    main.remove_vm(vm, cleanup=True, preserve_backups=True)
+    assert events == ['stopped', 'guard', 'snapshots', 'vm']
+    with store.db() as db:
+        assert db.execute('SELECT 1 FROM vm_backups WHERE vm_id=?', (vm,)).fetchone()
+        assert not db.execute('SELECT 1 FROM backup_plans WHERE vm_id=?', (vm,)).fetchone()
+    events.clear()
+    main.remove_vm(vm, cleanup=True, preserve_backups=False)
+    assert events == ['stopped', 'guard', 'snapshots', 'backup', 'vm']
+    events.clear()
+    def fail(*args):
+        raise HypervisorError('Snapshot storage unavailable')
+    monkeypatch.setattr(main.snapshots, 'delete_all', fail)
+    with pytest.raises(HypervisorError, match='unavailable'):
+        main.remove_vm(vm, cleanup=True, preserve_backups=False)
+    assert events == ['stopped', 'guard']
+    assert vm not in main.deleting_vms
+    with store.db() as db:
+        db.execute("INSERT INTO vm_backups(id,vm_id,block_id,status,created,trigger) VALUES('bulk-active',?,'block','queued',0,'manual')", (vm,))
+    events.clear()
+    try:
+        with pytest.raises(HypervisorError, match='active backup'):
+            main.remove_vm(vm, cleanup=True, preserve_backups=False)
+        assert not events
+    finally:
+        with store.db() as db:
+            db.execute("DELETE FROM vm_backups WHERE id='bulk-active'")
+
+
+def test_backup_cannot_queue_during_vm_deletion(client):
+    import app.main as main
+    vm = 'incus:deleting-check'
+    main.deleting_vms.add(vm)
+    try:
+        with pytest.raises(HypervisorError, match='being deleted'):
+            main.queue_backups({'username': 'operator'}, [vm], 'block')
+    finally:
+        main.deleting_vms.discard(vm)

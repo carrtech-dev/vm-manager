@@ -283,6 +283,29 @@ class Snapshots:
             raise HypervisorError("Snapshot restore is incomplete. Keep the VM stopped and retry this restore. " + str(exc)) from exc
         return f"Restored snapshot {snapshot}. VM remains stopped."
 
+    def delete_all(self, provider, vm_name, vm_id):
+        self.stopped(provider, vm_name)
+        self.guard_start(vm_id)
+        rows = self.rows(vm_id)
+        while rows:
+            parents = {r['parent'] for r in rows}
+            leaves = [r for r in reversed(rows) if r['name'] not in parents]
+            if not leaves:
+                raise HypervisorError("Snapshot chain is invalid; inspect it before deleting the VM.")
+            for row in leaves:
+                self.delete(provider, vm_name, vm_id, row['name'])
+            rows = self.rows(vm_id)
+        # Include snapshots created outside the manager. Managed data-volume
+        # snapshots were removed with their durable manifests above.
+        native = self.native(provider, vm_name)
+        while native:
+            snapshot = native[-1]
+            if provider == 'incus':
+                self.incus.request('DELETE', '/1.0/instances/' + quote(vm_name) + '/snapshots/' + quote(snapshot, safe=''))
+            else:
+                self.libvirt.cli('snapshot-delete', vm_name, snapshot, '--children')
+            native = self.native(provider, vm_name)
+
     def delete(self, provider, vm_name, vm_id, snapshot):
         self.stopped(provider, vm_name)
         row = self.row(vm_id, snapshot)

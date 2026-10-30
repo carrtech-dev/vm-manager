@@ -50,6 +50,7 @@ let busy = false,
   taskBusy = false,
   selectedNetwork = null,
   renderedPath = "";
+const selectedVMs = new Set();
 const seenTasks = new Map();
 let vmMetrics = null, metricsBusy = false;
 let vmSnapshots = null, snapshotsLoading = null;
@@ -422,9 +423,10 @@ function renderOverview() {
     )}</div><p class="subtle" style="font-size:11px">Live host values · Updated ${when(state.inventory.updated)} · Guest addresses appear when reported by the hypervisor.</p>`
   );
 }
-function vmTable(vms, compact = false) {
+function vmTable(vms, compact = false, selectable = false) {
+  const selectionHeader = '<input type="checkbox" id="vm-select-all" aria-label="Select all visible virtual machines" ' + (vms.length && vms.every(v => selectedVMs.has(v.id)) ? "checked" : "") + '>';
   return table(
-    compact
+    [...(selectable ? [selectionHeader] : []), ...(compact
       ? ["Name", "Hypervisor", "Status", "vCPUs", "Memory"]
       : [
           "Name",
@@ -435,10 +437,10 @@ function vmTable(vms, compact = false) {
           "Disks",
           "IP address",
           "Actions",
-        ],
+        ])],
     vms.map(
       (v) =>
-        `<tr class="clickable" data-action="open-vm" data-id="${esc(v.id)}"><td class="vm-name-cell">${copyValue(v.name, "hostname", `<a class="name" href="#vm/${encodeURIComponent(v.id)}/summary">${esc(v.name)}</a>`)}${organizationChips(v)}${!compact && v.description ? `<small>${esc(v.description.slice(0, 70))}</small>` : ""}</td><td>${badge(v.provider)}</td><td>${badge(v.status)}</td><td class="numeric">${esc(v.cpu)}</td><td class="numeric">${size(v.memory)}</td>${compact ? "" : `<td class="numeric">${Object.values(v.devices).filter((d) => d.type === "disk" && d.readonly !== "true" && !d.source?.endsWith(".iso") && d.kind !== "cdrom").length} disk(s)</td><td class="mono">${copyAddresses(v.addresses, "Not reported")}</td><td><div class="actions">${smallAction("Open", "open-vm", v.id)}${can() ? smallAction(v.status === "running" ? "Shutdown" : "Start", v.status === "running" ? "shutdown" : "start", v.id, !["stopped", "running"].includes(v.status)) : ""}</div></td>`}</tr>`,
+        `<tr class="clickable" data-action="open-vm" data-id="${esc(v.id)}">${selectable ? `<td class="vm-select-cell"><input type="checkbox" class="vm-select" value="${esc(v.id)}" aria-label="Select ${esc(v.name)} (${esc(v.provider)})" ${selectedVMs.has(v.id) ? "checked" : ""}></td>` : ""}<td class="vm-name-cell">${copyValue(v.name, "hostname", `<a class="name" href="#vm/${encodeURIComponent(v.id)}/summary">${esc(v.name)}</a>`)}${organizationChips(v)}${!compact && v.description ? `<small>${esc(v.description.slice(0, 70))}</small>` : ""}</td><td>${badge(v.provider)}</td><td>${badge(v.status)}</td><td class="numeric">${esc(v.cpu)}</td><td class="numeric">${size(v.memory)}</td>${compact ? "" : `<td class="numeric">${Object.values(v.devices).filter((d) => d.type === "disk" && d.readonly !== "true" && !d.source?.endsWith(".iso") && d.kind !== "cdrom").length} disk(s)</td><td class="mono">${copyAddresses(v.addresses, "Not reported")}</td><td><div class="actions">${smallAction("Open", "open-vm", v.id)}${can() ? smallAction(v.status === "running" ? "Shutdown" : "Start", v.status === "running" ? "shutdown" : "start", v.id, !["stopped", "running"].includes(v.status)) : ""}</div></td>`}</tr>`,
     ),
   );
 }
@@ -452,6 +454,31 @@ function filteredVMs() {
       (state.status === "all" || v.status === state.status) &&
       (state.provider === "all" || v.provider === state.provider),
   );
+}
+function vmListContent(vms) {
+  // Selections always describe visible rows, including after filters/refreshes.
+  for (const id of selectedVMs) if (!vms.some(v => v.id === id)) selectedVMs.delete(id);
+  return (can() && selectedVMs.size ? `<div class="toolbar bulk-vm-toolbar" aria-label="Selected VM operations"><strong>${selectedVMs.size} selected</strong><select id="bulk-vm-action" aria-label="Bulk VM operation"><option value="">Choose operation…</option><option value="shutdown">Shutdown</option><option value="restart">Restart</option><option value="stop">Force Stop</option><option value="delete">Delete</option></select>${btn("Clear selection", "clear-vm-selection")}</div>` : "") + panel("Virtual machines", vmTable(vms, false, can()));
+}
+function bulkVMAction(operation) {
+  const vms = filteredVMs().filter(v => selectedVMs.has(v.id));
+  if (!vms.length) return;
+  const labels = {shutdown: "Shutdown", restart: "Restart", stop: "Force Stop", delete: "Delete"};
+  const deleting = operation === "delete";
+  const explanation = deleting
+    ? "Permanently delete these stopped VMs, all their snapshots and their backups. Check Preserve backups for each VM whose independent backups should remain available in Backups. Incus root disks and attached app-created disks are removed; libvirt disk files and detached volumes are retained. Running VMs fail deletion; shut them down first."
+    : operation === "stop" ? "Power off these VMs immediately. Unsaved guest data may be lost. Earlier queued power requests are cancelled; pending hardware changes are retained."
+    : operation === "restart" ? "Gracefully shut down and restart these VMs, applying pending hardware changes. Guests that do not shut down within 60 seconds will report a failed task."
+    : "Ask these VMs to shut down gracefully. Guests that do not shut down within 60 seconds will report a failed task; they will not be forced off.";
+  modal(`${labels[operation]} ${vms.length} virtual machine${vms.length === 1 ? "" : "s"}`, `<div class="${deleting || operation === "stop" ? "warning" : "hint"}">${explanation}</div>` +
+    table(["Virtual machine", "Hypervisor", "Status", ...(deleting ? ["Preserve backups"] : [])], vms.map(v => `<tr><td>${esc(v.name)}</td><td>${esc(v.provider)}</td><td>${esc(v.status)}</td>${deleting ? `<td><input type="checkbox" name="preserve_backups" value="${esc(v.id)}" aria-label="Preserve backups for ${esc(v.name)} (${esc(v.provider)})"></td>` : ""}</tr>`)) +
+    `<p>Confirm once for all listed VMs. Each VM has its own task and result. Operations run on up to four VMs at a time; a failure does not stop the other VMs.${deleting ? ' Deletion cleanup cannot be undone and may be partially completed if a task fails.' : ''}</p>`, async f => {
+      const result = await api("/vms/bulk/action", "POST", {action: operation, vm_ids: vms.map(v => v.id), confirmed: true, preserve_backups: f.getAll("preserve_backups")});
+      vms.forEach(v => selectedVMs.delete(v.id));
+      if (state.page === "vms") updateVMTable();
+      toast(`${result.tasks.length} VM tasks queued. Follow each result in the task log.`);
+      window.dispatchEvent(new CustomEvent("refresh-tasks"));
+    }, {wide: true, submit: `${labels[operation]} ${vms.length} VM${vms.length === 1 ? "" : "s"}`, danger: deleting || operation === "stop"});
 }
 function renderVMs() {
   const vms = filteredVMs();
@@ -484,7 +511,7 @@ function renderVMs() {
       )
       .join(
         "",
-      )}</select><span class="result-count" id="vm-result-count">${vms.length} virtual machines</span></div><div id="vm-table">${panel("Virtual machines", vmTable(vms))}</div>`
+      )}</select><span class="result-count" id="vm-result-count">${vms.length} virtual machines</span></div><div id="vm-table">${vmListContent(vms)}</div>`
   );
 }
 async function refreshSnapshots(vmId, repaint = true) {
@@ -1083,7 +1110,12 @@ function renderAccount() {
     )
   );
 }
+function syncVMSelection() {
+  const all = $("#vm-select-all");
+  if (all) all.indeterminate = selectedVMs.size > 0 && selectedVMs.size < filteredVMs().length;
+}
 function bindPage() {
+  syncVMSelection();
   const resource = $("#resource-search");
   if (resource)
     resource.oninput = (e) => {
@@ -1144,7 +1176,8 @@ function bindPage() {
 }
 function updateVMTable() {
   const vms = filteredVMs();
-  $("#vm-table").innerHTML = panel("Virtual machines", vmTable(vms));
+  $("#vm-table").innerHTML = vmListContent(vms);
+  syncVMSelection();
   $("#vm-result-count").textContent = vms.length + " virtual machines";
 }
 function createVM() {
@@ -1674,6 +1707,10 @@ async function action(name, id) {
     case "cdrom":
       editCDROM(v);
       break;
+    case "clear-vm-selection":
+      selectedVMs.clear();
+      updateVMTable();
+      break;
     case "start":
     case "shutdown":
     case "restart":
@@ -1840,7 +1877,7 @@ bindCopyButtons();
 document.addEventListener("click", (event) => {
   const button = event.target.closest("[data-action]");
   if (!button || button.disabled) return;
-  if (button.tagName === "TR" && event.target.closest("a,button")) return;
+  if (button.tagName === "TR" && event.target.closest("a,button,input,select,label")) return;
   event.preventDefault();
   action(button.dataset.action, button.dataset.id || "").catch((e) =>
     toast(e.message, "error"),
@@ -1852,6 +1889,7 @@ window.addEventListener("hashchange", async () => {
 });
 window.addEventListener("session-expired", () => {
   state.user = null;
+  selectedVMs.clear();
   state.inventory = null;
   $("#modal").close();
   renderLogin("Your session expired. Sign in to continue.");
@@ -1877,6 +1915,22 @@ setInterval(() => { if (!document.hidden) refreshVMMetrics(); }, 5000);
 init();
 
  document.addEventListener("change", event => {
+  if (event.target.matches(".vm-select")) {
+    if (event.target.checked) selectedVMs.add(event.target.value);
+    else selectedVMs.delete(event.target.value);
+    updateVMTable();
+  }
+  if (event.target.id === "vm-select-all") {
+    filteredVMs().forEach(v => {
+      if (event.target.checked) selectedVMs.add(v.id); else selectedVMs.delete(v.id);
+    });
+    updateVMTable();
+  }
+  if (event.target.id === "bulk-vm-action" && event.target.value) {
+    const operation = event.target.value;
+    event.target.value = "";
+    bulkVMAction(operation);
+  }
   if (event.target.matches(".backup-vm-select")) {
     if (event.target.checked) selectedBackupVMs.add(event.target.value);
     else selectedBackupVMs.delete(event.target.value);
