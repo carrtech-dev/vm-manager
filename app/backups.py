@@ -230,7 +230,7 @@ class Manager:
         vm_id = row['vm_id']
         provider, vm_name = vm_id.split(':', 1)
         # Legacy schedules retain their existing stopped/shutdown policy.
-        mode = 'shutdown' if shutdown else mode or 'stopped'
+        mode = mode or ('shutdown' if shutdown else 'stopped')
         self.power.power_action = self.power_action
         self.power.status = self.status
         self.update(backup_id, 'running')

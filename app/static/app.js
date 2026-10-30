@@ -540,7 +540,7 @@ function renderSnapshots(v, data) {
       const retry = s.status === "incomplete" && s.operation === "restore";
       const restoreDisabled = disabled || !data.supported || !(s.status === "ready" || retry);
       const deleteDisabled = v.status !== "stopped" || working || !!s.children?.length || retry;
-      return `<tr><td class="vm-name-cell"><strong>${esc(s.name)}</strong>${s.description ? `<small>${esc(s.description)}</small>` : ""}${s.current ? '<small>Current snapshot base</small>' : ""}<small>${s.consistency === "crash-consistent" ? "Live · crash-consistent" : "Offline"}</small>${s.error ? `<small role="alert">${esc(s.error)}</small>` : ""}${!s.managed ? '<small>Created outside VM Manager; manage through the hypervisor.</small>' : ""}</td><td>${esc(s.parent || (s.managed ? "Base" : "—"))}</td><td>${s.created ? when(s.created) : "—"}</td><td>${s.disks ? esc(s.disks.map(d => d.device).join(", ")) : "—"}</td><td>${badge(s.status)}</td><td><div class="actions">${can() && s.managed ? `${btn(retry ? "Retry restore" : "Restore", "restore-snapshot", v.id + "|" + s.name, "small", restoreDisabled)}${btn("Delete", "delete-snapshot", v.id + "|" + s.name, "small danger", deleteDisabled)}` : "—"}</div>${s.children?.length ? '<small>Delete children first</small>' : ""}</td></tr>`;
+      return `<tr><td class="vm-name-cell"><strong>${esc(s.name)}</strong>${s.description ? `<small>${esc(s.description)}</small>` : ""}${s.current ? '<small>Current snapshot base</small>' : ""}${s.managed ? `<small>${s.consistency === "crash-consistent" ? "Live · crash-consistent" : "Offline"}</small>` : ""}${s.error ? `<small role="alert">${esc(s.error)}</small>` : ""}${!s.managed ? '<small>Created outside VM Manager; manage through the hypervisor.</small>' : ""}</td><td>${esc(s.parent || (s.managed ? "Base" : "—"))}</td><td>${s.created ? when(s.created) : "—"}</td><td>${s.disks ? esc(s.disks.map(d => d.device).join(", ")) : "—"}</td><td>${badge(s.status)}</td><td><div class="actions">${can() && s.managed ? `${btn(retry ? "Retry restore" : "Restore", "restore-snapshot", v.id + "|" + s.name, "small", restoreDisabled)}${btn("Delete", "delete-snapshot", v.id + "|" + s.name, "small danger", deleteDisabled)}` : "—"}</div>${s.children?.length ? '<small>Delete children first</small>' : ""}</td></tr>`;
     })) : empty("No snapshots yet", "Take a snapshot before making changes so you can return to this state."), actions)}
     <div class="hint">Restoring replaces current disk contents and configuration and leaves the VM stopped. On ZFS, explicitly delete newer snapshots first. Delete snapshots newest first to preserve the chain. Snapshots do not protect against storage failure; use backups for a separate recoverable copy.</div>`;
 }
@@ -886,12 +886,13 @@ const backupPlan = id => backupPlans().find(p => p.vm_id === id);
 const planSummary = p => !p ? "Not configured" : !p.enabled ? "Schedule disabled" : `${p.frequency === "weekly" ? ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][p.weekday] : "Daily"} at ${p.time} · ${p.timezone}`;
 function renderBackupPlan(v) {
   const p = backupPlan(v.id);
+  const mode = p?.mode || (p?.shutdown ? "shutdown" : "stopped");
   return panel("Backup settings", properties([
     ["Schedule", esc(planSummary(p))],
     ["Destination", p ? esc(backupBlockName(p.block_id)) : "Choose backup storage"],
     ["Next run", p?.next_run ? when(p.next_run) : "—"],
     ["Retention", p ? `Keep ${p.keep} scheduled backups; manual backups retained until deleted` : "—"],
-    ["Running VM", (p?.mode || (p?.shutdown ? "shutdown" : "stopped")) === "live" ? "Live backup" : p?.shutdown || p?.mode === "shutdown" ? "Gracefully shut down, back up, restart" : "Require stopped VM"],
+    ["Running VM", mode === "live" ? "Live backup" : mode === "shutdown" ? "Gracefully shut down, back up, restart" : "Require stopped VM"],
   ]), can() ? btn("Configure backups", "backup-settings", v.id) : "");
 }
 function backupTable(rows) {

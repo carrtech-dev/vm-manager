@@ -279,7 +279,8 @@ def test_settings_can_be_saved_during_long_export(api_environment, monkeypatch):
         job.result(timeout=2)
 
 
-def test_live_policy_uses_immutable_export_and_records_consistency(environment, monkeypatch):
+@pytest.mark.parametrize('legacy_shutdown', [False, True])
+def test_live_policy_uses_immutable_export_and_records_consistency(environment, monkeypatch, legacy_shutdown):
     store, manager, _ = environment
     manager.incus.vm = lambda _: {'status': 'Running'}
     bid = add(store)
@@ -292,7 +293,7 @@ def test_live_policy_uses_immutable_export_and_records_consistency(environment, 
         pytest.fail('Live capture must not request a shutdown or use mutable offline export')
     monkeypatch.setattr(manager, 'export_incus', fail)
     manager.power_action = fail
-    manager.create(bid, False, None, 'live')
+    manager.create(bid, legacy_shutdown, None, 'live')
     row = manager.record(bid)
     assert row['status'] == 'completed' and 'live crash-consistent' in row['message']
     manifest = manager.verify(backups.archive_dir(store, manager.data, row))
