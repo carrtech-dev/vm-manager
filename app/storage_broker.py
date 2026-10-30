@@ -169,6 +169,14 @@ def dispatch(request):
         live = request.get('live', False)
         if not isinstance(live, bool):
             raise HypervisorError('Invalid live backup policy')
+        if live:
+            # Existing blocks predate native QEMU writers. Enabling POSIX ACLs
+            # preserves their data/modes and permits temporary per-job access.
+            acltype = run('zfs', 'get', '-H', '-o', 'value', 'acltype', block['dataset'])
+            if acltype == 'off':
+                run('zfs', 'set', 'acltype=posixacl', block['dataset'])
+            elif acltype not in ('posix', 'posixacl'):
+                raise HypervisorError('Live libvirt backup requires POSIX ACL support on its backup block')
         return export(block['path'], backup_id, request.get('vm_name', ''), live=live)
     if operation == "create":
         with operation_lock:
