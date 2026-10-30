@@ -436,7 +436,7 @@ class Manager:
         return manifest
 
     def restore(self, backup_id, spec):
-        # Restore and deletion run on the same hypervisor executor. The
+        # Restore and deletion share the source VM queue key. The
         # catalog keeps the block referenced while restore reads its archive.
         with storage.lock:
             row = self.record(backup_id)

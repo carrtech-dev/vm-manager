@@ -1213,11 +1213,11 @@ def test_force_stop_bypasses_wait_and_cancels_earlier_power_requests(
     client, monkeypatch, provider, action
 ):
     import threading
-    from concurrent.futures import ThreadPoolExecutor
+    from app.task_queue import ResourceExecutor
     import app.main as main
 
-    normal = ThreadPoolExecutor(max_workers=1)
-    emergency = ThreadPoolExecutor(max_workers=1)
+    normal = ResourceExecutor(max_workers=1)
+    emergency = ResourceExecutor(max_workers=1)
     monkeypatch.setattr(main, "executor", normal)
     monkeypatch.setattr(main, "stop_executor", emergency)
     monkeypatch.setattr(main, "power_requests", main.PowerRequests())
@@ -1562,3 +1562,55 @@ def test_backup_cannot_queue_during_vm_deletion(client):
             main.queue_backups({'username': 'operator'}, [vm], 'block')
     finally:
         main.deleting_vms.discard(vm)
+
+
+def test_bulk_tasks_wait_behind_same_vm_backup_but_other_vm_can_run(client, monkeypatch):
+    import threading
+    import app.main as main
+    from app.task_queue import ResourceExecutor
+    normal = ResourceExecutor(max_workers=2)
+    monkeypatch.setattr(main, 'executor', normal)
+    ids = ['incus:busy-backup', 'incus:other-vm']
+    monkeypatch.setattr(main, 'inventory', lambda: {'vms': [{'id': vm} for vm in ids]})
+    monkeypatch.setattr(incus, 'vm', lambda _: {'status': 'Stopped'})
+    release, entered, other_ran = threading.Event(), threading.Event(), threading.Event()
+    calls = []
+    def backup():
+        entered.set()
+        assert release.wait(5)
+        calls.append('backup')
+    def operate(vm_id, *args):
+        calls.append(vm_id)
+        if vm_id == ids[1]:
+            other_ran.set()
+    monkeypatch.setattr(main, 'power_action', operate)
+    try:
+        main.task({'username': 'operator'}, 'backup.create', ids[0], backup)
+        assert entered.wait(2)
+        headers = login(client, 'operator')
+        response = client.post('/api/vms/bulk/action', headers=headers,
+                               json=dict(vm_ids=ids, action='shutdown', confirmed=True))
+        assert response.status_code == 200
+        assert other_ran.wait(2), 'Unrelated bulk task was blocked by backup'
+        with store.db() as db:
+            queued = db.execute('SELECT status FROM tasks WHERE id=?', (response.json()['tasks'][0]['task_id'],)).fetchone()
+        assert queued['status'] == 'queued'
+        assert calls == [ids[1]]
+        release.set()
+        normal.submit(lambda: None).result(timeout=3)
+        assert calls == [ids[1], 'backup', ids[0]]
+    finally:
+        release.set()
+        normal.shutdown()
+
+
+def test_vm_creation_and_backup_restore_reserve_correct_vm_keys(client, monkeypatch):
+    import app.main as main
+    submitted = []
+    monkeypatch.setattr(main.executor, 'submit', lambda fn, **options: submitted.append(options['resources']))
+    monkeypatch.setattr(main, 'get_iso', lambda _: None)
+    main.create_vm(main.VMCreate(name='new-vm', pool='pool', network='net'), {'username': 'operator'})
+    assert submitted[-1] == {'incus:new-vm'}
+    monkeypatch.setattr(main.backup_manager, 'record', lambda _: {'status': 'completed', 'vm_id': 'libvirt:source'})
+    main.restore_backup('backup', main.backups.Restore(name='restored'), {'username': 'operator'})
+    assert submitted[-1] == {'libvirt:source', 'libvirt:restored'}

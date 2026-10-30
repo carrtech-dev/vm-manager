@@ -3,6 +3,7 @@
 The storage broker derives export destinations from its root-owned registry and
 reads disk paths only from the hypervisor's existing inactive domain definition.
 """
+from contextlib import contextmanager, ExitStack
 import json
 import os
 from pathlib import Path
@@ -10,10 +11,43 @@ import pwd
 import shutil
 import sys
 import time
+import threading
 import uuid
 import xml.etree.ElementTree as ET
 
 from .hypervisor import HypervisorError, Libvirt, name, run
+
+
+# Broker threads may export multiple VMs to the same block. Keep parent traversal
+# permissions until the last user finishes, then restore the original ACL once.
+acl_lock = threading.Lock()
+acl_users = {}
+
+
+@contextmanager
+def qemu_directory(directory, permission):
+    with acl_lock:
+        if directory in acl_users:
+            acl_users[directory][0] += 1
+        else:
+            original = run('getfacl', '-p', str(directory))
+            try:
+                run('setfacl', '-m', 'u:libvirt-qemu:' + permission, str(directory))
+            except BaseException:
+                run('setfacl', '--restore=-', stdin=original + '\n')
+                raise
+            acl_users[directory] = [1, original]
+    try:
+        yield
+    finally:
+        with acl_lock:
+            entry = acl_users[directory]
+            entry[0] -= 1
+            if entry[0] == 0:
+                try:
+                    run('setfacl', '--restore=-', stdin=entry[1] + '\n')
+                finally:
+                    del acl_users[directory]
 
 
 def validate(root):
@@ -54,13 +88,13 @@ def live_export(domain, vm_name, root, target):
         ET.SubElement(node, 'target', file=str(target / filename))
         disks.append(dict(index=index, file=filename))
     # QEMU writes only to the chosen backup block. Grant traversal through its
-    # private parents for this job, restoring each original ACL afterward.
+    # private parents while jobs use them, restoring the original ACL afterward.
     directories = [target.parent.parent.parent, target.parent.parent, target.parent, target]
-    original_acls = [(directory, run('getfacl', '-p', str(directory))) for directory in directories]
+    permissions = ExitStack()
     connection, guest, started, paused = None, None, False, False
     try:
         for directory in directories:
-            run('setfacl', '-m', 'u:libvirt-qemu:' + ('rwx' if directory == target else '--x'), str(directory))
+            permissions.enter_context(qemu_directory(directory, 'rwx' if directory == target else '--x'))
         connection = libvirt.open('qemu:///system')
         guest = connection.lookupByName(vm_name)
         # Consume stale completion statistics before starting our own job.
@@ -96,10 +130,11 @@ def live_export(domain, vm_name, root, target):
             if started:
                 guest.abortJob()
         finally:
-            if connection:
-                connection.close()
-            for directory, acl in reversed(original_acls):
-                run('setfacl', '--restore=-', stdin=acl + '\n')
+            try:
+                if connection:
+                    connection.close()
+            finally:
+                permissions.close()
 
 
 def export(block_path, backup_id, vm_name, live=False):

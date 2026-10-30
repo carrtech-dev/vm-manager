@@ -314,3 +314,38 @@ def test_backup_plans_preserve_legacy_policy_and_accept_live(api_environment):
     assert backups.plans(store)[0]['mode'] == 'live'
     body['mode'] = 'invalid'
     assert client.put('/api/backups/plans', json=body, headers=headers).status_code == 422
+
+
+def test_concurrent_qemu_exports_keep_shared_parent_acl_until_last_job(monkeypatch, tmp_path):
+    from app import backup_libvirt
+    calls = []
+    def command(*args, **kwargs):
+        calls.append((args, kwargs))
+        return 'original ACL' if args[0] == 'getfacl' else ''
+    monkeypatch.setattr(backup_libvirt, 'run', command)
+    with backup_libvirt.qemu_directory(tmp_path, '--x'):
+        with backup_libvirt.qemu_directory(tmp_path, '--x'):
+            assert not any('--restore=-' in args for args, _ in calls)
+        assert not any('--restore=-' in args for args, _ in calls)
+    assert sum(args[0] == 'getfacl' for args, _ in calls) == 1
+    assert sum('--restore=-' in args for args, _ in calls) == 1
+    assert calls[-1][1]['stdin'] == 'original ACL\n'
+    assert not backup_libvirt.acl_users
+
+
+def test_qemu_acl_failure_unwinds_already_granted_parents(monkeypatch, tmp_path):
+    from app import backup_libvirt
+    from contextlib import ExitStack
+    calls = []
+    def command(*args, **kwargs):
+        calls.append(args)
+        if '-m' in args and args[-1] == str(tmp_path / 'child'):
+            raise OSError('cannot grant ACL')
+        return 'original'
+    monkeypatch.setattr(backup_libvirt, 'run', command)
+    with pytest.raises(OSError, match='cannot grant'):
+        with ExitStack() as permissions:
+            permissions.enter_context(backup_libvirt.qemu_directory(tmp_path, '--x'))
+            permissions.enter_context(backup_libvirt.qemu_directory(tmp_path / 'child', 'rwx'))
+    assert sum('--restore=-' in args for args in calls) == 2
+    assert not backup_libvirt.acl_users

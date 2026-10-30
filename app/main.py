@@ -17,7 +17,6 @@ import uuid
 from types import SimpleNamespace
 from websockets.asyncio.client import unix_connect
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -46,6 +45,7 @@ from . import storage
 from . import backups
 from .power import PowerInterrupted, PowerRequests
 from .protection import ProtectionPower
+from .task_queue import ResourceExecutor
 from .snapshots import Snapshots
 
 DATA = Path(os.environ.get("VM_MANAGER_DATA", "data")).resolve()
@@ -82,8 +82,8 @@ async def backup_lifespan(application):
 app = FastAPI(
     title="CarrTech VM Manager", docs_url=None, redoc_url=None, openapi_url=None, lifespan=backup_lifespan
 )
-executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hypervisor")
-stop_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="force-stop")
+executor = ResourceExecutor(max_workers=4, thread_name_prefix="hypervisor")
+stop_executor = ResourceExecutor(max_workers=4, thread_name_prefix="force-stop")
 power_requests = PowerRequests()
 DUMMY_PASSWORD_HASH = hash_password("dummy-password-for-timing-only")
 cache_lock = threading.Lock()
@@ -95,7 +95,7 @@ def invalidate():
     cache["at"] = 0
 
 
-def task(user, action, resource, fn, submit=None):
+def task(user, action, resource, fn, resources=None):
     task_id = uuid.uuid4().hex
     with store.db() as db:
         db.execute(
@@ -159,9 +159,12 @@ def task(user, action, resource, fn, submit=None):
                 user["username"], action, resource, status + ": " + message, db=db
             )
 
-    if submit is None:
-        submit = (stop_executor if action == "vm.stop" else executor).submit
-    submit(execute)
+    if resources is None:
+        if action == "vm.create":
+            resources = {"incus:" + resource}
+        elif action.startswith(("vm.", "backup.")):
+            resources = {resource}
+    (stop_executor if action == "vm.stop" else executor).submit(execute, resources=resources)
     return {"task_id": task_id}
 
 
@@ -705,15 +708,6 @@ class BulkVMAction(BaseModel):
     preserve_backups: list[str] = Field(default_factory=list, max_length=200)
 
 
-def run_bulk_tasks(functions):
-    # Occupy the normal queue until the entire batch finishes, so unrelated
-    # hardware, snapshot and backup tasks cannot race these VM operations.
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="vm-bulk") as pool:
-        futures = [pool.submit(fn) for fn in functions]
-        for future in futures:
-            future.result()
-
-
 @app.post("/api/vms/bulk/action")
 def bulk_vm_action(body: BulkVMAction, user=Depends(require("operate"))):
     if not body.confirmed:
@@ -726,15 +720,14 @@ def bulk_vm_action(body: BulkVMAction, user=Depends(require("operate"))):
     known = {v["id"] for v in inventory()["vms"]}
     if any(vm_id not in known for vm_id in vm_ids):
         raise HTTPException(404, "A selected VM no longer exists; refresh the VM list")
-    functions, results = [], []
+    results = []
     for vm_id in vm_ids:
         if body.action == "delete":
             fn = lambda vm_id=vm_id: remove_vm(vm_id, cleanup=True, preserve_backups=vm_id in body.preserve_backups, actor=user['username'])
         else:
             cancelled = power_requests.register(vm_id, body.action)
             fn = lambda vm_id=vm_id, cancelled=cancelled: power_action(vm_id, body.action, cancelled)
-        results.append(dict(vm_id=vm_id, **task(user, "vm." + body.action, vm_id, fn, submit=functions.append)))
-    (stop_executor if body.action == "stop" else executor).submit(run_bulk_tasks, functions)
+        results.append(dict(vm_id=vm_id, **task(user, "vm." + body.action, vm_id, fn)))
     return {"tasks": results}
 
 
@@ -2133,7 +2126,8 @@ def restore_backup(backup_id: str, body: backups.Restore, user=Depends(require('
             return backup_manager.restore(backup_id, body)
         except Exception as exc:
             raise HypervisorError(str(exc) + '. Inspect destination ' + body.name + ' for partial resources before retrying; source VM and backup are retained.') from exc
-    return task(user, 'backup.restore', row['vm_id'] + ' → ' + body.name, restore)
+    return task(user, 'backup.restore', row['vm_id'] + ' → ' + body.name, restore,
+                resources={row['vm_id'], row['vm_id'].split(':', 1)[0] + ':' + body.name})
 
 
 @app.delete('/api/backups/{backup_id}')

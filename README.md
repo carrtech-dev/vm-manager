@@ -138,8 +138,8 @@ then removes its resources and temporary operator. Existing VMs are retained.
 
 `scripts/bulk_check.py` is an opt-in check against the deployed service. Run as
 root with the release Python environment and `PYTHONPATH`. It creates disposable
-Incus/ZFS and libvirt/qcow2 VMs and backup storage, verifies simultaneous power
-operations and Force Stop cancellation, deletes snapshot chains and backups,
+Incus/ZFS and libvirt/qcow2 VMs and backup storage, verifies simultaneous bulk/individual power
+operations, same-VM hardware ordering and Force Stop cancellation, deletes snapshot chains and backups,
 restores a preserved backup after its source VM is gone, and removes its resources
 and temporary operator. `--browser-state <path>` allows a temporary browser check
 before deletion; protect and remove the generated authentication file.
@@ -317,8 +317,15 @@ supply VM/block/backup identifiers, never host file paths or commands.
 The scheduler checks every 15 seconds while the service is running. It persists
 next-run timestamps, runs once after missed downtime, and skips additional missed
 slots. Calendar schedules account for the configured timezone and daylight saving
-changes; a repeated clock hour does not run twice. One backup per VM can be active;
-hypervisor tasks are serialized. Retention removes only older successful
+changes; a repeated clock hour does not run twice. One backup per VM can be active.
+Up to four ordinary tasks run concurrently across different VMs, including backups,
+snapshots, hardware changes and individual or bulk power operations. Tasks affecting
+the same VM wait in submission order without occupying workers. A backup restore
+reserves both its source and destination VM so archive deletion and destination
+changes wait until it finishes. Shared host operations (network, storage and ISO
+deletion) wait for ordinary tasks and run exclusively. Force Stop uses a separate
+queue and can interrupt a VM even while all four ordinary workers are busy.
+Retention removes only older successful
 **scheduled** backups of that VM on the same destination, after a successful
 scheduled backup. Manual, failed and interrupted backups remain until deleted.
 Review failures in **Task history**; failure to queue an overlapping schedule is

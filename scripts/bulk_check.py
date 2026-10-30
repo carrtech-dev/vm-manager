@@ -107,6 +107,29 @@ def main():
             assert incus.vm(ids[0].split(':')[1])['status'].lower() == 'stopped'
             assert libvirt.cli('domstate', ids[1].split(':')[1]).strip() == 'shut off'
             print('Verified concurrent bulk ' + operation + ' and emergency stop cancellation', flush=True)
+        # Individual jobs share the same VM ordering as bulk jobs. An unrelated
+        # VM must remain operable while one guest waits for graceful shutdown.
+        task('POST', '/api/vms/' + ids[0] + '/action', dict(action='start'))
+        waiting = request('POST', '/api/vms/' + ids[0] + '/action', dict(action='shutdown'))
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            rows = {t['id']: t for t in request('GET', '/api/tasks')}
+            if rows[waiting['task_id']]['status'] == 'running':
+                break
+            time.sleep(.1)
+        else:
+            raise AssertionError('Individual shutdown did not start')
+        hardware = request('PUT', '/api/vms/' + ids[0], dict(cpu=2, memory_gib=1))
+        task('POST', '/api/vms/' + ids[1] + '/action', dict(action='start'))
+        rows = {t['id']: t for t in request('GET', '/api/tasks')}
+        assert rows[waiting['task_id']]['status'] == 'running', rows[waiting['task_id']]
+        assert rows[hardware['task_id']]['status'] == 'queued', rows[hardware['task_id']]
+        task('POST', '/api/vms/' + ids[0] + '/action', dict(action='stop', confirm_name=ids[0].split(':')[1]))
+        wait([waiting], 'interrupted')
+        wait([hardware])
+        assert incus.vm(ids[0].split(':')[1])['config']['limits.cpu'] == '2'
+        task('POST', '/api/vms/' + ids[1] + '/action', dict(action='stop', confirm_name=ids[1].split(':')[1]))
+        print('Verified individual cross-VM concurrency and same-VM hardware queue with Force Stop bypass', flush=True)
         for vm in ids:
             for snapshot in ('first', 'second'):
                 task('POST', '/api/vms/' + vm + '/snapshots', dict(name=snapshot, mode='stopped'))
