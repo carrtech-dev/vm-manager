@@ -422,7 +422,11 @@ guest telemetry. **Check mount** tests current access. Incomplete setup retains
 its attachment ID and configuration for **Retry setup**. **Detach** requires a
 running guest, disables its generated service and retains remote files. Open S3
 files, queued/failed uploads or an inaccessible upload-status service prevent
-detachment; restore the connection/service, close files, wait and retry. Normal
+detachment; restore the connection/service, close files, wait and retry.
+An unsuccessful S3 setup with an empty local cache can be detached even when its
+initial connection/read is blocked; the failed service is stopped before cleanup.
+Any cache containing files is retained until pending uploads can be verified.
+Normal
 unmount refuses busy SMB mounts. Detach all external storage before deleting a VM.
 A VM restored/cloned from its system disk can retain these automatic mounts and
 credentials; review them before booting it alongside the original VM.

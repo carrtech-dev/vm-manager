@@ -84,10 +84,22 @@ def execute(body):
             raise RuntimeError('Mount configuration is missing; inspect the guest before detaching')
         if config_path.exists():
             config = json.loads(config_path.read_text())
-            if busy(target):
-                raise RuntimeError('Files are open on this mount. Close files before detaching.')
-            if config['source']['kind'] == 's3':
-                pending(config)
+            cache_files = any(p.is_file() for p in (directory / 'cache').rglob('*'))
+            failed_empty_s3 = (config['source']['kind'] == 's3' and
+                              body.get('status') in ('incomplete', 'unavailable') and not cache_files)
+            if failed_empty_s3:
+                # An unreachable bucket can leave our readiness read blocked
+                # in FUSE. With a full VFS cache and no cache files, there are
+                # no dirty writes to lose. Stop that failed mount to release
+                # blocked readers; never apply this to a cache containing data.
+                command('systemctl', 'stop', unit, timeout=330)
+                if any(p.is_file() for p in (directory / 'cache').rglob('*')):
+                    raise RuntimeError('S3 cache files appeared during detach. Configuration and cache retained; restore the service and verify uploads before retrying.')
+            else:
+                if busy(target):
+                    raise RuntimeError('Files are open on this mount. Close files before detaching.')
+                if config['source']['kind'] == 's3':
+                    pending(config)
             if os.path.ismount(target):
                 command('umount', str(target), timeout=60)
             command('systemctl', 'stop', unit)

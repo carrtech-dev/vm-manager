@@ -224,6 +224,43 @@ def test_failed_s3_setup_with_no_mount_or_cache_can_be_detached(tmp_path, monkey
         guest_storage.pending(config)
 
 
+def test_failed_empty_s3_detach_releases_blocked_read_without_losing_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(guest_storage, 'ROOT', tmp_path)
+    mount_id = 'a' * 32
+    directory = tmp_path / mount_id
+    directory.mkdir()
+    (directory / 'mount.json').write_text(json.dumps(dict(source=dict(kind='s3'))))
+    mounted, calls = [True], []
+    monkeypatch.setattr(guest_storage.os.path, 'ismount', lambda _: mounted[0])
+    def command(*args, **kwargs):
+        calls.append(args)
+        if args[:2] == ('systemctl', 'stop'):
+            mounted[0] = False
+    monkeypatch.setattr(guest_storage, 'command', command)
+    def busy(_): raise AssertionError('Must stop the failed empty FUSE mount before checking blocked readers')
+    monkeypatch.setattr(guest_storage, 'busy', busy)
+    assert guest_storage.execute(dict(operation='detach', id=mount_id, path='/mnt/cloud', status='incomplete')).startswith('Detached')
+    assert calls[0][:2] == ('systemctl', 'stop')
+    assert not directory.exists()
+
+
+def test_s3_cache_appearing_during_failed_detach_is_retained(tmp_path, monkeypatch):
+    monkeypatch.setattr(guest_storage, 'ROOT', tmp_path)
+    mount_id = 'a' * 32
+    directory = tmp_path / mount_id
+    directory.mkdir()
+    (directory / 'mount.json').write_text(json.dumps(dict(source=dict(kind='s3'))))
+    def command(*args, **kwargs):
+        if args[:2] == ('systemctl', 'stop'):
+            (directory / 'cache').mkdir()
+            (directory / 'cache' / 'unsent').write_bytes(b'keep this data')
+    monkeypatch.setattr(guest_storage, 'command', command)
+    with pytest.raises(RuntimeError, match='cache files appeared'):
+        guest_storage.execute(dict(operation='detach', id=mount_id, path='/mnt/cloud', status='incomplete'))
+    assert (directory / 'cache' / 'unsent').read_bytes() == b'keep this data'
+    assert (directory / 'mount.json').exists()
+
+
 def test_broker_rejects_malformed_external_request_without_echoing_secret(registry):
     from app.storage_broker import dispatch
     with pytest.raises(ValueError):
