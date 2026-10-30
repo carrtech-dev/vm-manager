@@ -1,4 +1,4 @@
-"""Persistent backup plans and offline, independently restorable VM archives."""
+"""Persistent backup plans and independently restorable VM archives."""
 
 import hashlib
 import gzip
@@ -23,8 +23,10 @@ import yaml
 from pydantic import BaseModel, Field, field_validator
 
 from . import storage
-from .hypervisor import HypervisorError, name, run
+from .hypervisor import HypervisorError, HypervisorNotFound, name, run
 from .power import PowerInterrupted
+from .protection import ProtectionPower
+from .snapshots import NO_EXPIRY, Snapshots
 
 
 class Plan(BaseModel):
@@ -36,6 +38,7 @@ class Plan(BaseModel):
     weekday: int = Field(default=6, ge=0, le=6)
     keep: int = Field(default=7, ge=1, le=365)
     shutdown: bool = False
+    mode: Literal["live", "shutdown", "stopped"] | None = None
 
     @field_validator("timezone")
     @classmethod
@@ -51,6 +54,7 @@ class BackupRequest(BaseModel):
     vm_ids: list[str] = Field(min_length=1, max_length=200)
     block_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     shutdown: bool = False
+    mode: Literal["live", "shutdown", "stopped"] | None = None
 
 
 class PlanRequest(Plan):
@@ -199,6 +203,7 @@ class Manager:
         self.incus, self.libvirt = incus, libvirt
         self.power_requests, self.power_action = power_requests, power_action
         self.lock = threading.RLock()
+        self.power = ProtectionPower(incus, libvirt, power_requests, power_action)
 
     def record(self, backup_id):
         with self.store.db() as db:
@@ -220,64 +225,52 @@ class Manager:
     def cli(*args):
         return run('incus', '--force-local', '--quiet', '--project', 'default', *args, timeout=86400)
 
-    def create(self, backup_id, shutdown, cancelled):
+    def create(self, backup_id, shutdown, cancelled, mode=None):
         row = self.record(backup_id)
         vm_id = row['vm_id']
         provider, vm_name = vm_id.split(':', 1)
-        driver = self.incus if provider == 'incus' else self.libvirt
-        restart, complete, error = False, False, None
+        # Legacy schedules retain their existing stopped/shutdown policy.
+        mode = 'shutdown' if shutdown else mode or 'stopped'
+        self.power.power_action = self.power_action
+        self.power.status = self.status
         self.update(backup_id, 'running')
+        complete, size = False, 0
         try:
-            # Catalog references prevent storage deletion for the full job.
-            # Hold the storage lock only while resolving the mounted directory,
-            # keeping settings and other queue requests responsive during I/O.
             with storage.lock:
                 path = archive_dir(self.store, self.data, row, create=True)
-            status = self.status(provider, vm_name)
-            if status not in ('stopped', 'shut off'):
-                if status != 'running' or not shutdown:
-                    raise HypervisorError('VM must be stopped, or enable graceful shutdown and restart for backups')
-                restart = True
-                self.power_action(vm_id, 'shutdown', cancelled)
-            self.power_requests.check(cancelled)
-            manifest = {'version': 1, 'provider': provider, 'vm_id': vm_id, 'created': row['created']}
-            if provider == 'incus':
-                self.export_incus(vm_name, path, manifest)
-            else:
-                manifest['libvirt'] = storage.broker('libvirt_export', block_id=row['block_id'], backup_id=backup_id, vm_name=vm_name)
-            if self.status(provider, vm_name) not in ('stopped', 'shut off'):
-                raise HypervisorError('VM power changed during backup; archive cannot be trusted')
-            self.power_requests.check(cancelled)
-            manifest['files'] = {str(p.relative_to(path)): {'size': p.stat().st_size, 'sha256': digest(p)}
-                                 for p in path.rglob('*') if p.is_file()}
-            (path / 'manifest.json').write_text(json.dumps(manifest, indent=2))
-            # Flush data before making a restore point visible.
-            for file in path.rglob('*'):
-                if file.is_file():
-                    file.chmod(0o600)
-                    with file.open('rb') as stream:
-                        os.fsync(stream.fileno())
-            size = sum(f['size'] for f in manifest['files'].values())
-            self.update(backup_id, 'completed', 'Verified SHA-256; full offline backup', size)
-            complete = True
+            with self.power.operation(vm_id, mode, cancelled) as live:
+                manifest = {'version': 1, 'provider': provider, 'vm_id': vm_id,
+                            'created': row['created'], 'mode': mode,
+                            'consistency': 'crash-consistent' if live else 'offline'}
+                if provider == 'incus':
+                    if live:
+                        self.export_incus_live(vm_name, path, manifest, cancelled)
+                    else:
+                        self.export_incus(vm_name, path, manifest)
+                else:
+                    manifest['libvirt'] = storage.broker('libvirt_export', block_id=row['block_id'],
+                        backup_id=backup_id, vm_name=vm_name, live=live)
+                if self.status(provider, vm_name) not in (('running',) if live else ('stopped', 'shut off')):
+                    raise HypervisorError('VM power changed during backup; archive cannot be trusted')
+                self.power_requests.check(cancelled)
+                manifest['files'] = {str(p.relative_to(path)): {'size': p.stat().st_size, 'sha256': digest(p)}
+                                     for p in path.rglob('*') if p.is_file() and p.name != 'capture.json'}
+                (path / 'manifest.json').write_text(json.dumps(manifest, indent=2))
+                for file in path.rglob('*'):
+                    if file.is_file():
+                        file.chmod(0o600)
+                        with file.open('rb') as stream:
+                            os.fsync(stream.fileno())
+                size = sum(f['size'] for f in manifest['files'].values())
+                message = 'Verified SHA-256; ' + ('live crash-consistent backup' if live else 'full offline backup')
+                self.update(backup_id, 'completed', message, size)
+                complete = True
         except Exception as exc:
-            error = exc
-            self.update(backup_id, 'interrupted' if isinstance(exc, PowerInterrupted) else 'failed', str(exc))
-        finally:
-            if restart:
-                try:
-                    # Restart the same hardware; pending edits remain pending.
-                    # An emergency Force stop cancels this automatic restart.
-                    with self.power_requests.transition(vm_id, cancelled):
-                        if self.status(provider, vm_name) in ('stopped', 'shut off'):
-                            driver.action(vm_name, 'start')
-                except Exception as exc:
-                    if complete:
-                        self.update(backup_id, 'completed', 'Backup complete; automatic restart failed: ' + str(exc), size)
-                    if not isinstance(error, PowerInterrupted):
-                        error = exc if isinstance(exc, PowerInterrupted) else HypervisorError((str(error) + '; ' if error else '') + 'Automatic restart failed: ' + str(exc))
-        if error:
-            raise error
+            if complete:
+                self.update(backup_id, 'completed', 'Backup complete; automatic restart failed: ' + str(exc), size)
+            else:
+                self.update(backup_id, 'interrupted' if isinstance(exc, PowerInterrupted) else 'failed', str(exc))
+            raise
         return 'Backup completed: ' + backup_id
 
     def export_root(self, vm_name, target):
@@ -307,7 +300,7 @@ class Manager:
                 timer.cancel()
                 process.stdout.close()
 
-    def export_incus(self, vm_name, path, manifest):
+    def inspect_incus(self, vm_name):
         vm = self.incus.vm(vm_name)
         if vm.get('ephemeral') or vm.get('stateful'):
             raise HypervisorError('Ephemeral or stateful VMs require manual backup')
@@ -328,16 +321,85 @@ class Manager:
             if volume.get('content_type') == 'iso':
                 media.append(key)
                 continue
-            if len(volume.get('used_by', [])) > 1:
+            own = '/1.0/instances/' + vm_name
+            if any(ref != own and not ref.startswith(own + '/snapshots/') for ref in volume.get('used_by', [])):
                 raise HypervisorError('Shared volumes require manual backup: ' + key)
             filename = 'volume-' + str(len(volumes)) + '.tar.gz'
             volumes.append(dict(device=key, pool=pool, source=source, file=filename))
+        return vm, volumes, media
+
+    def export_incus(self, vm_name, path, manifest):
+        vm, volumes, media = self.inspect_incus(vm_name)
         # Portable exports include root disk/firmware. Snapshots and ISO media
         # are excluded; each attached writable volume is exported separately.
         self.export_root(vm_name, path / 'instance.tar.gz')
         for volume in volumes:
             self.cli('storage', 'volume', 'export', volume['pool'], volume['source'], str(path / volume['file']), '--volume-only', '--compression=gzip')
         manifest.update(config=vm, volumes=volumes, media=media)
+
+    def export_incus_live(self, vm_name, path, manifest, cancelled):
+        vm, volumes, media = self.inspect_incus(vm_name)
+        Snapshots(self.store, self.incus, self.libvirt).plan('incus', vm_name)
+        suffix = path.name
+        temporary = 'vmm-backup-' + suffix
+        instance_url = '/1.0/instances/' + vm_name
+        snapshot_url = instance_url + '/snapshots/' + temporary
+        devices = vm.get('expanded_devices', vm.get('devices', {}))
+        root = {key: device for key, device in devices.items()
+                if device.get('type') == 'disk' and device.get('path') == '/'}
+        if len(root) != 1:
+            raise HypervisorError('The VM must have one managed root disk')
+        # Deduplicate volumes attached through multiple device names.
+        copies = {}
+        for volume in volumes:
+            key = (volume['pool'], volume['source'])
+            copies.setdefault(key, temporary + '-' + str(len(copies)))
+        volume_urls = [f'/1.0/storage-pools/{pool}/volumes/custom/{source}/snapshots/{temporary}'
+                       for pool, source in copies]
+        copy_urls = [f'/1.0/storage-pools/{pool}/volumes/custom/{copy}' for (pool, _), copy in copies.items()]
+        clone_url = '/1.0/instances/' + temporary
+        cleanup = [clone_url, *copy_urls, *volume_urls, snapshot_url]
+        # Persist cleanup references before side effects, including service loss.
+        recovery = path / 'capture.json'
+        recovery.write_text(json.dumps({'source': vm_name, 'resources': cleanup}, indent=2))
+        with recovery.open('rb') as stream:
+            os.fsync(stream.fileno())
+        try:
+            with self.power.pause_incus(vm_name, cancelled):
+                self.incus.request('POST', instance_url + '/snapshots',
+                                   {'name': temporary, 'stateful': False, 'expires_at': NO_EXPIRY})
+                for pool, source in copies:
+                    self.incus.request('POST', f'/1.0/storage-pools/{pool}/volumes/custom/{source}/snapshots',
+                                       {'name': temporary, 'expires_at': NO_EXPIRY})
+            self.power_requests.check(cancelled)
+            # Export immutable copies while the original VM continues running.
+            overrides = {key: {'type': 'none'} for key in devices if key not in root}
+            self.incus.request('POST', '/1.0/instances', {
+                'name': temporary, 'type': 'virtual-machine', 'profiles': [],
+                'config': {'boot.autostart': 'false'}, 'devices': overrides | root,
+                'source': {'type': 'copy', 'source': vm_name + '/' + temporary}})
+            self.export_root(temporary, path / 'instance.tar.gz')
+            for (pool, source), copy in copies.items():
+                self.power_requests.check(cancelled)
+                self.cli('storage', 'volume', 'copy', pool + '/' + source + '/' + temporary, pool + '/' + copy)
+            for volume in volumes:
+                self.power_requests.check(cancelled)
+                copy = copies[(volume['pool'], volume['source'])]
+                self.cli('storage', 'volume', 'export', volume['pool'], copy,
+                         str(path / volume['file']), '--volume-only', '--compression=gzip')
+            manifest.update(config=vm, volumes=volumes, media=media)
+        finally:
+            errors = []
+            for resource in cleanup:
+                try:
+                    self.incus.request('DELETE', resource)
+                except HypervisorNotFound:
+                    pass
+                except Exception as exc:
+                    errors.append(resource + ': ' + str(exc))
+            if errors:
+                raise HypervisorError('Temporary backup cleanup failed; inspect capture.json: ' + '; '.join(errors))
+            recovery.unlink()
 
     def delete(self, backup_id):
         with self.lock, storage.lock:

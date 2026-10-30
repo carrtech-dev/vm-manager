@@ -20,6 +20,7 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote, urlparse, urlsplit
 
 import psutil
@@ -44,6 +45,7 @@ from . import organization
 from . import storage
 from . import backups
 from .power import PowerInterrupted, PowerRequests
+from .protection import ProtectionPower
 from .snapshots import Snapshots
 
 DATA = Path(os.environ.get("VM_MANAGER_DATA", "data")).resolve()
@@ -717,6 +719,7 @@ class Confirm(BaseModel):
 class SnapshotCreate(BaseModel):
     name: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,62}$")
     description: str = Field(default="", max_length=1000)
+    mode: Literal["live", "shutdown", "stopped"] = "live"
 
 
 @app.get("/api/vms/{vm_id}/snapshots")
@@ -728,11 +731,13 @@ def list_snapshots(vm_id: str, user=Depends(require())):
 @app.post("/api/vms/{vm_id}/snapshots")
 def create_snapshot(vm_id: str, body: SnapshotCreate, user=Depends(require("operate"))):
     provider, vm_name = vm_ref(vm_id)
+    cancelled = power_requests.register(vm_id, 'snapshot')
 
     def create():
         if pending_hardware(vm_id):
             raise HypervisorError("Apply or discard pending hardware changes before taking a snapshot.")
-        return snapshots.create(provider, vm_name, vm_id, body.name, body.description)
+        with protection_power.operation(vm_id, body.mode, cancelled) as live:
+            return snapshots.create(provider, vm_name, vm_id, body.name, body.description, live, cancelled)
 
     return task(user, "vm.snapshot.create", vm_id, create)
 
@@ -1965,6 +1970,8 @@ async def console(ws: WebSocket, vm_id: str):
             await release_console_group(key, group)
 
 
+protection_power = ProtectionPower(incus, libvirt, power_requests, power_action)
+snapshots.power = protection_power
 backup_manager = backups.Manager(store, DATA, incus, libvirt, power_requests, power_action)
 
 
@@ -1983,7 +1990,7 @@ def list_backups(user=Depends(require())):
     return {'backups': backups.catalog(store), 'plans': backups.plans(store)}
 
 
-def queue_backups(user, vm_ids, block_id, shutdown=False, trigger='manual', keep=None):
+def queue_backups(user, vm_ids, block_id, shutdown=False, trigger='manual', keep=None, mode=None):
     with backup_manager.lock:
         now = time.time()
         rows = [(uuid.uuid4().hex, vm_id) for vm_id in sorted(set(vm_ids))]
@@ -2002,7 +2009,7 @@ def queue_backups(user, vm_ids, block_id, shutdown=False, trigger='manual', keep
                 except HypervisorError as exc:
                     backup_manager.update(backup_id, 'failed', str(exc))
                     raise
-                message = backup_manager.create(backup_id, shutdown, cancelled)
+                message = backup_manager.create(backup_id, shutdown, cancelled, mode)
                 if trigger == 'scheduled' and keep is not None:
                     backup_manager.retain(vm_id, block_id, keep)
                 return message
@@ -2018,7 +2025,7 @@ def create_backups(body: backups.BackupRequest, user=Depends(require('operate'))
     check_backup_vms(body.vm_ids)
     with storage.lock:
         backups.destination(store, DATA, body.block_id)
-    return queue_backups(user, body.vm_ids, body.block_id, body.shutdown)
+    return queue_backups(user, body.vm_ids, body.block_id, body.shutdown, mode=body.mode)
 
 
 @app.put('/api/backups/plans')
@@ -2077,7 +2084,7 @@ def backup_tick(now=None):
             with store.db() as db:
                 db.execute('UPDATE backup_plans SET next_run=? WHERE vm_id=?', (backups.next_run(plan, now), entry['vm_id']))
             try:
-                queued = queue_backups({'username': 'scheduler'}, [entry['vm_id']], plan.block_id, plan.shutdown, 'scheduled', plan.keep)
+                queued = queue_backups({'username': 'scheduler'}, [entry['vm_id']], plan.block_id, plan.shutdown, 'scheduled', plan.keep, plan.mode)
                 with store.db() as db:
                     db.execute('UPDATE backup_plans SET last_task=? WHERE vm_id=?', (queued['tasks'][0]['task_id'], entry['vm_id']))
             except Exception as exc:

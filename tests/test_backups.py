@@ -277,3 +277,37 @@ def test_settings_can_be_saved_during_long_export(api_environment, monkeypatch):
         finally:
             release.set()
         job.result(timeout=2)
+
+
+def test_live_policy_uses_immutable_export_and_records_consistency(environment, monkeypatch):
+    store, manager, _ = environment
+    manager.incus.vm = lambda _: {'status': 'Running'}
+    bid = add(store)
+    def live_export(vm, path, manifest, cancelled):
+        assert manager.status('incus', vm) == 'running'
+        (path / 'instance.tar.gz').write_bytes(b'point in time root')
+        (path / 'volume-0.tar.gz').write_bytes(b'point in time data')
+    monkeypatch.setattr(manager, 'export_incus_live', live_export)
+    def fail(*args):
+        pytest.fail('Live capture must not request a shutdown or use mutable offline export')
+    monkeypatch.setattr(manager, 'export_incus', fail)
+    manager.power_action = fail
+    manager.create(bid, False, None, 'live')
+    row = manager.record(bid)
+    assert row['status'] == 'completed' and 'live crash-consistent' in row['message']
+    manifest = manager.verify(backups.archive_dir(store, manager.data, row))
+    assert manifest['consistency'] == 'crash-consistent'
+    assert manifest['mode'] == 'live' and len(manifest['files']) == 2
+
+
+def test_backup_plans_preserve_legacy_policy_and_accept_live(api_environment):
+    client, store, manager = api_environment
+    headers = auth(client, 'operator')
+    body = {'vm_ids': ['incus:demo'], 'block_id': BLOCK, 'enabled': True}
+    assert client.put('/api/backups/plans', json=body, headers=headers).status_code == 200
+    assert backups.plans(store)[0]['mode'] is None
+    body['mode'] = 'live'
+    assert client.put('/api/backups/plans', json=body, headers=headers).status_code == 200
+    assert backups.plans(store)[0]['mode'] == 'live'
+    body['mode'] = 'invalid'
+    assert client.put('/api/backups/plans', json=body, headers=headers).status_code == 422

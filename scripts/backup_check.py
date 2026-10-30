@@ -55,8 +55,8 @@ def main():
     def task(method, path, body, expected='completed'):
         return wait(request(method, path, body)['task_id'], expected)
 
-    def backup(vm_id):
-        response = request('POST', '/api/backups', dict(vm_ids=[vm_id], block_id=block['id']))
+    def backup(vm_id, mode='stopped'):
+        response = request('POST', '/api/backups', dict(vm_ids=[vm_id], block_id=block['id'], mode=mode))
         own_ids.append(response['tasks'][0]['backup_id'])
         wait(response['tasks'][0]['task_id'])
         return next(b for b in request('GET', '/api/backups')['backups'] if b['id'] == own_ids[-1])
@@ -88,7 +88,10 @@ def main():
                 stream.seek(4 * 1024**2)
                 stream.write(marker)
                 os.fsync(stream.fileno())
-        point = backup('incus:' + source)
+        task('POST', '/api/vms/incus:' + source + '/action', dict(action='start'))
+        point = backup('incus:' + source, mode='live')
+        assert incus.vm(source)['status'].lower() == 'running'
+        task('POST', '/api/vms/incus:' + source + '/action', dict(action='stop', confirm_name=source))
         task('POST', '/api/backups/' + point['id'] + '/restore', dict(name=restored, pool=pool))
         vm = incus.vm(restored)
         assert vm['status'].lower() == 'stopped'
@@ -130,7 +133,10 @@ def main():
         run('qemu-io', '-f', 'qcow2', '-c', 'write -P 0x6b 2097152 4096', str(disk))
         xml = f'''<domain type="kvm"><name>{lv_source}</name><memory unit="MiB">256</memory><vcpu>1</vcpu><os><type arch="x86_64">hvm</type></os><devices><disk type="file" device="disk"><driver name="qemu" type="qcow2"/><source file="{disk}"/><target dev="vda" bus="virtio"/></disk><interface type="network"><source network="default"/><model type="virtio"/></interface></devices></domain>'''
         domain.define(ET.fromstring(xml))
-        point = backup('libvirt:' + lv_source)
+        domain.action(lv_source, 'start')
+        point = backup('libvirt:' + lv_source, mode='live')
+        assert domain.cli('domstate', lv_source).strip() == 'running'
+        domain.action(lv_source, 'stop')
         task('POST', '/api/backups/' + point['id'] + '/restore', dict(name=lv_restored))
         root = domain.xml(lv_restored)
         new_disk = Path(root.find('./devices/disk/source').get('file'))
@@ -143,7 +149,9 @@ def main():
         print('PASS: libvirt flattened backing-chain disk restore, new UUID/MAC and stopped VM.', flush=True)
 
         # Exercise the actual service scheduler, not a test-process scheduler.
-        request('PUT', '/api/backups/plans', dict(vm_ids=['incus:' + source, 'libvirt:' + lv_source], block_id=block['id'], enabled=True, keep=1, timezone='UTC'))
+        task('POST', '/api/vms/incus:' + source + '/action', dict(action='start'))
+        domain.action(lv_source, 'start')
+        request('PUT', '/api/backups/plans', dict(vm_ids=['incus:' + source, 'libvirt:' + lv_source], block_id=block['id'], enabled=True, keep=1, timezone='UTC', mode='live'))
         for iteration in range(2):
             with db:
                 db.execute('UPDATE backup_plans SET next_run=0 WHERE vm_id IN (?,?)', ('incus:' + source, 'libvirt:' + lv_source))
@@ -160,6 +168,10 @@ def main():
         points = [b for b in request('GET', '/api/backups')['backups'] if b['vm_id'] in ('incus:' + source, 'libvirt:' + lv_source)]
         assert len([b for b in points if b['trigger'] == 'scheduled']) == 2, points
         assert len([b for b in points if b['trigger'] == 'manual']) == 2, points
+        assert incus.vm(source)['status'].lower() == 'running'
+        assert domain.cli('domstate', lv_source).strip() == 'running'
+        task('POST', '/api/vms/incus:' + source + '/action', dict(action='stop', confirm_name=source))
+        domain.action(lv_source, 'stop')
         row = task('DELETE', '/api/storage/blocks/' + block['id'], dict(confirm_name=block['name']), 'failed')
         assert 'backup' in row['message'], row
         print('PASS: bulk VM plans, real scheduled execution for both providers, retention keeps latest scheduled + manual backups, storage deletion guard.', flush=True)
@@ -189,9 +201,13 @@ def main():
                         task('DELETE', '/api/backups/' + point['id'], dict(confirm_name=point['vm_id'].split(':')[1]))
             for vm_name in (source, restored, prefix + '-bad'):
                 if any(v['name'] == vm_name for v in incus.vms()):
+                    if incus.vm(vm_name)['status'].lower() != 'stopped':
+                        incus.action(vm_name, 'stop')
                     task('DELETE', '/api/vms/incus:' + vm_name, dict(confirm_name=vm_name))
             for vm_name in (lv_source, lv_restored):
                 if vm_name in domain.cli('list', '--all', '--name').splitlines():
+                    if domain.cli('domstate', vm_name).strip() != 'shut off':
+                        domain.action(vm_name, 'stop')
                     if vm_name == lv_restored:
                         path = Path(domain.xml(vm_name).find('./devices/disk/source').get('file')).parent
                         if path.parent == Path('/var/lib/vm-manager/disks') and path.name.startswith('restore-'):

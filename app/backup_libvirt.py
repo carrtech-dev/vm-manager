@@ -1,4 +1,4 @@
-"""Offline libvirt disk export and restore. Privilege is used only for export.
+"""Libvirt offline export, native live backup and restore.
 
 The storage broker derives export destinations from its root-owned registry and
 reads disk paths only from the hypervisor's existing inactive domain definition.
@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import pwd
 import shutil
+import sys
+import time
 import uuid
 import xml.etree.ElementTree as ET
 
@@ -32,11 +34,91 @@ def validate(root):
             raise HypervisorError('Only private raw/qcow2 file disks support automatic libvirt backup')
 
 
-def export(block_path, backup_id, vm_name):
+def live_export(domain, vm_name, root, target):
+    # The distribution's binding matches the host libvirt ABI; keep it out of
+    # the portable macOS development environment and PyPI lock file.
+    sys.path.append('/usr/lib/python3/dist-packages')
+    import libvirt
+
+    xml = ET.Element('domainbackup', mode='push')
+    disks_xml = ET.SubElement(xml, 'disks')
+    disks = []
+    for index, disk in enumerate(root.findall('./devices/disk')):
+        device = disk.find('target').get('dev')
+        if disk.get('device') == 'cdrom' or disk.find('readonly') is not None:
+            ET.SubElement(disks_xml, 'disk', name=device, backup='no')
+            continue
+        filename = f'disk-{index}.qcow2'
+        node = ET.SubElement(disks_xml, 'disk', name=device, backup='yes', type='file')
+        ET.SubElement(node, 'driver', type='qcow2')
+        ET.SubElement(node, 'target', file=str(target / filename))
+        disks.append(dict(index=index, file=filename))
+    # QEMU writes only to the chosen backup block. Grant traversal through its
+    # private parents for this job, restoring each original ACL afterward.
+    directories = [target.parent.parent.parent, target.parent.parent, target.parent, target]
+    original_acls = [(directory, run('getfacl', '-p', str(directory))) for directory in directories]
+    connection, guest, started, paused = None, None, False, False
+    try:
+        for directory in directories:
+            run('setfacl', '-m', 'u:libvirt-qemu:' + ('rwx' if directory == target else '--x'), str(directory))
+        connection = libvirt.open('qemu:///system')
+        guest = connection.lookupByName(vm_name)
+        # Consume stale completion statistics before starting our own job.
+        guest.jobStats(libvirt.VIR_DOMAIN_JOB_STATS_COMPLETED)
+        nvram = root.find('./os/nvram')
+        try:
+            if nvram is not None:
+                if not nvram.text or not Path(nvram.text).is_file():
+                    raise HypervisorError('Unsupported or missing NVRAM file')
+                guest.suspend()
+                paused = True
+                shutil.copyfile(nvram.text, target / 'nvram.fd')
+            guest.backupBegin(ET.tostring(xml, encoding='unicode'), None, 0)
+            started = True
+        finally:
+            if paused and guest.isActive() and guest.state()[0] == libvirt.VIR_DOMAIN_PAUSED:
+                guest.resume()
+        deadline = time.monotonic() + 86400
+        while True:
+            stats = guest.jobStats(0)
+            if stats.get('type', 0) == libvirt.VIR_DOMAIN_JOB_NONE:
+                result = guest.jobStats(libvirt.VIR_DOMAIN_JOB_STATS_COMPLETED)
+                if result.get('type') != libvirt.VIR_DOMAIN_JOB_COMPLETED:
+                    raise HypervisorError('Native live backup did not complete successfully: ' + str(result))
+                started = False
+                break
+            if time.monotonic() >= deadline:
+                raise HypervisorError('Native live backup timed out')
+            time.sleep(.2)
+        return disks
+    finally:
+        try:
+            if started:
+                guest.abortJob()
+        finally:
+            if connection:
+                connection.close()
+            for directory, acl in reversed(original_acls):
+                run('setfacl', '--restore=-', stdin=acl + '\n')
+
+
+def export(block_path, backup_id, vm_name, live=False):
     domain = Libvirt()
-    domain.stopped(name(vm_name))
+    name(vm_name)
+    if not live:
+        domain.stopped(vm_name)
     root = domain.xml(vm_name)
     validate(root)
+    if live:
+        active = ET.fromstring(domain.cli('dumpxml', vm_name))
+        if ET.tostring(active.find('devices')) != ET.tostring(root.find('devices')):
+            # Runtime XML normally adds aliases/addresses; compare only disk
+            # sources and targets to catch external uncommitted disk changes.
+            def layout(xml):
+                return [(d.find('target').get('dev'), d.find('source').get('file') if d.find('source') is not None else None)
+                        for d in xml.findall('./devices/disk')]
+            if layout(active) != layout(root):
+                raise HypervisorError('Active and configured disks differ; shut down and restart before backup')
     base = Path(block_path) / 'vm-backups' / backup_id
     if base.resolve() != base.absolute() or not base.is_dir():
         raise HypervisorError('Invalid backup directory')
@@ -45,10 +127,12 @@ def export(block_path, backup_id, vm_name):
     account = pwd.getpwnam('vm-manager')
     os.chown(target, account.pw_uid, account.pw_gid)
     try:
-        disks = []
+        disks = live_export(domain, vm_name, root, target) if live else []
         for index, disk in enumerate(root.findall('./devices/disk')):
             if disk.get('device') == 'cdrom':
                 continue
+            if live and disk.find('readonly') is None:
+                continue  # Writable disks were copied by the native backup job.
             filename = f'disk-{index}.qcow2'
             source = Path(disk.find('source').get('file'))
             if not source.is_file():
@@ -58,12 +142,13 @@ def export(block_path, backup_id, vm_name):
                 str(source), str(target / filename), timeout=86400)
             disks.append(dict(index=index, file=filename))
         nvram = root.find('./os/nvram')
-        if nvram is not None:
+        if nvram is not None and not live:
             if not nvram.text or not Path(nvram.text).is_file():
                 raise HypervisorError('Unsupported or missing NVRAM file')
             shutil.copyfile(nvram.text, target / 'nvram.fd')
         (target / 'domain.xml').write_text(ET.tostring(root, encoding='unicode'))
-        domain.stopped(vm_name)
+        if not live:
+            domain.stopped(vm_name)
         return dict(disks=disks, nvram=nvram is not None)
     finally:
         for file in target.iterdir():

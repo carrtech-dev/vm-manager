@@ -55,10 +55,14 @@ Projects are inventory groups within VM Manager, independent of Incus projects a
 
 ## VM snapshots
 
-Open a VM's **Snapshots** tab, shut it down, then select **Take snapshot**. Give
-the snapshot a unique name and an optional description. Snapshots capture the VM
+Open a VM's **Snapshots** tab and select **Take snapshot**. Give the snapshot a
+unique name and an optional description. Choose **Live**, **Gracefully shut down,
+capture, then restart**, or **Require the VM to be stopped**. Live is the default
+for new snapshot requests. A VM that is already stopped stays stopped. Snapshots capture the VM
 configuration and all supported writable disks, including attached Incus custom
-data volumes. Runtime memory is excluded. Apply or discard pending hardware
+data volumes. Incus snapshots exclude runtime memory; libvirt live internal
+snapshots also capture memory because the hypervisor requires it. Restores always
+leave the VM stopped and discard runtime memory. Apply or discard pending hardware
 changes first. Administrators and operators can create, restore and delete
 snapshots; viewers can inspect the history. Every operation is backed up at the
 configuration level and recorded in the task log and audit trail.
@@ -82,8 +86,17 @@ name and removes that restore point while retaining current VM contents. Delete
 child snapshots first, newest first. Delete managed snapshots before deleting a
 VM so that separately snapshotted data volumes are cleaned up together.
 
-Snapshot operations require a stopped VM to keep its disks consistent. A failed
-or interrupted operation retains its manifest and appears as incomplete. Delete
+Live snapshots are **crash-consistent**, not application-quiesced. Incus briefly
+pauses the VM while capturing its root and custom data volumes, then resumes it
+even if capture fails. Libvirt uses native internal disk-and-memory snapshots,
+which can pause the VM while saving memory. Applications may need crash recovery
+after disk restoration; unsaved data in guest memory is not part of an Incus disk
+snapshot. Choose shutdown and restart when a clean guest shutdown is required.
+Shutdown waits up to 60 seconds and never forces power off. Only VMs that were
+running are restarted, after success or failure; pending hardware remains saved.
+Force stop cancels automatic restart/resume. Restore and delete still require a
+stopped VM. A failed or interrupted operation retains its manifest and appears as
+incomplete. Delete
 an incomplete creation, retry an incomplete deletion, or retry the same restore
 after fixing the reported problem. A partial restore blocks VM Start and hardware
 changes until the restore succeeds. The manifest survives service restarts and
@@ -231,17 +244,30 @@ backup catalog live in SQLite; archive files live on the selected backup block.
 Full backups always require an explicit backup block and never fall back to the
 system disk if it is missing, unmounted or full.
 
-Backups are offline. By default the VM must already be stopped. The optional
-**Gracefully shut down and restart** setting allows downtime for the entire
-backup. Shutdown has the existing 60-second timeout and never forces power off.
+Immediate backups and schedules offer the same three capture modes as snapshots.
+New dialogs default to **Live**; existing schedules retain their stopped/shutdown
+policy until edited. **Live** captures a crash-consistent point in time while the
+VM continues running during export. Guest memory is excluded and applications may
+need crash recovery after restore. **Gracefully shut down, capture, then restart**
+allows downtime for the entire backup. **Require the VM to be stopped** fails a
+running VM without changing its power state. Shutdown has the existing 60-second timeout and never forces power off.
 After success or export failure the manager attempts to start a VM it shut down;
 it leaves pending hardware edits unapplied. Force stop cancels that automatic
 restart and stays available during exports. Its configuration snapshot always
 uses local application storage so a slow/full backup block cannot delay it.
 If the service/host stops during backup, the task and restore point become
 interrupted on startup; partial files are retained for inspection/deletion and
-the VM may remain stopped. Inspect its task and power state before retrying.
+the VM may remain stopped or paused. Inspect its task and power state before
+retrying. For an interrupted Incus live backup, `capture.json` in that backup's
+archive directory lists temporary copies/snapshots for operator cleanup. They are
+retained for inspection after an unclean service exit; deleting archive files does
+not delete those hypervisor resources.
 
+Incus live backups briefly pause the VM to snapshot the root and all supported
+private data volumes, resume it, then export temporary stopped copies. Normal
+completion/failure cleans up those copies and snapshots. Snapshot-capable storage
+(ZFS, Btrfs, thin LVM or Ceph) is required for live Incus backup; use shutdown mode
+on other storage. Temporary copies consume source-pool space during export.
 Incus backups use portable instance exports plus separate exports for each
 attached private custom data volume. They include root/firmware and current VM
 configuration, excluding Incus snapshots and ISO installation media. Root exports
@@ -251,7 +277,11 @@ data disks, shared volumes, passthrough devices and ephemeral/stateful instances
 require manual backup and cause an explicit failure. Libvirt exports support
 private raw/qcow2 file disks, flattening backing chains into standalone qcow2
 files, plus domain XML and file-based NVRAM. TPM, passthrough, shared filesystems,
-block/network disks and encrypted guest state require manual backup. Disk reads
+block/network disks and encrypted guest state require manual backup. Live libvirt
+backups use the native point-in-time push backup API, verify successful job
+completion, and include every supported data disk. NVRAM is copied during a brief
+pause at capture. The broker grants QEMU access to the selected backup directory
+for the job and restores the original directory ACLs afterward. Disk reads
 for libvirt exports run through the existing privileged storage broker; clients
 supply VM/block/backup identifiers, never host file paths or commands.
 

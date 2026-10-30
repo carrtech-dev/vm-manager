@@ -76,7 +76,7 @@ def test_snapshot_tasks_are_audited_and_pending_hardware_blocks_restore(client, 
     vm_id = "incus:snapshot-api-check"
     path = "/api/vms/" + vm_id + "/snapshots"
     calls = []
-    monkeypatch.setattr(incus, "vm", lambda name: {"name": name})
+    monkeypatch.setattr(incus, "vm", lambda name: {"name": name, "status": "Stopped"})
     monkeypatch.setattr(main.snapshots, "create", lambda *args: calls.append(args) or "Created snapshot one")
 
     def wait(response):
@@ -92,7 +92,8 @@ def test_snapshot_tasks_are_audited_and_pending_hardware_blocks_restore(client, 
 
     row = wait(client.post(path, headers=headers, json={"name": "one", "description": "Before upgrade"}))
     assert row["status"] == "completed"
-    assert calls == [("incus", "snapshot-api-check", vm_id, "one", "Before upgrade")]
+    assert len(calls) == 1
+    assert calls[0][:6] == ("incus", "snapshot-api-check", vm_id, "one", "Before upgrade", False)
     with store.db() as db:
         assert db.execute("SELECT 1 FROM audit WHERE action='vm.snapshot.create' AND resource=?", (vm_id,)).fetchone()
     monkeypatch.setattr(main, "pending_hardware", lambda vm: [{"id": "pending"}])

@@ -166,7 +166,10 @@ def dispatch(request):
         _, block = find_block(block_id)
         if block['purpose'] != 'backup' or stats(block)['status'] != 'ready':
             raise HypervisorError('Backup storage is unavailable')
-        return export(block['path'], backup_id, request.get('vm_name', ''))
+        live = request.get('live', False)
+        if not isinstance(live, bool):
+            raise HypervisorError('Invalid live backup policy')
+        return export(block['path'], backup_id, request.get('vm_name', ''), live=live)
     if operation == "create":
         with operation_lock:
             return create(request.get("body"))

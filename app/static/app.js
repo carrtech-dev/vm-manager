@@ -500,15 +500,15 @@ function renderSnapshots(v, data) {
   const working = state.tasks.some(t => t.resource === v.id && ["queued", "running"].includes(t.status));
   const incomplete = data.snapshots.some(s => s.managed && s.status !== "ready");
   const disabled = v.status !== "stopped" || !!v.pending?.length || working;
-  const actions = `${can() ? btn("Take snapshot", "create-snapshot", v.id, "primary", disabled || incomplete || !data.supported) : ""}${btn("Refresh", "refresh-snapshots", v.id)}`;
-  return `<div class="hint">Snapshots share unchanged disk blocks; subsequent snapshots store changes. Each snapshot records its parent. Shut down the VM before taking, restoring or deleting snapshots. Snapshots include configuration and writable disks, and remain on the same storage as the VM.</div>
+  const actions = `${can() ? btn("Take snapshot", "create-snapshot", v.id, "primary", (!!v.pending?.length || working || !["running", "stopped"].includes(v.status)) || incomplete || !data.supported) : ""}${btn("Refresh", "refresh-snapshots", v.id)}`;
+  return `<div class="hint">Snapshots share unchanged disk blocks; subsequent snapshots store changes. Each snapshot records its parent. Take snapshots live, or choose graceful shutdown and restart. Live capture may briefly pause the VM. Restore and delete require a stopped VM. Snapshots include configuration and writable disks, and remain on the same storage as the VM.</div>
     ${!data.supported ? `<div class="error-banner">${esc(data.reason)}</div>` : ""}
     ${v.pending?.length ? '<div class="pending-banner">Apply or discard pending hardware changes before taking or restoring a snapshot.</div>' : ""}
     ${panel("Snapshot history", data.snapshots.length ? table(["Snapshot", "Parent", "Created", "Disks", "Status", "Actions"], data.snapshots.map(s => {
       const retry = s.status === "incomplete" && s.operation === "restore";
       const restoreDisabled = disabled || !data.supported || !(s.status === "ready" || retry);
       const deleteDisabled = v.status !== "stopped" || working || !!s.children?.length || retry;
-      return `<tr><td class="vm-name-cell"><strong>${esc(s.name)}</strong>${s.description ? `<small>${esc(s.description)}</small>` : ""}${s.current ? '<small>Current snapshot base</small>' : ""}${s.error ? `<small role="alert">${esc(s.error)}</small>` : ""}${!s.managed ? '<small>Created outside VM Manager; manage through the hypervisor.</small>' : ""}</td><td>${esc(s.parent || (s.managed ? "Base" : "—"))}</td><td>${s.created ? when(s.created) : "—"}</td><td>${s.disks ? esc(s.disks.map(d => d.device).join(", ")) : "—"}</td><td>${badge(s.status)}</td><td><div class="actions">${can() && s.managed ? `${btn(retry ? "Retry restore" : "Restore", "restore-snapshot", v.id + "|" + s.name, "small", restoreDisabled)}${btn("Delete", "delete-snapshot", v.id + "|" + s.name, "small danger", deleteDisabled)}` : "—"}</div>${s.children?.length ? '<small>Delete children first</small>' : ""}</td></tr>`;
+      return `<tr><td class="vm-name-cell"><strong>${esc(s.name)}</strong>${s.description ? `<small>${esc(s.description)}</small>` : ""}${s.current ? '<small>Current snapshot base</small>' : ""}<small>${s.consistency === "crash-consistent" ? "Live · crash-consistent" : "Offline"}</small>${s.error ? `<small role="alert">${esc(s.error)}</small>` : ""}${!s.managed ? '<small>Created outside VM Manager; manage through the hypervisor.</small>' : ""}</td><td>${esc(s.parent || (s.managed ? "Base" : "—"))}</td><td>${s.created ? when(s.created) : "—"}</td><td>${s.disks ? esc(s.disks.map(d => d.device).join(", ")) : "—"}</td><td>${badge(s.status)}</td><td><div class="actions">${can() && s.managed ? `${btn(retry ? "Retry restore" : "Restore", "restore-snapshot", v.id + "|" + s.name, "small", restoreDisabled)}${btn("Delete", "delete-snapshot", v.id + "|" + s.name, "small danger", deleteDisabled)}` : "—"}</div>${s.children?.length ? '<small>Delete children first</small>' : ""}</td></tr>`;
     })) : empty("No snapshots yet", "Take a snapshot before making changes so you can return to this state."), actions)}
     <div class="hint">Restoring replaces current disk contents and configuration and leaves the VM stopped. On ZFS, explicitly delete newer snapshots first. Delete snapshots newest first to preserve the chain. Snapshots do not protect against storage failure; use backups for a separate recoverable copy.</div>`;
 }
@@ -516,8 +516,10 @@ function createSnapshot(v) {
   modal("Take snapshot · " + v.name,
     field("Snapshot name", "name", "snap-" + new Date().toISOString().replace(/[-:]/g, "").slice(0, 15).replace("T", "-"), { hint: "1–63 letters, digits, underscores or hyphens; start with a letter." }) +
     textarea("Description (optional)", "description", "") +
-    '<div class="hint">Includes the VM configuration and all supported writable disks. The VM must be stopped. Unchanged blocks are shared with earlier snapshots.</div>',
-    f => queue(ref(v.id) + "/snapshots", "POST", { name: f.get("name"), description: f.get("description") }),
+    protectionMode("live") +
+    (v.provider === "libvirt" ? '<div class="hint">Live libvirt snapshots also save memory and may pause the VM while saving it. Restoring leaves the VM stopped.</div>' : "") +
+    '<div class="hint">Includes VM configuration and supported writable disks. Live capture is crash-consistent: unsaved application data may be absent. Shutdown and restart allows the guest to finish writes. A VM that is already stopped stays stopped.</div>',
+    f => queue(ref(v.id) + "/snapshots", "POST", { name: f.get("name"), description: f.get("description"), mode: f.get("mode") }),
     { submit: "Take snapshot" });
 }
 function renderVM() {
@@ -859,20 +861,20 @@ function renderBackupPlan(v) {
     ["Destination", p ? esc(backupBlockName(p.block_id)) : "Choose backup storage"],
     ["Next run", p?.next_run ? when(p.next_run) : "—"],
     ["Retention", p ? `Keep ${p.keep} scheduled backups; manual backups retained until deleted` : "—"],
-    ["Running VM", p?.shutdown ? "Gracefully shut down, back up, restart" : "Require stopped VM"],
+    ["Running VM", (p?.mode || (p?.shutdown ? "shutdown" : "stopped")) === "live" ? "Live backup" : p?.shutdown || p?.mode === "shutdown" ? "Gracefully shut down, back up, restart" : "Require stopped VM"],
   ]), can() ? btn("Configure backups", "backup-settings", v.id) : "");
 }
 function backupTable(rows) {
   return table(["Source VM", "Created", "Storage", "Status", "Size", "Actions"], rows.map(b => `<tr><td class="name">${esc(b.vm_id)}<small>${esc(b.trigger)} · ${esc(b.id.slice(0, 8))}</small></td><td>${when(b.created)}</td><td>${esc(backupBlockName(b.block_id))}</td><td>${badge(b.status)}${b.message ? `<small title="${esc(b.message)}">${esc(b.message)}</small>` : ""}</td><td>${size(b.size)}</td><td><div class="actions">${can() ? smallAction("Restore", "restore-backup", b.id, b.status !== "completed") + smallAction("Delete", "delete-backup", b.id, ["running", "queued"].includes(b.status)) : ""}</div></td></tr>`));
 }
 function renderVMBackups(v) {
-  return `<div class="hint">Full offline backups include the root disk, attached private data disks and VM configuration. ISO media, snapshots, shared storage and passthrough devices are excluded or require manual backup. Restores create a separate, stopped VM.</div>` +
+  return `<div class="hint">Full backups include the root disk, attached private data disks and VM configuration. ISO media, snapshots, shared storage and passthrough devices are excluded or require manual backup. Restores create a separate, stopped VM.</div>` +
     renderBackupPlan(v) + panel("Restore points", backupTable(backupRows().filter(b => b.vm_id === v.id)), can() ? btn("Back up now", "backup-now", v.id, "primary") : "");
 }
 function renderBackups() {
   const vms = state.inventory.vms.filter(matchesOrganization);
   return title("Backups", "Create restore points and manage each VM’s automatic backup schedule", can() ? btn("Back up selected", "backup-selected", "", "primary") + btn("Configure selected", "backup-settings-selected") : "") +
-    `<div class="hint">Backups use storage blocks with the backup purpose. Create one in Storage first. Backups require stopped VMs unless graceful shutdown and restart is enabled. Schedules run while this manager is available; after downtime, one missed run is queued. Times below use your browser timezone; schedules use their configured timezone.</div>` +
+    `<div class="hint">Backups use storage blocks with the backup purpose. Create one in Storage first. Choose live backup or graceful shutdown and restart. Existing schedules retain their saved capture mode. Schedules run while this manager is available; after downtime, one missed run is queued. Times below use your browser timezone; schedules use their configured timezone.</div>` +
     panel("Virtual machines & schedules", table([can() ? '<input type="checkbox" id="backup-select-all" aria-label="Select all visible VMs">' : "", "VM", "Schedule", "Destination", "Next run", "Last scheduled task", "Actions"], vms.map(v => {
       const p = backupPlan(v.id), last = state.tasks.find(t => t.id === p?.last_task);
       return `<tr><td>${can() ? `<input type="checkbox" class="backup-vm-select" value="${esc(v.id)}" aria-label="Select ${esc(v.name)}" ${selectedBackupVMs.has(v.id) ? "checked" : ""}>` : ""}</td><td><a class="name" href="#vm/${encodeURIComponent(v.id)}/backups">${esc(v.name)}</a><small>${esc(v.provider)} · ${esc(v.status)}</small></td><td>${esc(planSummary(p))}</td><td>${p ? esc(backupBlockName(p.block_id)) : "—"}</td><td>${p?.next_run ? when(p.next_run) : "—"}</td><td>${last ? badge(last.status) : p?.last_task ? smallAction("View task history", "tasks", "") : "—"}</td><td><div class="actions">${can() ? smallAction("Back up", "backup-now", v.id) + smallAction("Settings", "backup-settings", v.id) + (p ? smallAction("Remove settings", "remove-backup-settings", v.id) : "") : ""}</div></td></tr>`;
@@ -880,18 +882,21 @@ function renderBackups() {
     (backupPlans().some(p => !state.inventory.vms.some(v => v.id === p.vm_id)) ? panel("Unavailable VM schedules", table(["VM", "Schedule", "Actions"], backupPlans().filter(p => !state.inventory.vms.some(v => v.id === p.vm_id)).map(p => `<tr><td>${esc(p.vm_id)}</td><td>${esc(planSummary(p))}</td><td>${can() ? smallAction("Remove settings", "remove-backup-settings", p.vm_id) : ""}</td></tr>`))) : "") +
     panel("Restore points", backupTable(backupRows().filter(b => { const v = state.inventory.vms.find(v => v.id === b.vm_id); return v ? matchesOrganization(v) : state.project === "all" && state.tag === "all"; })));
 }
+function protectionMode(value) {
+  return select("Capture mode", "mode", [["live", "Live — keep the VM running"], ["shutdown", "Gracefully shut down, capture, then restart"], ["stopped", "Require the VM to be stopped"]], value);
+}
 function backupForm(vmIds, settings = false) {
   vmIds = [...new Set(vmIds)].filter(id => currentVM(id) && matchesOrganization(currentVM(id)));
   if (!vmIds.length) throw new Error("Select at least one VM");
   if (!backupDestinations().length) throw new Error("Create a backup storage block in Storage first");
   const p = vmIds.length === 1 ? backupPlan(vmIds[0]) : null;
-  const content = `<p>${esc(vmIds.map(id => currentVM(id).name).join(", "))}</p><div class="warning">A running VM can be shut down gracefully for the full duration of its backup, then restarted. A shutdown timeout fails the backup. Force stop cancels automatic restart. Pending hardware edits remain saved.</div>` +
+  const content = `<p>${esc(vmIds.map(id => currentVM(id).name).join(", "))}</p><div class="warning">Live backups capture a point in time while the VM keeps running; a brief pause may occur. They are crash-consistent and exclude memory, so unsaved application data may be absent. Choose shutdown and restart for a clean guest shutdown. Force stop cancels automatic restart. Already stopped VMs stay stopped; pending hardware edits remain saved.</div>` +
     select("Backup storage", "block_id", [...(p && !backupDestinations().some(b => b[0] === p.block_id) ? [[p.block_id, "Unavailable destination — select another block"]] : []), ...backupDestinations()], p?.block_id || state.inventory.storage_defaults?.backup || backupDestinations()[0][0]) +
-    check("Gracefully shut down and restart running VMs", "shutdown", p?.shutdown || false) +
+    protectionMode(p ? p.mode || (p.shutdown ? "shutdown" : "stopped") : "live") +
     (settings ? check("Enable automatic backups", "enabled", p?.enabled || false) +
       `<div class="form-grid">${select("Frequency", "frequency", [["daily", "Daily"], ["weekly", "Weekly"]], p?.frequency || "daily")}${field("Time", "time", p?.time || "02:00", {type: "time"})}${select("Day (weekly only)", "weekday", ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((d,i) => [String(i),d]), String(p?.weekday ?? 6))}${field("Timezone", "timezone", p?.timezone || "Europe/London", {hint: "IANA name, for example Europe/London or UTC"})}${field("Scheduled backups to keep", "keep", p?.keep || 7, {type: "number", min: 1, max: 365, hint: "Pruned after a successful scheduled backup, for this VM and destination. Manual backups are retained."})}</div>` : "");
   modal((settings ? "Backup settings" : "Back up now") + ` · ${vmIds.length} VM${vmIds.length === 1 ? "" : "s"}`, content, async f => {
-    const body = {vm_ids: vmIds, block_id: f.get("block_id"), shutdown: f.has("shutdown")};
+    const body = {vm_ids: vmIds, block_id: f.get("block_id"), mode: f.get("mode"), shutdown: f.get("mode") === "shutdown"};
     if (settings) {
       Object.assign(body, {enabled: f.has("enabled"), frequency: f.get("frequency"), time: f.get("time"), timezone: f.get("timezone"), weekday: +f.get("weekday"), keep: +f.get("keep")});
       await api("/backups/plans", "PUT", body);

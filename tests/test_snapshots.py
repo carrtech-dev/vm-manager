@@ -7,6 +7,8 @@ import pytest
 from app.hypervisor import HypervisorError, HypervisorNotFound
 from app.security import Store
 from app.snapshots import Snapshots
+from app.power import PowerRequests
+from app.protection import ProtectionPower
 
 
 class FakeIncus:
@@ -45,6 +47,9 @@ class FakeIncus:
         self.changes.append((method, path, data))
         if self.fail and self.fail(method, path):
             raise HypervisorError("Injected disk failure")
+        if path.endswith('/state'):
+            self.instance['status'] = 'Frozen' if data['action'] == 'freeze' else 'Running'
+            return
         if method == "POST":
             key = path + "/" + data["name"]
             self.snapshots[key] = {"name": data["name"], "created_at": f"2026-10-29T00:00:{len(self.snapshots):02d}Z"}
@@ -126,7 +131,7 @@ def test_unsupported_snapshot_fails_without_disk_mutations(engine, unsafe):
 
 
 def test_partial_create_survives_restart_and_can_be_deleted(engine):
-    engine.incus.fail = lambda method, path: method == "POST" and "/instances/" in path
+    engine.incus.fail = lambda method, path: method == "POST" and "/custom/" in path
     with pytest.raises(HypervisorError, match="creation is incomplete"):
         create(engine)
     assert len(engine.incus.snapshots) == 1
@@ -224,3 +229,29 @@ def test_libvirt_plan_rejects_unsupported_state_and_shared_disks(engine):
     engine.libvirt.xml_text = '<domain><os><nvram>/vars.fd</nvram></os><devices/></domain>'
     with pytest.raises(HypervisorError, match="NVRAM"):
         engine.plan("libvirt", "demo")
+
+
+@pytest.mark.parametrize('fail', [False, True])
+def test_live_capture_pauses_all_disks_and_resumes_even_after_failure(engine, fail):
+    engine.incus.instance['status'] = 'Running'
+    engine.power = ProtectionPower(engine.incus, None, PowerRequests(), None)
+    original = engine.incus.request
+    def request(method, path, data=None):
+        if method == 'POST':
+            assert engine.incus.instance['status'] == 'Frozen'
+            if fail and '/custom/' in path:
+                raise HypervisorError('Data disk failed')
+        return original(method, path, data)
+    engine.incus.request = request
+    if fail:
+        with pytest.raises(HypervisorError, match='Data disk failed'):
+            engine.create('incus', 'demo', 'incus:demo', 'live', '', live=True)
+        assert engine.row('incus:demo', 'live')['status'] == 'incomplete'
+    else:
+        engine.create('incus', 'demo', 'incus:demo', 'live', '', live=True)
+        data = engine.listing('incus', 'demo', 'incus:demo')['snapshots'][0]
+        assert data['consistency'] == 'crash-consistent' and not data['memory']
+        assert len(data['disks']) == 2
+    assert engine.incus.instance['status'] == 'Running'
+    actions = [c[2]['action'] for c in engine.incus.changes if c[1].endswith('/state')]
+    assert actions == ['freeze', 'unfreeze']

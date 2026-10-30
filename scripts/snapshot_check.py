@@ -144,11 +144,18 @@ def main():
         exercise(vm_id, write_zfs, verify_zfs,
                  lambda description: incus.update(vm_name, lambda vm: vm.update(description=description)),
                  lambda: incus.vm(vm_name)["description"], incremental_zfs)
-        # Reject capture while a disposable blank VM is at its boot menu.
+        # Capture while a disposable blank VM is at its boot menu. Disk markers
+        # survive live capture and restore; require-stopped remains available.
         task("POST", "/api/vms/" + vm_id + "/action", dict(action="start"))
-        row = task("POST", "/api/vms/" + vm_id + "/snapshots", dict(name="running"), "failed")
-        assert "Shut down" in row["message"], row
+        task("POST", "/api/vms/" + vm_id + "/snapshots", dict(name="running", mode="live"))
+        assert incus.vm(vm_name)['status'].lower() == 'running'
+        row = task("POST", "/api/vms/" + vm_id + "/snapshots", dict(name="blocked", mode="stopped"), "failed")
+        assert "must be stopped" in row["message"], row
         task("POST", "/api/vms/" + vm_id + "/action", dict(action="stop", confirm_name=vm_name))
+        write_zfs(0x44)
+        task("POST", "/api/vms/" + vm_id + "/snapshots/running/restore", dict(confirm_name=vm_name))
+        verify_zfs(0x11)
+        task("DELETE", "/api/vms/" + vm_id + "/snapshots/running", dict(confirm_name="running"))
         task("DELETE", "/api/vms/" + vm_id, dict(confirm_name=vm_name))
 
         vm_name = prefix + "-libvirt"
@@ -191,6 +198,15 @@ def main():
 
         exercise(vm_id, write_qcow, verify_qcow, configure_qcow,
                  lambda: libvirt.xml(vm_name).findtext("description"), incremental_qcow)
+        task('POST', '/api/vms/' + vm_id + '/action', dict(action='start'))
+        task('POST', '/api/vms/' + vm_id + '/snapshots', dict(name='running', mode='live'))
+        assert libvirt.cli('domstate', vm_name).strip() == 'running'
+        task('POST', '/api/vms/' + vm_id + '/action', dict(action='stop', confirm_name=vm_name))
+        write_qcow(0x44)
+        task('POST', '/api/vms/' + vm_id + '/snapshots/running/restore', dict(confirm_name=vm_name))
+        assert libvirt.cli('domstate', vm_name).strip() == 'shut off'
+        verify_qcow(0x11)
+        task('DELETE', '/api/vms/' + vm_id + '/snapshots/running', dict(confirm_name='running'))
         # Server-side role checks apply equally to existing VM snapshots.
         with db:
             db.execute("UPDATE users SET role='viewer' WHERE id=?", (user_id,))
@@ -211,6 +227,8 @@ def main():
                             incus.action(vm_name, "stop")
                         incus.delete(vm_name)
                 elif vm_name in libvirt.cli("list", "--all", "--name").splitlines():
+                    if libvirt.cli('domstate', vm_name).strip() != 'shut off':
+                        libvirt.action(vm_name, 'stop')
                     libvirt.cli("undefine", vm_name, "--snapshots-metadata")
             except Exception as exc:
                 print("Cleanup needs inspection for " + vm_id + ": " + str(exc), flush=True)

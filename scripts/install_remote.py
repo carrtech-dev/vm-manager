@@ -23,6 +23,11 @@ base.mkdir(parents=True, exist_ok=True)
 release.mkdir(parents=True, exist_ok=True)
 if not shutil.which("incus") or not shutil.which("virsh"):
     raise SystemExit("Incus and libvirt must already be installed")
+if not shutil.which('setfacl') or subprocess.run(
+    ['python3', '-c', 'import libvirt'], capture_output=True
+).returncode:
+    subprocess.run(['apt-get', 'install', '-y', '--no-install-recommends',
+                    'acl', 'python3-libvirt'], check=True)
 if (
     not Path("/usr/share/spice-html5/main.js").exists()
     or not Path("/usr/lib/python3.13/venv").exists()

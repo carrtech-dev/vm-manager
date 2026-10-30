@@ -1,4 +1,4 @@
-"""Coordinated, offline copy-on-write snapshots with durable recovery manifests.
+"""Coordinated copy-on-write snapshots with durable recovery manifests.
 
 The hypervisor owns disk blocks; SQLite owns grouping, lineage and operation state.
 Incus instance snapshots alone do not include attached custom volumes.
@@ -8,6 +8,7 @@ import json
 import time
 import uuid
 import xml.etree.ElementTree as ET
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -18,8 +19,9 @@ NO_EXPIRY = "0001-01-01T00:00:00Z"
 
 
 class Snapshots:
-    def __init__(self, store, incus, libvirt):
+    def __init__(self, store, incus, libvirt, power=None):
         self.store, self.incus, self.libvirt = store, incus, libvirt
+        self.power = power
 
     def rows(self, vm_id):
         with self.store.db() as db:
@@ -150,6 +152,8 @@ class Snapshots:
                 "current": bool(head and head["name"] == r["name"]),
                 "children": [s["name"] for s in rows if s["parent"] == r["name"]],
                 "disks": manifest["disks"],
+                "consistency": manifest.get("consistency", "offline"),
+                "memory": manifest.get("memory", False),
             })
         for snapshot in native:
             if not any(r["name"] == snapshot for r in rows):
@@ -162,15 +166,18 @@ class Snapshots:
             db.execute("UPDATE vm_snapshots SET status=?,operation=?,error=? WHERE vm_id=? AND name=?",
                        (status, operation, error, vm_id, snapshot))
 
-    def create(self, provider, vm_name, vm_id, snapshot, description):
+    def create(self, provider, vm_name, vm_id, snapshot, description, live=False, cancelled=None):
         name(snapshot)
-        self.stopped(provider, vm_name)
+        if not live:
+            self.stopped(provider, vm_name)
         rows = self.rows(vm_id)
         if any(r["status"] != "ready" for r in rows):
             raise HypervisorError("Resolve incomplete snapshots before creating another snapshot.")
         if snapshot in self.native(provider, vm_name) or any(r["name"] == snapshot for r in rows):
             raise HypervisorError("A snapshot with this name already exists.")
         manifest = self.plan(provider, vm_name)
+        manifest.update(consistency="crash-consistent" if live else "offline",
+                        memory=live and provider == "libvirt")
         manifest["volume_snapshot"] = "vmm-" + uuid.uuid4().hex
         with self.store.db() as db:
             head = db.execute("SELECT name FROM snapshot_heads WHERE vm_id=?", (vm_id,)).fetchone()
@@ -179,20 +186,26 @@ class Snapshots:
                         "creating", "create", json.dumps(manifest), ""))
         try:
             if provider == "incus":
-                for volume in manifest["volumes"]:
-                    self.incus.request("POST", volume["url"] + "/snapshots", {
-                        "name": manifest["volume_snapshot"], "expires_at": NO_EXPIRY})
-                self.incus.request("POST", "/1.0/instances/" + quote(vm_name) + "/snapshots", {
-                    "name": snapshot, "stateful": False, "expires_at": NO_EXPIRY})
+                with self.power.pause_incus(vm_name, cancelled) if live else nullcontext():
+                    self.incus.request("POST", "/1.0/instances/" + quote(vm_name) + "/snapshots", {
+                        "name": snapshot, "stateful": False, "expires_at": NO_EXPIRY})
+                    for volume in manifest["volumes"]:
+                        self.incus.request("POST", volume["url"] + "/snapshots", {
+                            "name": manifest["volume_snapshot"], "expires_at": NO_EXPIRY})
             else:
                 root = ET.Element("domainsnapshot")
                 ET.SubElement(root, "name").text = snapshot
                 ET.SubElement(root, "description").text = description
-                ET.SubElement(root, "memory", snapshot="no")
+                # Native live internal snapshots require memory as well as disks.
+                ET.SubElement(root, "memory", snapshot="internal" if live else "no")
                 disks = ET.SubElement(root, "disks")
                 for disk in manifest["disks"]:
                     ET.SubElement(disks, "disk", name=disk["device"], snapshot="internal")
                 self.libvirt.cli("snapshot-create", vm_name, "/dev/stdin", stdin=ET.tostring(root, encoding="unicode"))
+            if live:
+                self.power.requests.check(cancelled)
+                if self.power.status(provider, vm_name) != "running":
+                    raise HypervisorError("VM power changed during live snapshot")
             self.finish(vm_id, snapshot, "create")
         except Exception as exc:
             self.set_state(vm_id, snapshot, "incomplete", "create", str(exc))
@@ -257,7 +270,13 @@ class Snapshots:
                 # retain the instance description. Restore our saved value too.
                 self.incus.update(vm_name, lambda vm: vm.update(description=manifest.get("description", "")))
             else:
-                self.libvirt.cli("snapshot-revert", vm_name, snapshot)
+                if manifest.get("memory"):
+                    # Revert without letting guest code run, then discard runtime
+                    # state. All restores keep the existing stopped-VM contract.
+                    self.libvirt.cli("snapshot-revert", vm_name, snapshot, "--paused")
+                    self.libvirt.action(vm_name, "stop")
+                else:
+                    self.libvirt.cli("snapshot-revert", vm_name, snapshot)
             self.finish(vm_id, snapshot, "restore")
         except Exception as exc:
             self.set_state(vm_id, snapshot, "incomplete", "restore", str(exc))
