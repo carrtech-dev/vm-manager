@@ -488,8 +488,12 @@ QEMU guest agent prepared separately. See the
 
 VM Manager installs `cifs-utils` for SMB or `rclone`/`fuse3` for S3 when necessary,
 using apt or dnf. Those guests need access to their package repositories, or the
-packages must already be installed (some distributions require an additional
-repository for rclone). Connection credentials travel over the guest agent's
+packages must already be installed. On Rocky Linux and AlmaLinux 8 or later,
+missing rclone installs enable EPEL and use PowerTools (8) or CRB (9+) for that
+package transaction. Other distributions may need rclone's repository prepared
+manually. Package installation failures identify the required packages so they
+can be installed before retrying the existing attachment.
+Connection credentials travel over the guest agent's
 stdin, and are installed beneath `/etc/vm-manager/mounts/<generated-id>` with
 root-only permissions. Each source mounts directly inside the guest; credentials
 must therefore be trusted to the guest's administrators. Root disk backups also
@@ -504,7 +508,11 @@ to the source credentials' remote permissions; use separate restricted sources
 when VMs need different permissions.
 
 S3 mounts use rclone with a persistent local read/write cache and background
-uploads. The 5 GiB cache target is an eviction setting, not a hard quota; open or
+uploads. Existing buckets use object-scoped credentials without bucket creation
+checks. Cloudflare R2 uploads skip rclone's unsupported version-specific HEAD
+request after upload; PUT checksum validation remains enabled, and backup
+transfers still verify content by downloading it before publishing a manifest.
+The 5 GiB cache target is an eviction setting, not a hard quota; open or
 pending files can exceed it and need sufficient guest disk space. A local save
 can finish before its upload completes. S3 does not provide SMB's coordinated
 shared-file editing semantics; avoid multiple writers to the same object and

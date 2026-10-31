@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .hypervisor import HypervisorError, Incus, name
+from .guest_storage import rclone_config
 
 REGISTRY = Path('/var/lib/vm-manager-storage/external.json')
 CONFIG = Path('/var/lib/vm-manager-storage/external-config')
@@ -188,7 +189,7 @@ def config(source):
         text = 'username=' + source['username'] + '\npassword=' + source['password'] + '\ndomain=' + source['domain'] + '\n'
     else:
         path = directory / 'rclone.conf'
-        text = '[remote]\ntype = s3\nprovider = Other\naccess_key_id = ' + source['access_key'] + '\nsecret_access_key = ' + source['secret_key'] + '\nendpoint = ' + source['endpoint'] + '\nregion = ' + source['region'] + '\nforce_path_style = true\n'
+        text = rclone_config(source)
     temporary = directory / ('.config-' + uuid.uuid4().hex)
     with open(temporary, 'x', opener=lambda p, f: os.open(p, f, 0o600)) as stream:
         stream.write(text)
