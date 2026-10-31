@@ -22,6 +22,19 @@ Change the password through **Account** after signing in; the initial credential
 2. Upload an operating-system `.iso` in **ISO library**. Existing Incus ISO volumes are also discovered. Files are validated as ISO9660/UDF, hashed with SHA-256, and stored persistently. Maximum size is 32 GiB, subject to available host space.
 3. Select **Create VM** and complete **General**, **Hardware**, and **Network & media**. Use **Next**, **Back**, or the step list to navigate; your entries are retained. Review the configuration in **Create**, then select **Create VM** to create the stopped VM.
 4. Start the VM and open **Console** to install the operating system. Incus uses the host's SPICE console; libvirt uses its local VNC display.
+
+To paste from your computer, focus the destination field or terminal in the VM,
+choose **Paste text** in the console toolbar, and paste into the text box (or use
+**Read local clipboard** where the browser permits it). Choose the VM's English
+US/UK keyboard layout with Caps Lock off, then **Send text**. Cmd+V, Ctrl+V and
+Ctrl+Shift+V while the display is focused also open the paste dialog. This types
+up to 4,096 characters through SPICE/VNC without a guest agent, including during
+OS installation. Unsupported characters are rejected before any text is sent.
+Line breaks require confirmation because they send Enter and may run commands;
+no extra Enter is added. **Stop sending** interrupts a transfer; review any
+partially typed text in the VM before retrying. Reconnection stops the transfer
+and never automatically replays it. Clipboard text stays in the browser and the
+console channel; it is not stored in task history.
 5. Eject its ISO through **Hardware**. For a running VM this is saved as a pending change; use **Restart** in VM Manager to apply it and boot from disk.
 6. CPU, memory, disks, network adapters, CD-ROMs, Secure Boot and autostart can be changed through the VM workspace. While running, hardware changes are saved persistently and shown as **Current → After restart** in the Hardware tab. Use **Restart** in VM Manager to shut down gracefully, apply the pending changes and start again, or shut down and use **Start**. Rebooting only inside the guest does not apply these pending changes. Stopped VMs apply edits immediately. Pending changes can be discarded before application. A failed change leaves the VM stopped with remaining changes retained; inspect the task log before retrying. Disk expansion does not expand the guest filesystem; complete that inside the guest.
 

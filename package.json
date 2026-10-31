@@ -4,7 +4,7 @@
   "type": "module",
   "version": "1.0.0",
   "scripts": {
-    "check": "node --check app/static/app.js && node --check app/static/core.js && node --check app/static/console.js && node --check app/static/task-detail.js",
+    "check": "node --check app/static/app.js && node --check app/static/core.js && node --check app/static/console.js && node --check app/static/console-paste.js && node --check app/static/task-detail.js",
     "test": "node --test tests/test_*.mjs"
   },
   "dependencies": {

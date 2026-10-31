@@ -18,9 +18,25 @@
       ><span id="console-status">Connecting…</span
       ><button id="reconnect">Reconnect</button
       ><button id="send-keys">Ctrl + Alt + Del</button
+      ><button id="paste-open">Paste text</button
       ><button id="fullscreen">Full screen</button>
     </header>
-    <main id="console-screen"><div id="spice-screen"></div></main>
+    <main id="console-screen">
+      <div id="spice-screen"></div>
+      <dialog id="paste-dialog" aria-labelledby="paste-title" aria-describedby="paste-help">
+        <h2 id="paste-title">Paste text into VM</h2>
+        <p id="paste-help">Focus the field or terminal in the VM first. Paste here, review the text, then send it as keystrokes. No guest agent is needed.</p>
+        <button type="button" id="paste-read">Read local clipboard</button>
+        <label for="paste-text">Text to send (up to 4,096 characters)</label>
+        <textarea id="paste-text" rows="8" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+        <label for="paste-layout">Guest keyboard layout</label>
+        <select id="paste-layout"><option value="us">English (US)</option><option value="uk">English (UK)</option></select>
+        <p>Match the VM's keyboard layout and turn Caps Lock off. Supports English text and punctuation. Tabs send Tab; line breaks send Enter.</p>
+        <label id="paste-lines" hidden><input type="checkbox" id="paste-confirm" /> I understand that line breaks may run commands.</label>
+        <p id="paste-status" role="status" aria-live="polite"></p>
+        <div class="paste-actions"><button type="button" id="paste-close">Close</button><button type="button" id="paste-send">Send text</button></div>
+      </dialog>
+    </main>
     <div id="toasts" role="status" aria-live="polite"></div>
     <div id="spice-message" hidden></div>
     <div id="spice-debug" hidden></div>

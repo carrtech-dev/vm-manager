@@ -6,6 +6,9 @@
     13px Inter,
     system-ui,
     sans-serif;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 .console-toolbar {
   display: flex;
@@ -14,6 +17,7 @@
   padding: 12px 18px;
   border-bottom: 1px solid #2a3344;
   background: #131b28;
+  flex-wrap: wrap;
 }
 .console-toolbar strong {
   margin-right: 12px;
@@ -22,7 +26,9 @@
   flex: 1;
   color: #9caac0;
 }
-.console-toolbar button {
+.console-toolbar button,
+#paste-dialog button,
+#paste-dialog select {
   cursor: pointer;
   padding: 7px 12px;
   border: 1px solid #344155;
@@ -31,12 +37,43 @@
   background: #1c2839;
 }
 #console-screen {
-  height: calc(100vh - 61px);
+  flex: 1;
+  min-height: 0;
   overflow: auto;
   display: flex;
   align-items: flex-start;
   justify-content: center;
 }
+
+#paste-dialog {
+  box-sizing: border-box;
+  width: min(600px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  padding: 22px;
+  border: 1px solid #344155;
+  border-radius: 8px;
+  color: #dce4ee;
+  background: #131b28;
+}
+#paste-dialog::backdrop { background: #0009; }
+#paste-dialog h2 { margin-top: 0; }
+#paste-dialog p { line-height: 1.5; }
+#paste-dialog label:not([hidden]) { display: block; margin: 12px 0 6px; }
+#paste-text {
+  box-sizing: border-box;
+  width: 100%;
+  resize: vertical;
+  padding: 10px;
+  border: 1px solid #344155;
+  border-radius: 5px;
+  color: #dce4ee;
+  background: #0b1019;
+  font: 13px ui-monospace, monospace;
+}
+#paste-status { min-height: 20px; }
+.paste-actions { display: flex; justify-content: flex-end; gap: 10px; }
+#paste-dialog #paste-send { background: #9a3412; }
+#paste-dialog button:disabled { opacity: .5; cursor: wait; }
 #spice-screen {
   position: relative;
   margin: auto;

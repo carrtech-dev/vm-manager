@@ -1,16 +1,22 @@
 import RFB from "/static/vendor/novnc/core/rfb.js";
 import { copyValue, bindCopyButtons } from "./core.js";
+import { bindConsolePaste } from "./console-paste.js";
 bindCopyButtons();
 const vm = new URLSearchParams(location.search).get("vm");
 const status = document.getElementById("console-status");
 let connection, retryTimer, healthTimer;
+let ready = false, spice;
+bindConsolePaste(() => ({ connection, ready, spice }));
 let generation = 0, leaving = false, retryDelay = 2000;
 function closeConnection() {
+  ready = false;
+  spice = null;
   connection?.stop?.();
   connection?.disconnect?.();
   connection = null;
 }
 function reconnectSoon(text) {
+  ready = false;
   if (leaving || retryTimer) return;
   message(`${text} Reconnecting…`, true);
   retryTimer = setTimeout(() => {
@@ -20,6 +26,7 @@ function reconnectSoon(text) {
   retryDelay = Math.min(30000, retryDelay * 2);
 }
 function connected(protocol) {
+  ready = true;
   retryDelay = 2000;
   message(`Connected · ${protocol} · Keep-alive active`);
 }
@@ -52,8 +59,11 @@ async function connect() {
   document.getElementById("spice-screen").replaceChildren();
   message("Connecting to display…");
   if (vm.startsWith("incus:")) {
-    const Spice = await import("/vendor/spice/main.js");
+    const [Spice, Messages, { Constants }] = await Promise.all([
+      import("/vendor/spice/main.js"), import("/vendor/spice/spicemsg.js"), import("/vendor/spice/enums.js"),
+    ]);
     if (attempt !== generation || leaving) return;
+    spice = { Messages, Constants };
     connection = new Spice.SpiceMainConn({
       uri,
       screen_id: "spice-screen",
