@@ -13,8 +13,10 @@ import subprocess
 import sys
 import time
 import urllib.request
+from urllib.parse import urlsplit
 
 ROOT = Path('/etc/vm-manager/mounts')
+OS_RELEASE = Path('/etc/os-release')
 
 
 def command(*args, timeout=300):
@@ -23,6 +25,47 @@ def command(*args, timeout=300):
         # Utilities can print connection strings. Never forward their output.
         raise RuntimeError('Guest command failed: ' + args[0] + '. Check guest networking and the storage connection.')
     return result.stdout.strip()
+
+
+def rclone_config(source):
+    hostname = urlsplit(source['endpoint']).hostname or ''
+    r2 = hostname.endswith('.r2.cloudflarestorage.com')
+    text = ('[remote]\ntype = s3\nprovider = ' + ('Cloudflare' if r2 else 'Other') +
+            '\naccess_key_id = ' + source['access_key'] + '\nsecret_access_key = ' + source['secret_key'] +
+            '\nendpoint = ' + source['endpoint'] + '\nregion = ' + source['region'] +
+            '\nforce_path_style = true\nno_check_bucket = true\n')
+    if r2:
+        # Bucket-scoped keys cannot create buckets. R2 also rejects the versioned
+        # HEAD that rclone performs after PUT; retain PUT checksum validation.
+        text += 'no_head = true\n'
+    return text
+
+
+def install_tools(kind):
+    needed = ['cifs-utils'] if kind == 'smb' else ['rclone', 'fuse3', 'ca-certificates']
+    if shutil.which('mount.cifs' if kind == 'smb' else 'rclone') and (kind == 'smb' or shutil.which('fusermount3')):
+        return
+    try:
+        if shutil.which('apt-get'):
+            command('env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'update', timeout=300)
+            command('env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'install', '-y', '--no-install-recommends', *needed, timeout=600)
+        elif shutil.which('dnf'):
+            repositories = []
+            if kind == 's3' and not shutil.which('rclone'):
+                release = dict(line.split('=', 1) for line in OS_RELEASE.read_text().splitlines() if '=' in line)
+                distro = release.get('ID', '').strip('\"\'')
+                major = release.get('VERSION_ID', '').strip('\"\'').split('.')[0]
+                if distro in ('rocky', 'almalinux') and major.isdigit() and int(major) >= 8:
+                    # rclone is in EPEL, not the base Rocky/Alma repositories.
+                    # Enable build dependencies only for this installation.
+                    command('dnf', 'install', '-y', 'epel-release', timeout=300)
+                    repositories = ['--enablerepo=' + ('powertools' if major == '8' else 'crb')]
+            command('dnf', *repositories, 'install', '-y', *needed, timeout=600)
+        else:
+            raise RuntimeError('No supported package manager')
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError('Could not install guest storage tools (' + ', '.join(needed) +
+                           '). Check guest package repositories and outbound network access, or install these packages before retrying.') from exc
 
 
 def pending(config):
@@ -120,16 +163,7 @@ def execute(body):
     if target.resolve() != target.absolute():
         raise RuntimeError('Guest mount paths cannot contain symbolic links')
     source = body['source']
-    needed = (['cifs-utils'] if source['kind'] == 'smb' else ['rclone', 'fuse3', 'ca-certificates'])
-    missing = not shutil.which('mount.cifs' if source['kind'] == 'smb' else 'rclone') or (source['kind'] == 's3' and not shutil.which('fusermount3'))
-    if missing:
-        if shutil.which('apt-get'):
-            command('env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'update', timeout=300)
-            command('env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'install', '-y', '--no-install-recommends', *needed, timeout=600)
-        elif shutil.which('dnf'):
-            command('dnf', 'install', '-y', *(['cifs-utils'] if source['kind'] == 'smb' else ['rclone', 'fuse3', 'ca-certificates']), timeout=600)
-        else:
-            raise RuntimeError('Install ' + ', '.join(needed) + ' in this guest before adding storage')
+    install_tools(source['kind'])
     ROOT.mkdir(parents=True, mode=0o700, exist_ok=True)
     ROOT.chmod(0o700)
     directory.mkdir(mode=0o700, exist_ok=True)
@@ -154,7 +188,7 @@ def execute(body):
                 sock.bind(('127.0.0.1', 0))
                 config['rc_port'] = sock.getsockname()[1]
             config['rc_password'] = secrets.token_urlsafe(32)
-        (directory / 'rclone.conf').write_text('[remote]\ntype = s3\nprovider = Other\naccess_key_id = ' + source['access_key'] + '\nsecret_access_key = ' + source['secret_key'] + '\nendpoint = ' + source['endpoint'] + '\nregion = ' + source['region'] + '\nforce_path_style = true\n')
+        (directory / 'rclone.conf').write_text(rclone_config(source))
         (directory / 'rclone.conf').chmod(0o600)
     # Secrets are kept in guest root-only files, never in service arguments.
     config_path.write_text(json.dumps(config))

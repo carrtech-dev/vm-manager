@@ -1,4 +1,5 @@
 import json
+import configparser
 import os
 from pathlib import Path
 import subprocess
@@ -69,6 +70,63 @@ def test_credential_files_and_utility_errors_do_not_expose_secrets(registry, mon
     assert 'fake-secret' not in str(error.value)
     assert 'fake-key' not in json.dumps(ext.listing())
     assert ext.listing()['sources'][0]['status'] == 'unavailable'
+
+
+@pytest.mark.parametrize('endpoint,r2', [
+    ('https://' + 'a' * 32 + '.r2.cloudflarestorage.com', True),
+    ('https://' + 'a' * 32 + '.eu.r2.cloudflarestorage.com/', True),
+    ('https://s3.example.test', False),
+    ('https://r2.cloudflarestorage.com.example.test', False),
+])
+def test_host_and_guest_s3_configuration_support_existing_bucket_keys(registry, endpoint, r2):
+    source = ext.source_record(ext.create(s3(endpoint=endpoint, region='auto'))['id'])
+    text = ext.config(source).read_text()
+    assert text == guest_storage.rclone_config(source)
+    parser = configparser.ConfigParser()
+    parser.read_string(text)
+    remote = parser['remote']
+    assert remote.getboolean('no_check_bucket')
+    assert remote.getboolean('no_head', fallback=False) == r2
+    assert remote['provider'] == ('Cloudflare' if r2 else 'Other')
+    assert remote['secret_access_key'] == source['secret_key']
+
+
+@pytest.mark.parametrize('distro,version,repo', [
+    ('rocky', '10.2', 'crb'), ('almalinux', '9.6', 'crb'),
+    ('rocky', '8.10', 'powertools'), ('fedora', '44', None),
+])
+def test_missing_rclone_installs_enterprise_linux_repository_dependencies(tmp_path, monkeypatch, distro, version, repo):
+    release = tmp_path / 'os-release'
+    release.write_text('ID="' + distro + '"\nVERSION_ID="' + version + '"\n')
+    monkeypatch.setattr(guest_storage, 'OS_RELEASE', release)
+    monkeypatch.setattr(guest_storage.shutil, 'which', lambda name: '/usr/bin/dnf' if name == 'dnf' else None)
+    calls = []
+    monkeypatch.setattr(guest_storage, 'command', lambda *args, **kwargs: calls.append(args))
+    guest_storage.install_tools('s3')
+    if repo:
+        assert calls == [('dnf', 'install', '-y', 'epel-release'),
+                         ('dnf', '--enablerepo=' + repo, 'install', '-y', 'rclone', 'fuse3', 'ca-certificates')]
+    else:
+        assert calls == [('dnf', 'install', '-y', 'rclone', 'fuse3', 'ca-certificates')]
+
+
+def test_installed_tools_do_not_change_guest_repositories(monkeypatch):
+    monkeypatch.setattr(guest_storage.shutil, 'which', lambda name: '/usr/bin/' + name)
+    def unexpected(*args, **kwargs):
+        raise AssertionError('Installed tools must not invoke the package manager')
+    monkeypatch.setattr(guest_storage, 'command', unexpected)
+    guest_storage.install_tools('s3')
+    guest_storage.install_tools('smb')
+
+
+def test_guest_package_failure_identifies_dependencies_without_raw_output(monkeypatch):
+    monkeypatch.setattr(guest_storage.shutil, 'which', lambda name: '/usr/bin/dnf' if name == 'dnf' else None)
+    def fail(*args, **kwargs):
+        raise RuntimeError('secret-package-mirror-credential')
+    monkeypatch.setattr(guest_storage, 'command', fail)
+    with pytest.raises(RuntimeError, match='cifs-utils') as error:
+        guest_storage.install_tools('smb')
+    assert 'secret-package-mirror-credential' not in str(error.value)
 
 
 def test_shared_source_mounts_preserve_references_and_retry_ids(registry, monkeypatch):
