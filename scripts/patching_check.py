@@ -4,8 +4,8 @@ Run as root with the release Python and PYTHONPATH set to that release:
   python scripts/patching_check.py --vms incus:vmm-patch-check-ubuntu libvirt:vmm-patch-check-libvirt
 VM names MUST start with vmm-patch-check-. Updates packages on those VMs only.
 Creates/removes temporary operator/viewer sessions and schedules; preserves all
-existing accounts and VMs. --restart-check restarts only vm-manager.service
-during an active patch (never the hypervisors); run outside other app work.
+existing accounts and VMs. --restart-check kills/restarts only the VM Manager
+process during an active patch (never the hypervisors); run outside other app work.
 --browser-state writes a private, short-lived Playwright session and pauses until
 the file is removed. The caller owns guest creation/deletion and downloaded images.
 """
@@ -91,6 +91,9 @@ def main():
                     break
                 time.sleep(.2)
             assert active, 'No active guest transaction observed for restart check'
+            unrelated = [t for t in request('GET', '/api/tasks') if t['status'] in ('queued', 'running') and t['resource'] not in args.vms]
+            assert not unrelated, 'Wait for unrelated management tasks before crash-recovery acceptance'
+            subprocess.run(['systemctl', 'kill', '--signal=KILL', '--kill-whom=main', 'vm-manager.service'], check=True)
             subprocess.run(['systemctl', 'restart', 'vm-manager.service'], check=True)
             for _ in range(60):
                 try:

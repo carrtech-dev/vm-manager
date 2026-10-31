@@ -300,8 +300,10 @@ root, pre-prepared disposable Linux VMs named `vmm-patch-check-*`, and the relea
 Python environment with `PYTHONPATH` set to that release. It installs actual
 updates on only those guests, checks both roles, duplicate guards, scheduled runs
 and missed-window handling, and removes its own temporary users and schedules.
-`--restart-check` also restarts VM Manager during a guest transaction; run outside
-other management work. Existing accounts, VMs and schedules are retained. The
+`--restart-check` kills/restarts the VM Manager process during a guest transaction
+to verify crash recovery; run outside other management work. `--reboot-check`
+marks a disposable Incus APT guest reboot-required and verifies an actual reboot.
+Existing accounts, VMs and schedules are retained. The
 caller creates and removes the disposable guests; never pass production guests.
 
 ## Development and tests
