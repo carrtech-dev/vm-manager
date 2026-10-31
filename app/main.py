@@ -49,6 +49,7 @@ from . import guest_agent
 from . import guest_terminal
 from . import backups
 from . import templates
+from . import patching
 from .power import PowerInterrupted, PowerRequests
 from .protection import ProtectionPower
 from .task_output import Recorder, capture, emit
@@ -62,6 +63,7 @@ ISOS.mkdir(exist_ok=True)
 store = Store(DATA)
 store.bootstrap(DATA)
 backups.initialize(store)
+patching.initialize(store)
 incus, libvirt = Incus(), Libvirt()
 history = monitoring.History(store)
 snapshots = Snapshots(store, incus, libvirt)
@@ -75,6 +77,10 @@ async def backup_lifespan(application):
                 await asyncio.to_thread(backup_tick)
             except Exception:
                 logging.exception('Backup scheduler failed')
+            try:
+                await asyncio.to_thread(patch_manager.tick)
+            except Exception:
+                logging.exception('Operations scheduler failed')
             await asyncio.sleep(15)
     async def monitor_loop():
         while True:
@@ -139,6 +145,11 @@ def task(user, action, resource, fn, resources=None):
             db.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
         emit("Task running on host.\n")
         try:
+            if action != 'vm.stop' and not action.startswith('patch.'):
+                with store.db() as db:
+                    for key in resources or {resource}:
+                        if db.execute("SELECT 1 FROM patch_runs WHERE vm_id=? AND attempted=1 AND status IN ('dispatched','running','reconnecting')", (key,)).fetchone():
+                            raise HypervisorError('A guest patch transaction is active or reconnecting; inspect Operations before changing this VM')
             if action.startswith("vm.") and ":" in resource:
                 provider, vm_name = vm_ref(resource)
                 original = (
@@ -193,6 +204,9 @@ def task(user, action, resource, fn, resources=None):
             resources = {resource}
     (stop_executor if action == "vm.stop" else executor).submit(execute, resources=resources)
     return {"task_id": task_id}
+
+
+patch_manager = patching.Manager(store, lambda *args, **kwargs: task(*args, **kwargs))
 
 
 def session(request):
@@ -533,7 +547,7 @@ def get_inventory(user=Depends(require())):
     return dict(result, external_storage=external, external_storage_error=external_error,
                 storage_blocks=blocks, storage_defaults=storage.defaults(store),
                 storage_error=error, backup_plans=backups.plans(store), vm_backups=backups.catalog(store),
-                vm_templates=templates.catalog(store))
+                vm_templates=templates.catalog(store), patching=patching.catalog(store))
 
 
 @app.get('/api/storage/sources')
@@ -988,6 +1002,8 @@ def remove_vm_contents(vm_id, cleanup, preserve_backups, actor):
     provider, vm_name = vm_ref(vm_id)
     ensure_stopped(provider, vm_name)
     with store.db() as db:
+        if db.execute("SELECT 1 FROM patch_runs WHERE vm_id=? AND status IN ('pending','dispatched','running','reconnecting')", (vm_id,)).fetchone():
+            raise HypervisorError('Wait for active patch operations to finish before deleting this VM')
         if db.execute('SELECT 1 FROM external_vm_refs WHERE vm_id=?', (vm_id,)).fetchone():
             raise HypervisorError('Detach external storage before deleting this VM. Start the guest to close files and flush pending uploads first.')
     if cleanup:
@@ -1010,6 +1026,15 @@ def remove_vm_contents(vm_id, cleanup, preserve_backups, actor):
         db.execute("DELETE FROM pending_hardware WHERE vm_id=?", (vm_id,))
         db.execute("DELETE FROM snapshot_heads WHERE vm_id=?", (vm_id,))
         db.execute("DELETE FROM backup_plans WHERE vm_id=?", (vm_id,))
+        db.execute('DELETE FROM patch_guests WHERE vm_id=?', (vm_id,))
+        for row in db.execute('SELECT id,settings FROM patch_schedules').fetchall():
+            settings = json.loads(row['settings'])
+            if vm_id in settings['vm_ids']:
+                settings['vm_ids'].remove(vm_id)
+                if settings['vm_ids']:
+                    db.execute('UPDATE patch_schedules SET settings=? WHERE id=?', (json.dumps(settings), row['id']))
+                else:
+                    db.execute('DELETE FROM patch_schedules WHERE id=?', (row['id'],))
         organization.clear(store, "vm", vm_id, db=db)
     return "VM deleted." + (" Backups preserved." if cleanup and preserve_backups else " Snapshots and backups deleted." if cleanup else "")
 
@@ -2534,6 +2559,77 @@ def delete_template(template_id: str, body: Confirm, user=Depends(require('opera
         return 'Template deleted; VMs created from it are retained.'
     return task(user, 'template.delete', row['name'], delete,
                 resources={'template:' + template_id})
+
+
+@app.get('/api/operations/patching')
+def patch_catalog(user=Depends(require('read'))):
+    return patching.catalog(store)
+
+
+def patch_selection(vm_ids):
+    existing = {v['id'] for v in inventory()['vms']}
+    if any(v not in existing or v in deleting_vms for v in vm_ids):
+        raise HypervisorError('A selected VM is missing or being deleted')
+
+
+@app.post('/api/operations/patching/check')
+def patch_check(body: patching.Selection, user=Depends(require('operate'))):
+    patch_selection(body.vm_ids)
+    return {'tasks': [task(user, 'patch.check', vm_id,
+        lambda v=vm_id: patch_manager.probe(v).get('message', 'Linux readiness checked'), resources={vm_id}) for vm_id in body.vm_ids]}
+
+
+@app.get('/api/operations/patching/runs/{run_id}')
+def patch_run_details(run_id: str, user=Depends(require('read'))):
+    with store.db() as db:
+        row = db.execute('SELECT * FROM patch_runs WHERE id=?', (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, 'Patch run not found')
+    return dict(row, result=json.loads(row['result']))
+
+
+@app.post('/api/operations/patching/runs')
+def patch_now(body: patching.Request, user=Depends(require('operate'))):
+    with backup_manager.lock, patch_manager.lock:
+        patch_selection(body.vm_ids)
+        patch_manager.require_ready(body.vm_ids)
+        batch_id = patch_manager.create(body, user['username'])
+    patch_manager.tick()
+    return {'batch_id': batch_id}
+
+
+@app.post('/api/operations/patching/schedules')
+def patch_schedule_create(body: patching.Schedule, user=Depends(require('operate'))):
+    with backup_manager.lock:
+        patch_selection(body.vm_ids)
+        return patch_manager.save_schedule(body, user['username'])
+
+
+@app.post('/api/operations/patching/batches/{batch_id}/cancel')
+def patch_cancel(batch_id: str, user=Depends(require('operate'))):
+    with patch_manager.lock, store.db() as db:
+        db.execute("UPDATE patch_runs SET status='skipped',result=? WHERE batch_id=? AND status='pending'",
+                   (json.dumps({'message': 'Cancelled before dispatch; active guest transactions continue'}), batch_id))
+        store.audit(user['username'], 'patch.cancel-pending', batch_id, db=db)
+    return {'ok': True}
+
+
+@app.put('/api/operations/patching/schedules/{schedule_id}')
+def patch_schedule_edit(schedule_id: str, body: patching.Schedule, user=Depends(require('operate'))):
+    with backup_manager.lock, patch_manager.lock, store.db() as db:
+        if not db.execute('SELECT 1 FROM patch_schedules WHERE id=?', (schedule_id,)).fetchone():
+            raise HTTPException(404, 'Patch schedule not found')
+        patch_selection(body.vm_ids)
+        return patch_manager.save_schedule(body, user['username'], schedule_id)
+
+
+@app.delete('/api/operations/patching/schedules/{schedule_id}')
+def patch_schedule_delete(schedule_id: str, user=Depends(require('operate'))):
+    with patch_manager.lock, store.db() as db:
+        if not db.execute('DELETE FROM patch_schedules WHERE id=?', (schedule_id,)).rowcount:
+            raise HTTPException(404, 'Patch schedule not found')
+        store.audit(user['username'], 'patch.schedule.delete', schedule_id, db=db)
+    return {'ok': True}
 
 
 def backup_tick(now=None):

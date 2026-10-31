@@ -235,6 +235,73 @@ binary backup data are excluded. Each task retains its latest 256 output entries
 Omitted older output is indicated when catching up. Output is sent only to signed-in
 users with task read permission; active connections recheck access continuously.
 
+## Operations: Linux patching
+
+Open **Operations** in the sidebar, select one or more VMs and choose **Check
+selected**. The check verifies the actual Linux guest, root guest-agent execution,
+Python 3, systemd, its native package manager and minimum free disk space. Windows
+and unsupported guests cannot be patched. Supported distribution families are
+Debian 12+, Ubuntu 22.04+, Rocky Linux, AlmaLinux and RHEL 8+. Incus VMs need a
+connected Incus agent; libvirt VMs need an enabled QEMU guest agent with
+`guest-exec` and `guest-exec-status` permitted. No SSH credentials are required.
+Guest repository access and subscriptions, where applicable, remain the guest
+administrator's responsibility.
+
+Choose **Patch selected now**, or **Create schedule** for daily/weekly maintenance
+with an IANA timezone, start time and maintenance window. Edit a named schedule
+to change its VM membership, disable it, or adjust its policy. Schedules and
+results live in SQLite and are included in deployment backups. Administrators
+and operators manage patches and schedules; viewers can inspect results.
+
+Patching refreshes configured repositories and installs available package updates
+with APT or DNF. This covers system packages, not separately managed applications,
+containers or distribution release upgrades. APT retains existing configuration
+files and package holds, permits new dependencies, and refuses package removals;
+DNF uses normal upgrade policy without `--allowerasing`. Both retain normal
+signature verification. Updates can restart guest services even when rebooting
+is disabled. Guest package-manager locks are respected, never deleted. There is
+no automatic snapshot or rollback; create an appropriate backup before maintenance
+when required by your recovery policy.
+
+The default policy patches one VM at a time, stops remaining VMs after a failure,
+and reports reboot requirements without rebooting. Concurrency is configurable
+from one to four. Automatic reboot, when explicitly enabled and a reboot is
+known to be required, waits for a changed Linux boot ID and a responding guest
+agent. Reboot need may be **Unknown**, especially without the distribution's
+restart-detection utilities; inspect these guests manually. Package output,
+updated-package count and up to 200 package names appear under each run's
+**Details**, with task and audit records for management actions.
+
+Schedules are checked every 15 seconds while VM Manager is running. An expired
+window is skipped, including after downtime. A run that is queued behind other
+work must still start within its window; an in-progress transaction and its
+optional reboot may finish after that window. Calendar scheduling handles
+daylight-saving changes without repeating a local daily slot. Stopped or
+unavailable guests are skipped without starting them. **Cancel pending batch**
+cancels only undispatched VMs; guest package transactions continue to completion.
+Deleting a schedule removes future runs and retains queued/running operations.
+Deleting a VM removes it from future patch schedules and retains its run history.
+
+Each guest transaction runs in an independent systemd unit and stores its state
+and output under root-only `/var/lib/vm-manager-patching`. A manager restart or
+temporary agent disconnect reconnects to the original transaction ID rather than
+launching another upgrade. A reconnecting transaction blocks new patch runs and
+ordinary VM mutations until reconciled; Force Stop remains available as the
+emergency action. A guest reboot or terminated worker during package installation
+is recorded as interrupted. Inspect the guest's package database before starting
+a new patch after an interrupted or failed transaction. Guest operation records
+remain for recovery and can be removed by the guest administrator once the
+corresponding operations are terminal and no reconnect is pending.
+
+`scripts/patching_check.py` is an opt-in deployed acceptance check. It requires
+root, pre-prepared disposable Linux VMs named `vmm-patch-check-*`, and the release
+Python environment with `PYTHONPATH` set to that release. It installs actual
+updates on only those guests, checks both roles, duplicate guards, scheduled runs
+and missed-window handling, and removes its own temporary users and schedules.
+`--restart-check` also restarts VM Manager during a guest transaction; run outside
+other management work. Existing accounts, VMs and schedules are retained. The
+caller creates and removes the disposable guests; never pass production guests.
+
 ## Development and tests
 
 ```sh

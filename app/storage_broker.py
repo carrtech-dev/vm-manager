@@ -157,6 +157,9 @@ def delete(block_id):
 
 def dispatch(request):
     operation = request.get("operation")
+    if operation == 'patch_guest':
+        from . import patching
+        return patching.dispatch(request)
     if isinstance(operation, str) and operation.startswith('external_'):
         return external_storage.dispatch(operation, request)
     if operation == "list":

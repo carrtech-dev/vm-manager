@@ -70,6 +70,12 @@ class Store:
                 CREATE TABLE IF NOT EXISTS snapshot_heads(
                     vm_id TEXT PRIMARY KEY, name TEXT);
                 CREATE TABLE IF NOT EXISTS attempts(peer TEXT, at REAL);
+                CREATE TABLE IF NOT EXISTS patch_guests(vm_id TEXT PRIMARY KEY, checked REAL NOT NULL, result TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS patch_schedules(id TEXT PRIMARY KEY, settings TEXT NOT NULL, next_run REAL, last_message TEXT NOT NULL DEFAULT '');
+                CREATE TABLE IF NOT EXISTS patch_batches(id TEXT PRIMARY KEY, settings TEXT NOT NULL, username TEXT NOT NULL, created REAL NOT NULL, deadline REAL, schedule_id TEXT);
+                CREATE TABLE IF NOT EXISTS patch_runs(id TEXT PRIMARY KEY, batch_id TEXT NOT NULL REFERENCES patch_batches(id), vm_id TEXT NOT NULL,
+                    status TEXT NOT NULL, task_id TEXT, attempted INTEGER NOT NULL DEFAULT 0, result TEXT NOT NULL DEFAULT '{}', next_check REAL NOT NULL DEFAULT 0);
+                CREATE UNIQUE INDEX IF NOT EXISTS patch_one_active ON patch_runs(vm_id) WHERE status IN ('pending','dispatched','running','reconnecting');
                 CREATE TABLE IF NOT EXISTS storage_defaults(
                     purpose TEXT PRIMARY KEY CHECK(purpose IN ('vm','iso','backup')),
                     block_id TEXT NOT NULL);

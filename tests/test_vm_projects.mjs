@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 import * as core from "../app/static/core.js";
+import { selectOperation } from "../app/static/operations.js";
 
 const source = readFileSync(new URL("../app/static/app.js", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?from "[^"]+";\n/gm, "")
@@ -23,7 +24,7 @@ function list(role = "operator") {
   const elements = { "#vm-table": { innerHTML: "" }, "#vm-result-count": {}, "#vm-select-all": {} };
   const listeners = {};
   let confirmation;
-  const context = createContext({ ...core, state, can: () => role !== "viewer",
+  const context = createContext({ ...core, state, selectOperation, can: () => role !== "viewer",
     document: { addEventListener(name, fn) { listeners[name] = fn; } },
     window: { addEventListener() {} }, setInterval() {}, bindCopyButtons() {},
     $: selector => elements[selector] || null, $$: () => [],
