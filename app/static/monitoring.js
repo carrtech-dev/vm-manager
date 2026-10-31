@@ -6,7 +6,7 @@ const cache = new Map();
 const selection = new Map();
 const pending = new Set();
 const format = (value, cpu) => value == null ? 'Unavailable' : cpu ? `${value.toFixed(1)}%` : value === 0 ? '0 B' : size(value);
-const date = seconds => new Date(seconds * 1000).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+export const formatTimestamp = seconds => new Date(seconds * 1000).toLocaleString([], {year:'numeric', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
 
 export function chartPaths(points, start, end, maximum, step) {
   const x = t => 72 + (t - start) / (end - start) * 502;
@@ -44,7 +44,7 @@ function chart(series, data) {
       ${[0, .5, 1].map(v => `<line class="monitor-gridline" x1="72" x2="574" y1="${166-v*140}" y2="${166-v*140}"/><text class="monitor-axis" x="65" y="${170-v*140}" text-anchor="end">${esc(format(v*maximum, cpu))}</text>`).join('')}
       <path class="monitor-capacity" d="${cpu ? '' : capacity}"/><path class="monitor-peaks" d="${peaks}"/><path class="monitor-line" d="${line}"/>
       ${available.length === 1 && available[0][0] >= data.start ? `<circle class="monitor-dot" cx="${72+(available[0][0]-data.start)/(data.end-data.start)*502}" cy="${166-available[0][1]/maximum*140}" r="3"/>` : ''}
-      <text class="monitor-axis" x="72" y="194">${esc(date(data.start))}</text><text class="monitor-axis" x="574" y="194" text-anchor="end">${esc(date(data.end))}</text>
+      <text class="monitor-axis" x="72" y="194">${esc(formatTimestamp(data.start))}</text><text class="monitor-axis" x="574" y="194" text-anchor="end">${esc(formatTimestamp(data.end))}</text>
     </svg>${!available.length ? '<div class="monitor-empty">No measurements in this range</div>' : ''}<output class="monitor-tooltip" hidden></output></div>
     <div class="monitor-legend"><span>● Used${cpu ? ' · all allocated CPUs' : ''}</span>${!cpu ? '<span>┄ Capacity</span>' : ''}<span>│ Min–max</span></div>
   </article>`;
@@ -109,7 +109,7 @@ function bindTooltips(element, resource, range) {
     const show = at => {
       const point = series?.points.reduce((best,p) => !best || Math.abs(p[0]-at) < Math.abs(best[0]-at) ? p : best, null);
       if (!point || Math.abs(point[0]-at) > data.step * 1.5) { tooltip.hidden = true; return; }
-      tooltip.textContent = `${date(point[0])} · ${format(point[1], series.metric === 'cpu')} · Min ${format(point[3], series.metric === 'cpu')} / Max ${format(point[4], series.metric === 'cpu')}`;
+      tooltip.textContent = `${formatTimestamp(point[0])} · ${format(point[1], series.metric === 'cpu')} · Min ${format(point[3], series.metric === 'cpu')} / Max ${format(point[4], series.metric === 'cpu')}`;
       tooltip.hidden = false;
     };
     plot.onpointermove = event => {

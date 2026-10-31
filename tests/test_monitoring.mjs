@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chartPaths, ranges, monitoringPanel } from '../app/static/monitoring.js';
+import { chartPaths, ranges, monitoringPanel, formatTimestamp } from '../app/static/monitoring.js';
 
 test('charts break across unavailable samples and collection downtime', () => {
   const paths = chartPaths([[10,10,100,5,15],[20,20,100,20,20],[30,null,100,null,null],[40,30,100,30,30],[100,40,100,40,40]], 0, 120, 100, 10);
@@ -19,4 +19,13 @@ test('all requested ranges and each disk appear, with escaped names', () => {
   assert.match(html, /Disk &lt;bad&gt;/);
   assert.doesNotMatch(html, /<bad>/);
   assert.equal((html.match(/class="monitor-chart"/g)||[]).length, 5);
+});
+
+
+test('year-long ranges distinguish matching dates in different years', () => {
+  const start = formatTimestamp(Date.UTC(2025, 9, 31, 18) / 1000);
+  const end = formatTimestamp(Date.UTC(2026, 9, 31, 18) / 1000);
+  assert.match(start, /2025/);
+  assert.match(end, /2026/);
+  assert.notEqual(start, end);
 });
