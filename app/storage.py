@@ -41,7 +41,8 @@ class DefaultBlock(BaseModel):
 
 def broker(operation, **arguments):
     path = os.environ.get("VM_MANAGER_STORAGE_SOCKET", "/run/vm-manager-storage/control.sock")
-    if operation != 'list':
+    quiet = operation == 'list' or (operation == 'patch_guest' and arguments.get('body', {}).get('action') == 'status')
+    if not quiet:
         emit(f"Storage host: {operation} started\n")
     try:
         with socket.socket(socket.AF_UNIX) as connection:
@@ -54,7 +55,7 @@ def broker(operation, **arguments):
                 response = json.loads(stream.readline(1024 * 1024))
         if "error" in response:
             raise HypervisorError(response["error"])
-        if operation != 'list':
+        if not quiet:
             emit(f"Storage host: {operation} completed\n")
         return response["result"]
     except (OSError, ValueError) as exc:

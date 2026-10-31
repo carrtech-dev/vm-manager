@@ -10,7 +10,7 @@ const onHost = fn => {
 };
 
 test('all operational requests use the selected host while account and trust controls stay local', () => onHost(() => {
-  for (const path of ['/inventory', '/vms/incus:same/action', '/tasks/one/output?after=4', '/isos', '/backups', '/monitoring/host', '/console/incus:same'])
+  for (const path of ['/inventory', '/vms/incus:same/action', '/tasks/one/output?after=4', '/isos', '/backups', '/monitoring/host', '/operations/patching/check', '/console/incus:same'])
     assert.equal(apiURL(path), '/api/cluster/hosts/second-node/proxy' + path);
   for (const path of ['/me', '/login', '/logout', '/password', '/users/3', '/cluster/inventory'])
     assert.equal(apiURL(path), '/api' + path);

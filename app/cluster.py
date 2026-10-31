@@ -20,7 +20,7 @@ from .security import ROLES, token_hash
 
 PROTOCOL = 1
 ROOTS = {'inventory', 'vms', 'networks', 'isos', 'storage', 'collections',
-         'organization', 'monitoring', 'tasks', 'audit', 'backups', 'templates',
+         'organization', 'monitoring', 'operations', 'tasks', 'audit', 'backups', 'templates',
          'console', 'terminal'}
 
 

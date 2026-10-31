@@ -4,7 +4,7 @@
   "type": "module",
   "version": "1.0.0",
   "scripts": {
-    "check": "node --check app/static/monitoring.js && node --check app/static/cluster-ui.js && node --check app/static/app.js && node --check app/static/core.js && node --check app/static/console.js && node --check app/static/console-paste.js && node --check app/static/task-detail.js && node --check app/static/terminal.js && node --check app/static/terminal-buffer.js && node --check app/static/console-view.js && node --check app/static/console-navigation.js",
+    "check": "node --check app/static/operations.js && node --check app/static/monitoring.js && node --check app/static/cluster-ui.js && node --check app/static/app.js && node --check app/static/core.js && node --check app/static/console.js && node --check app/static/console-paste.js && node --check app/static/task-detail.js && node --check app/static/terminal.js && node --check app/static/terminal-buffer.js && node --check app/static/console-view.js && node --check app/static/console-navigation.js",
     "test": "node --test tests/test_*.mjs"
   },
   "dependencies": {

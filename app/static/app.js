@@ -27,6 +27,7 @@ import { watchTaskDetail } from "./task-detail.js";
 import { renderEmbeddedConsole, switchEmbeddedConsole, toggleConsoleFullscreen, bindEmbeddedConsoleEvents } from "./console-view.js";
 import { monitoringPanel, refreshMonitoring } from "./monitoring.js";
 import { hostPicker, renderCluster, clusterAction, switchHost } from "./cluster-ui.js";
+import { renderOperations, operationAction, selectOperation, clearOperationSelection } from "./operations.js";
 const pageNames = {
   cluster: "Cluster",
   overview: "Overview",
@@ -38,6 +39,7 @@ const pageNames = {
   storage: "Storage",
   backups: "Backups",
   templates: "Templates",
+  operations: "Operations",
   users: "Access control",
   tasks: "Task history",
   audit: "Audit trail",
@@ -54,6 +56,7 @@ const navItems = [
   ["storage", "▤", "Storage"],
   ["backups", "↺", "Backups"],
   ["templates", "▧", "Templates"],
+  ["operations", "⚙", "Operations"],
   ["users", "♧", "Access control"],
 ];
 let busy = false,
@@ -393,6 +396,8 @@ function renderPage() {
       return renderBackups();
     case "templates":
       return renderTemplates();
+    case "operations":
+      return renderOperations();
     case "users":
       return renderUsers();
     case "tasks":
@@ -1791,6 +1796,7 @@ async function refreshTasks() {
 }
 async function action(name, id) {
   if (name.startsWith("cluster-")) return clusterAction(name, id, refresh);
+  if (name.startsWith("patch-")) return operationAction(name, id, refresh);
   const v = currentVM(id.split("|")[0]);
   switch (name) {
     case "install-agent": installAgent(v); break;
@@ -2117,6 +2123,7 @@ async function action(name, id) {
     case "logout":
       await api("/logout", "POST");
       state.user = null;
+      clearOperationSelection();
       state.inventory = null;
       renderLogin();
       break;
@@ -2180,6 +2187,7 @@ window.addEventListener("hashchange", async () => {
 window.addEventListener("session-expired", () => {
   state.user = null;
   selectedVMs.clear();
+  clearOperationSelection();
   state.inventory = null;
   $("#modal").close();
   renderLogin("Your session expired. Sign in to continue.");
@@ -2209,6 +2217,7 @@ init();
 
  document.addEventListener("change", event => {
   if (event.target.id === "cluster-host") switchHost(event.target.value);
+  selectOperation(event);
   if (event.target.matches(".vm-select")) {
     if (event.target.checked) selectedVMs.add(event.target.value);
     else selectedVMs.delete(event.target.value);
