@@ -55,6 +55,7 @@ const selectedVMs = new Set();
 const seenTasks = new Map();
 let vmMetrics = null, metricsBusy = false;
 let vmSnapshots = null, snapshotsLoading = null;
+let renderedVMStatus = null;
 const badge = (text, style = text) =>
   `<span class="badge ${esc(style)}"><span aria-hidden="true">●</span>${esc(text)}</span>`;
 const btn = (
@@ -562,6 +563,7 @@ function createSnapshot(v) {
 }
 function renderVM() {
   const v = currentVM();
+  renderedVMStatus = v?.status;
   if (!v)
     return (
       title(
@@ -1593,7 +1595,10 @@ async function refresh(force = false) {
         !["INPUT", "SELECT", "TEXTAREA"].includes(
           document.activeElement?.tagName,
         ) &&
-        !(state.page === "vm" && state.tab === "console"))
+        // Keep a live console connected during ordinary polling, but redraw
+        // after power changes (or deletion) so its badge and actions stay current.
+        (!(state.page === "vm" && state.tab === "console") ||
+          currentVM()?.status !== renderedVMStatus))
     )
       render();
   } catch (e) {
