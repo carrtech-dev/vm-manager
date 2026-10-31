@@ -58,7 +58,12 @@ accounts may need a password configured first. VM Manager administrators can
 choose **Open as root** to start a root shell directly without guest credentials.
 Operators always use guest login. **Reconnect to login** starts a fresh guest
 login session, including after using root access. The guest must provide a Linux
-`login` program; if it is unavailable, use the graphical console.
+`login` program; if it is unavailable, use the graphical console. SELinux guests
+use a temporary systemd getty session so guest policy can transition normally
+from login to the user’s shell. This requires `systemd-run`, `systemctl`, `agetty`,
+`chcon` and `tty` inside the guest. Only the session’s disposable PTY is
+relabeled; SELinux enforcement and policy are retained. Disconnecting stops the
+temporary login service.
 The terminal supports normal text paste, selectable output and 5,000 lines of
 browser scrollback. **Copy output** copies the selection
 or retained output; **Download output** saves it as text. Cmd+V / Ctrl+Shift+V

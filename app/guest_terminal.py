@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import uuid
 from urllib.parse import quote, urlsplit
 
 from fastapi import WebSocketDisconnect
@@ -9,6 +10,38 @@ from websockets.asyncio.client import unix_connect
 from websockets.exceptions import ConnectionClosedOK
 
 from .hypervisor import HypervisorError
+
+
+# SELinux services cannot transition straight into a logged-in user domain.
+# PID 1 -> getty -> login provides the distribution's normal policy transitions.
+# Label only this disposable PTY; PAM labels it again for the authenticated user.
+LOGIN_SCRIPT = r'''set -eu
+if [ -x /bin/login ]; then login=/bin/login
+elif [ -x /usr/bin/login ]; then login=/usr/bin/login
+else printf 'Guest login program unavailable. Use the graphical console.\n'; exit 1
+fi
+if [ -e /sys/fs/selinux/enforce ]; then
+    for tool in systemd-run systemctl chcon tty; do
+        command -v "$tool" >/dev/null || {
+            printf 'SELinux guest login requires systemd-run, systemctl, chcon and tty. Use the graphical console.\n'
+            exit 1
+        }
+    done
+    if [ -x /sbin/agetty ]; then getty=/sbin/agetty
+    elif [ -x /usr/sbin/agetty ]; then getty=/usr/sbin/agetty
+    else printf 'SELinux guest login requires agetty. Use the graphical console.\n'; exit 1
+    fi
+    chcon -t user_devpts_t "$(tty)"
+    cleanup() { systemctl stop "$1" >/dev/null 2>&1 || :; }
+    trap 'cleanup "$1"' EXIT
+    trap 'exit 0' HUP INT TERM
+    systemd-run --quiet --wait --collect --pipe --service-type=exec --unit="$1" \
+        -- "$getty" --noreset --noclear --noissue --login-program "$login" - xterm-256color <&0 &
+    wait $!
+else
+    exec "$login"
+fi
+'''
 
 
 def terminal_message(raw):
@@ -45,10 +78,8 @@ async def bridge(ws, incus, vm_name, authorize, audit, auth_interval=20, mode="l
         authorize()
         # Login owns guest authentication (including PAM and password echo).
         # Never fall back to a shell when login is unavailable or fails.
-        command = (['/bin/sh', '-c',
-                    'if [ -x /bin/login ]; then exec /bin/login; '
-                    'elif [ -x /usr/bin/login ]; then exec /usr/bin/login; '
-                    'else printf "Guest login program unavailable. Use the graphical console.\\n"; exit 1; fi']
+        command = (['/bin/sh', '-c', LOGIN_SCRIPT, 'vmm-login',
+                    'vmm-terminal-' + uuid.uuid4().hex + '.service']
                    if mode == 'login' else
                    ['/bin/sh', '-c', 'if [ -x /bin/bash ]; then exec /bin/bash -l; else exec /bin/sh -l; fi'])
         operation = await asyncio.to_thread(incus.request, 'POST',
