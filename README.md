@@ -56,9 +56,10 @@ and password configured inside that VM; VM Manager credentials do not sign you
 into the guest. Guest login policies apply, so locked/passwordless cloud-image
 accounts may need a password configured first. VM Manager administrators can
 choose **Open as root** to start a root shell directly without guest credentials.
-Operators always use guest login. **Reconnect to login** starts a fresh guest
-login session, including after using root access. The guest must provide a Linux
-`login` program; if it is unavailable, use the graphical console. SELinux guests
+Operators always use guest login. Logging out returns to the guest login prompt
+in the same terminal, retaining its scrollback. **Reconnect to login** starts a
+fresh guest login session, including after using root access. The guest must
+provide a Linux `login` program; if it is unavailable, use the graphical console. SELinux guests
 use a temporary systemd getty session so guest policy can transition normally
 from login to the user’s shell. This requires `systemd-run`, `systemctl`, `agetty`,
 `chcon` and `tty` inside the guest. Only the session’s disposable PTY is

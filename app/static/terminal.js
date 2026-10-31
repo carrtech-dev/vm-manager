@@ -53,6 +53,7 @@ async function connect(mode = "login") {
   if (mode === "root" && user.role !== "administrator") throw new Error("Root terminal access requires an administrator.");
   const current = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/terminal/${encodeURIComponent(vm)}?csrf=${encodeURIComponent(user.csrf)}&mode=${mode}`);
   socket = current;
+  let loggedOut = false;
   current.binaryType = "arraybuffer";
   current.addEventListener("message", event => {
     if (attempt !== generation) return;
@@ -69,14 +70,29 @@ async function connect(mode = "login") {
       message(data.mode === "root" ? "Connected as root · Administrator session" : "VM login · Sign in with your VM account");
       resize();
       terminal.focus();
-    } else if (data.type === "error") message(data.message, true);
+    } else if (data.type === "exit") {
+      ready = false;
+      loggedOut = true;
+      message("Logged out. Returning to VM login…");
+    } else if (data.type === "error") {
+      loggedOut = false;
+      message(data.message, true);
+    }
   });
-  current.addEventListener("close", () => {
+  current.addEventListener("close", event => {
     if (attempt !== generation) return;
     ready = false;
-    if (!status.classList.contains("error")) message("Disconnected. Reconnect opens a new shell; output stays here.", true);
+    if (loggedOut && event.code === 1000) {
+      connect().catch(error => message(error.message, true));
+      return;
+    }
+    if (!status.classList.contains("error")) message("Disconnected. Reconnect to return to VM login; output stays here.", true);
   });
-  current.addEventListener("error", () => { if (attempt === generation) message("Terminal connection failed. Check the VM, guest agent and your session.", true); });
+  current.addEventListener("error", () => {
+    if (attempt !== generation) return;
+    loggedOut = false;
+    message("Terminal connection failed. Check the VM, guest agent and your session.", true);
+  });
 }
 document.getElementById("reconnect").addEventListener("click", () => {
   terminal.writeln("\r\n── New terminal session ──\r\n");

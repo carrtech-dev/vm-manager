@@ -104,30 +104,59 @@ async def bridge(ws, incus, vm_name, authorize, audit, auth_interval=20, mode="l
         await ws.send_json({'type': 'ready', 'mode': mode})
         output_credit = asyncio.Event()
         output_credit.set()
+        had_input = False
+        guest_ended = False
 
         async def browser_to_guest():
+            nonlocal had_input
             while True:
                 raw = await ws.receive_text()
                 authorize()
                 kind, payload = terminal_message(raw)
+                if guest_ended:
+                    continue
                 if kind == 'ack':
                     output_credit.set()
                 else:
+                    if kind == 'input' and payload:
+                        had_input = True
                     await (data_socket if kind == 'input' else control).send(payload)
 
         async def guest_to_browser():
+            nonlocal guest_ended
             while True:
                 # One output frame in flight bounds the browser's pending
                 # parser queue as well as its retained scrollback buffer.
                 await output_credit.wait()
-                chunk = await data_socket.recv()
+                try:
+                    chunk = await data_socket.recv()
+                except ConnectionClosedOK:
+                    break
                 authorize()
                 if not chunk:
-                    return
+                    break
                 if isinstance(chunk, str):
                     chunk = chunk.encode('utf-8')
                 output_credit.clear()
                 await ws.send_bytes(chunk)
+            # A guest logout can hang up the PTY itself (notably on SELinux).
+            # Confirm exec completion before opening a fresh login PTY. login
+            # can return the user's nonzero shell status. A failed launcher
+            # without interaction must stop, so setup failures cannot retry-loop.
+            if mode == 'login':
+                guest_ended = True
+                # Incus completes the exec operation after its channels close.
+                await control.close()
+                await data_socket.close()
+                path = url.path + '/wait?timeout=5' + ('&' + url.query if url.query else '')
+                result = await asyncio.to_thread(incus.request, 'GET', path, None, False)
+                metadata = result.get('metadata') or {}
+                result_code = (metadata.get('metadata') or {}).get('return')
+                if (metadata.get('status_code') != 200 or type(result_code) is not int or
+                        (result_code != 0 and not had_input)):
+                    raise HypervisorError('Guest login did not complete successfully')
+                authorize()
+                await ws.send_json({'type': 'exit'})
 
         async def validate_session():
             while True:

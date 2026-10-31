@@ -1931,3 +1931,71 @@ def test_monitoring_requires_login_allows_viewers_and_validates_ranges(client):
     assert client.get('/api/vms/incus:demo/monitoring?range=1d').status_code == 200
     assert client.get('/api/monitoring/host?range=invalid').status_code == 422
     assert client.get('/api/vms/incus:demo/monitoring?range=invalid').status_code == 422
+
+
+@pytest.mark.parametrize('completion,transport,interacted,expected', [
+    ({'status_code': 200, 'metadata': {'return': 0}}, 'eof', False, 'exit'),
+    ({'status_code': 200, 'metadata': {'return': 0}}, 'closed', False, 'exit'),
+    ({'status_code': 200, 'metadata': {'return': 7}}, 'eof', True, 'exit'),
+    ({'status_code': 200, 'metadata': {'return': 7}}, 'eof', False, 'error'),
+    ({'status_code': 400, 'metadata': {'return': 0}}, 'eof', True, 'error'),
+    ({}, 'eof', True, 'error'),
+    ({'status_code': 200, 'metadata': {'return': 0}}, 'broken', True, 'error'),
+])
+def test_terminal_only_reports_logout_after_guest_completion(client, monkeypatch, completion, transport, interacted, expected):
+    from app import guest_terminal
+    from websockets.exceptions import ConnectionClosedOK
+
+    headers = login(client, 'operator')
+    calls = []
+
+    class Channel:
+        closed = False
+        reads = 0
+
+        async def send(self, value):
+            pass
+
+        async def recv(self):
+            self.reads += 1
+            if self.reads == 1:
+                return b'logout\r\n'
+            if transport == 'closed':
+                raise ConnectionClosedOK(None, None)
+            if transport == 'broken':
+                raise OSError('Lost guest connection')
+            return b''
+
+        async def close(self):
+            self.closed = True
+
+    control, data = Channel(), Channel()
+
+    async def connect(path, *, uri, **kwargs):
+        return control if 'secret=control' in uri else data
+
+    def request(method, path, payload=None, wait=True):
+        calls.append((method, path))
+        if method == 'GET':
+            assert control.closed and data.closed
+            return {'metadata': completion}
+        return {'operation': '/1.0/operations/logout?project=default', 'metadata': {'metadata': {
+            'fds': {'control': 'control', '0': 'data'}}}}
+
+    monkeypatch.setattr(incus, 'vm', lambda _: {'type': 'virtual-machine', 'status': 'Running'})
+    monkeypatch.setattr(incus, 'request', request)
+    monkeypatch.setattr(guest_terminal, 'unix_connect', connect)
+    with client.websocket_connect('/api/terminal/incus:demo?csrf=' + headers['X-CSRF-Token'],
+                                  headers={'Origin': 'http://testserver'}) as ws:
+        assert ws.receive_json() == {'type': 'ready', 'mode': 'login'}
+        assert ws.receive_bytes() == b'logout\r\n'
+        if interacted:
+            ws.send_json({'type': 'input', 'data': 'exit 7\r'})
+        ws.send_json({'type': 'ack'})
+        assert ws.receive_json()['type'] == expected
+        with pytest.raises(Exception):
+            ws.receive_bytes()
+    assert control.closed and data.closed
+    if transport != 'broken':
+        assert ('GET', '/1.0/operations/logout/wait?timeout=5&project=default') in calls
+    assert sum(method == 'POST' for method, _ in calls) == 1
