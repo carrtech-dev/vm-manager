@@ -54,6 +54,7 @@ let busy = false,
   selectedNetwork = null,
   renderedPath = "";
 const selectedVMs = new Set();
+const collapsedVMProjects = new Set();
 const seenTasks = new Map();
 let vmMetrics = null, metricsBusy = false;
 let vmSnapshots = null, snapshotsLoading = null;
@@ -433,8 +434,34 @@ function renderOverview() {
     )}</div><p class="subtle" style="font-size:11px">Live host values · Updated ${when(state.inventory.updated)} · Guest addresses appear when reported by the hypervisor.</p>`
   );
 }
-function vmTable(vms, compact = false, selectable = false) {
-  const selectionHeader = '<input type="checkbox" id="vm-select-all" aria-label="Select all visible virtual machines" ' + (vms.length && vms.every(v => selectedVMs.has(v.id)) ? "checked" : "") + '>';
+function vmProjectId(vm) {
+  return state.inventory.projects.some(p => p.id === vm.project_id) ? vm.project_id : "";
+}
+function visibleVMs(vms = filteredVMs()) {
+  return vms.filter(v => !collapsedVMProjects.has(vmProjectId(v)));
+}
+function vmProjectGroups(vms) {
+  const groups = new Map();
+  for (const vm of vms) {
+    const id = vmProjectId(vm);
+    if (!groups.has(id)) groups.set(id, {
+      id, name: state.inventory.projects.find(p => p.id === id)?.name || "Unassigned", vms: [],
+    });
+    groups.get(id).vms.push(vm);
+  }
+  return [...groups.values()].sort((a, b) =>
+    (a.id === "") - (b.id === "") || a.name.localeCompare(b.name));
+}
+function vmTable(vms, compact = false, selectable = false, grouped = false) {
+  const selectableVMs = grouped ? visibleVMs(vms) : vms;
+  const selectionHeader = '<input type="checkbox" id="vm-select-all" aria-label="Select all visible virtual machines" ' + (selectableVMs.length && selectableVMs.every(v => selectedVMs.has(v.id)) ? "checked" : "") + (!selectableVMs.length ? " disabled" : "") + '>';
+  const renderRow = (v) =>
+        `<tr class="clickable${grouped ? " vm-project-member" : ""}" data-action="open-vm" data-id="${esc(v.id)}">${selectable ? `<td class="vm-select-cell"><input type="checkbox" class="vm-select" value="${esc(v.id)}" aria-label="Select ${esc(v.name)} (${esc(v.provider)})" ${selectedVMs.has(v.id) ? "checked" : ""}></td>` : ""}<td class="vm-name-cell">${copyValue(v.name, "hostname", `<a class="name" href="#vm/${encodeURIComponent(v.id)}/summary">${esc(v.name)}</a>`)}${organizationChips(v)}${!compact && v.description ? `<small>${esc(v.description.slice(0, 70))}</small>` : ""}</td><td>${badge(v.provider)}</td><td>${badge(v.status)}</td><td class="numeric">${esc(v.cpu)}</td><td class="numeric">${size(v.memory)}</td>${compact ? "" : `<td class="numeric">${Object.values(v.devices).filter((d) => d.type === "disk" && d.readonly !== "true" && !d.source?.endsWith(".iso") && d.kind !== "cdrom").length} disk(s)</td><td class="mono">${copyAddresses(v.addresses, "Not reported")}</td><td><div class="actions">${smallAction("Open", "open-vm", v.id)}${can() ? smallAction(v.status === "running" ? "Shutdown" : "Start", v.status === "running" ? "shutdown" : "start", v.id, !["stopped", "running"].includes(v.status)) : ""}</div></td>`}</tr>`;
+  const rows = grouped ? vmProjectGroups(vms).flatMap(group => {
+    const expanded = !collapsedVMProjects.has(group.id);
+    const folder = `<tr class="vm-project-folder"><td colspan="${(compact ? 5 : 8) + Number(selectable)}"><button type="button" class="vm-project-toggle" data-action="toggle-vm-project" data-id="${esc(group.id)}" aria-expanded="${expanded}"><span class="vm-project-chevron" aria-hidden="true">${expanded ? "▾" : "▸"}</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z"/></svg><span>${esc(group.name)}</span><span class="vm-project-count">${group.vms.length} VM${group.vms.length === 1 ? "" : "s"}</span></button></td></tr>`;
+    return [folder, ...(expanded ? group.vms.map(renderRow) : [])];
+  }) : vms.map(renderRow);
   return table(
     [...(selectable ? [selectionHeader] : []), ...(compact
       ? ["Name", "Hypervisor", "Status", "vCPUs", "Memory"]
@@ -448,10 +475,7 @@ function vmTable(vms, compact = false, selectable = false) {
           "IP address",
           "Actions",
         ])],
-    vms.map(
-      (v) =>
-        `<tr class="clickable" data-action="open-vm" data-id="${esc(v.id)}">${selectable ? `<td class="vm-select-cell"><input type="checkbox" class="vm-select" value="${esc(v.id)}" aria-label="Select ${esc(v.name)} (${esc(v.provider)})" ${selectedVMs.has(v.id) ? "checked" : ""}></td>` : ""}<td class="vm-name-cell">${copyValue(v.name, "hostname", `<a class="name" href="#vm/${encodeURIComponent(v.id)}/summary">${esc(v.name)}</a>`)}${organizationChips(v)}${!compact && v.description ? `<small>${esc(v.description.slice(0, 70))}</small>` : ""}</td><td>${badge(v.provider)}</td><td>${badge(v.status)}</td><td class="numeric">${esc(v.cpu)}</td><td class="numeric">${size(v.memory)}</td>${compact ? "" : `<td class="numeric">${Object.values(v.devices).filter((d) => d.type === "disk" && d.readonly !== "true" && !d.source?.endsWith(".iso") && d.kind !== "cdrom").length} disk(s)</td><td class="mono">${copyAddresses(v.addresses, "Not reported")}</td><td><div class="actions">${smallAction("Open", "open-vm", v.id)}${can() ? smallAction(v.status === "running" ? "Shutdown" : "Start", v.status === "running" ? "shutdown" : "start", v.id, !["stopped", "running"].includes(v.status)) : ""}</div></td>`}</tr>`,
-    ),
+    rows,
   );
 }
 function filteredVMs() {
@@ -467,11 +491,12 @@ function filteredVMs() {
 }
 function vmListContent(vms) {
   // Selections always describe visible rows, including after filters/refreshes.
-  for (const id of selectedVMs) if (!vms.some(v => v.id === id)) selectedVMs.delete(id);
-  return (can() && selectedVMs.size ? `<div class="toolbar bulk-vm-toolbar" aria-label="Selected VM operations"><strong>${selectedVMs.size} selected</strong><select id="bulk-vm-action" aria-label="Bulk VM operation"><option value="">Choose operation…</option><option value="shutdown">Shutdown</option><option value="restart">Restart</option><option value="stop">Force Stop</option><option value="delete">Delete</option></select>${btn("Clear selection", "clear-vm-selection")}</div>` : "") + panel("Virtual machines", vmTable(vms, false, can()));
+  const visibleIds = new Set(visibleVMs(vms).map(v => v.id));
+  for (const id of selectedVMs) if (!visibleIds.has(id)) selectedVMs.delete(id);
+  return (can() && selectedVMs.size ? `<div class="toolbar bulk-vm-toolbar" aria-label="Selected VM operations"><strong>${selectedVMs.size} selected</strong><select id="bulk-vm-action" aria-label="Bulk VM operation"><option value="">Choose operation…</option><option value="shutdown">Shutdown</option><option value="restart">Restart</option><option value="stop">Force Stop</option><option value="delete">Delete</option></select>${btn("Clear selection", "clear-vm-selection")}</div>` : "") + panel("Virtual machines", vmTable(vms, false, can(), true));
 }
 function bulkVMAction(operation) {
-  const vms = filteredVMs().filter(v => selectedVMs.has(v.id));
+  const vms = visibleVMs().filter(v => selectedVMs.has(v.id));
   if (!vms.length) return;
   const labels = {shutdown: "Shutdown", restart: "Restart", stop: "Force Stop", delete: "Delete"};
   const deleting = operation === "delete";
@@ -1240,7 +1265,7 @@ function renderAccount() {
 }
 function syncVMSelection() {
   const all = $("#vm-select-all");
-  if (all) all.indeterminate = selectedVMs.size > 0 && selectedVMs.size < filteredVMs().length;
+  if (all) all.indeterminate = selectedVMs.size > 0 && selectedVMs.size < visibleVMs().length;
 }
 function bindPage() {
   syncVMSelection();
@@ -1891,6 +1916,12 @@ async function action(name, id) {
     case "cdrom":
       editCDROM(v);
       break;
+    case "toggle-vm-project":
+      if (collapsedVMProjects.has(id)) collapsedVMProjects.delete(id);
+      else collapsedVMProjects.add(id);
+      updateVMTable();
+      $$(".vm-project-toggle").find(button => button.dataset.id === id)?.focus();
+      break;
     case "clear-vm-selection":
       selectedVMs.clear();
       updateVMTable();
@@ -2113,7 +2144,7 @@ init();
     updateVMTable();
   }
   if (event.target.id === "vm-select-all") {
-    filteredVMs().forEach(v => {
+    visibleVMs().forEach(v => {
       if (event.target.checked) selectedVMs.add(v.id); else selectedVMs.delete(v.id);
     });
     updateVMTable();

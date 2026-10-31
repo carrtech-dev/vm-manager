@@ -620,6 +620,47 @@ td small {
   max-width: 360px;
   overflow-wrap: anywhere;
 }
+.vm-project-folder td {
+  padding: 0;
+  height: auto;
+  background: var(--bg-surfaceAlt);
+}
+.vm-project-toggle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 11px 14px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.vm-project-toggle:hover {
+  background: var(--bg-rowHover);
+}
+.vm-project-toggle:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+.vm-project-toggle svg {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.vm-project-chevron {
+  width: 12px;
+}
+.vm-project-count {
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-left: 4px;
+}
+.vm-project-member .vm-name-cell {
+  padding-left: 32px;
+}
 .iso-name-cell {
   min-width: 260px;
   overflow-wrap: anywhere;
