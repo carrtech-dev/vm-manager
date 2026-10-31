@@ -9,7 +9,7 @@ const source = readFileSync(new URL("../app/static/app.js", import.meta.url), "u
   .replace(/^import[\s\S]*?from "[^"]+";\n/gm, "")
   .replace("\ninit();\n", "\n");
 
-function setup(role = "operator") {
+function setup(role = "operator", needsRepair = false) {
   core.state.user = { role };
   const nodes = new Map();
   const listeners = new Map();
@@ -23,7 +23,7 @@ function setup(role = "operator") {
     modal(title, content) { html = content; return dialog; },
     api: async path => path.includes("/tasks/")
       ? { status: "completed", message: "Installer CD ready" }
-      : { message: "Agent connected", installer_attached: true },
+      : { message: "Agent connected", installer_attached: true, installer_needs_repair: needsRepair },
     queue: async () => ({ task_id: "task" }),
   });
   runInContext(source, context);
@@ -59,4 +59,12 @@ test("copied installer command is valid shell and avoids shared mount directorie
   assert.equal(shell.status, 0, shell.stderr);
   assert.match(agentInstallCommand, /mktemp -d \/run\/incus-agent/);
   assert.match(agentInstallCommand, /systemctl start incus-agent/);
+});
+
+test("agent check offers CD repair when its hardware ID is incompatible", async () => {
+  const page = setup("operator", true);
+  page.installAgent({ id: "incus:test", name: "test" });
+  await page.nodes.get("#agent-check").onclick();
+  assert.match(page.nodes.get("#agent-prepare-status").textContent, /CD needs repair/);
+  assert.match(page.html, /Prepare optional installer CD/);
 });

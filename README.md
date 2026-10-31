@@ -424,6 +424,13 @@ restart the VM. Guests that rely on the CD need it attached at boot for
 credentials and agent updates; it need not stay mounted inside Linux. CD
 preparation is queued and audited, preserves other devices and installation
 media, and is safe to repeat.
+Use **Prepare optional installer CD** to repair a previously attached installer
+whose device has a different name. The supported CD uses the device name `agent`,
+because Incus's guest startup script expects the disk serial `incus_agent`.
+Preparation replaces only local generated installer CDs and retains profile
+devices, ordinary disks and OS installation media. If another device already
+uses `agent`, preparation stops without changes so that device can be renamed
+deliberately. **Check agent** identifies installer CDs that need this repair.
 This guided installer supports Linux with systemd; libvirt VMs still need their
 QEMU guest agent prepared separately. See the
 [Incus agent installation documentation](https://linuxcontainers.org/incus/docs/main/howto/instances_create/#install-the-incus-agent-into-virtual-machine-instances).
