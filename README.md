@@ -41,6 +41,27 @@ no extra Enter is added. **Stop sending** interrupts a transfer; review any
 partially typed text in the VM before retrying. Reconnection stops the transfer
 and never automatically replays it. Clipboard text stays in the browser and the
 console channel; it is not stored in task history.
+
+For ordinary Linux shell work on an Incus VM with a connected guest agent, choose
+**Open text terminal** on the VM's Console tab or **Text terminal** in the SPICE
+toolbar. This opens a separate root shell with normal text paste, selectable
+output and 5,000 lines of browser scrollback. **Copy output** copies the selection
+or retained output; **Download output** saves it as text. Cmd+V / Ctrl+Shift+V
+pastes directly; multiline text opens a review dialog because line breaks can
+run commands. No additional Enter is added. The **Paste** button also supports
+manual paste when browser clipboard permission is unavailable. Unicode and
+punctuation do not depend on guest keyboard layout.
+
+Terminal history stays in the open browser tab, including after a disconnect.
+Reloading/closing the tab discards that browser buffer. Reconnect starts a new
+shell and never replays input. Closing the connection terminates that terminal's
+guest exec session. Shells can keep their normal history files inside the guest;
+VM Manager records the terminal connection in audit history, not its commands
+or output. Terminal access requires an operator/administrator, same-origin
+session and CSRF token, with ongoing role/session checks. It currently supports
+running Incus VMs only and requires the Incus agent. The graphical SPICE/VNC
+console remains available for installers, boot screens and guests without an
+agent; it shows a framebuffer and has no browser text scrollback.
 5. Eject its ISO through **Hardware**. For a running VM this is saved as a pending change; use **Restart** in VM Manager to apply it and boot from disk.
 6. CPU, memory, disks, network adapters, CD-ROMs, Secure Boot and autostart can be changed through the VM workspace. While running, hardware changes are saved persistently and shown as **Current → After restart** in the Hardware tab. Use **Restart** in VM Manager to shut down gracefully, apply the pending changes and start again, or shut down and use **Start**. Rebooting only inside the guest does not apply these pending changes. Stopped VMs apply edits immediately. Pending changes can be discarded before application. A failed change leaves the VM stopped with remaining changes retained; inspect the task log before retrying. Disk expansion does not expand the guest filesystem; complete that inside the guest.
 

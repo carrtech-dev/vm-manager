@@ -45,6 +45,7 @@ from . import organization
 from . import storage
 from . import external_storage
 from . import guest_agent
+from . import guest_terminal
 from . import backups
 from .power import PowerInterrupted, PowerRequests
 from .protection import ProtectionPower
@@ -2074,6 +2075,31 @@ console_groups = {}
 console_lock = asyncio.Lock()
 
 
+@app.websocket('/api/terminal/{vm_id}')
+async def terminal(ws: WebSocket, vm_id: str):
+    try:
+        def authorize():
+            current = session(ws)
+            if 'operate' not in ROLES.get(current['role'], set()):
+                raise HTTPException(403, 'Terminal access requires an operator')
+            return current
+
+        user = authorize()
+        expected = ('https' if ws.url.scheme == 'wss' else 'http') + '://' + ws.headers.get('host', '')
+        if (ws.headers.get('origin', '') != expected or
+                not secrets.compare_digest(ws.query_params.get('csrf', ''), user['csrf'])):
+            await ws.close(code=4403)
+            return
+        provider, vm_name = vm_ref(vm_id)
+        if provider != 'incus':
+            await ws.close(code=4400, reason='Text terminals currently require Incus')
+            return
+        await guest_terminal.bridge(ws, incus, vm_name, authorize,
+            lambda: store.audit(user['username'], 'terminal.open', vm_id), CONSOLE_AUTH_INTERVAL)
+    except (HTTPException, HypervisorError):
+        await ws.close(code=4403)
+
+
 async def incus_console_group(user, vm_name):
     key = (user["token"], vm_name)
     async with console_lock:
@@ -2395,6 +2421,11 @@ def index():
 @app.get("/console")
 def console_page(user=Depends(require("operate"))):
     return frontend_page("console.html")
+
+
+@app.get('/terminal')
+def terminal_page(user=Depends(require('operate'))):
+    return frontend_page('terminal.html')
 
 
 def frontend_page(filename):

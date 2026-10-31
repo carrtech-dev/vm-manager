@@ -1,0 +1,4 @@
+#terminal-screen { flex: 1; min-height: 0; padding: 10px; overflow: hidden; background: #0b1019; }
+#terminal-screen .xterm { height: 100%; }
+.console-toolbar a { color: #a9c8ff; cursor: pointer; white-space: nowrap; }
+#terminal-feedback { margin: 0; padding: 4px 12px; min-height: 20px; }

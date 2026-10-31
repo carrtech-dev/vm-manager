@@ -91,3 +91,5 @@
   border-color: transparent;
   background: transparent;
 }
+
+.console-toolbar a { color: #a9c8ff; white-space: nowrap; }

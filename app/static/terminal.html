@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>VM Terminal · CarrTech</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/static/vendor/xterm/xterm.css" />
+    <link rel="stylesheet" href="/static/console.css" />
+    <link rel="stylesheet" href="/static/terminal.css" />
+    <script type="module" src="/static/terminal.js"></script>
+  </head>
+  <body class="console-page">
+    <header class="console-toolbar">
+      <strong id="terminal-title">VM terminal</strong>
+      <span id="console-status" role="status" aria-live="polite">Connecting…</span>
+      <button id="reconnect" type="button">Reconnect</button>
+      <button id="terminal-paste" type="button">Paste</button>
+      <button id="terminal-copy" type="button">Copy output</button>
+      <button id="terminal-download" type="button">Download output</button>
+      <a id="graphical-console">Graphical console ↗</a>
+    </header>
+    <main id="terminal-screen" aria-label="Interactive VM terminal"></main>
+    <p id="terminal-feedback" role="status" aria-live="polite"></p>
+    <dialog id="paste-dialog" aria-labelledby="paste-title">
+      <h2 id="paste-title">Paste into terminal</h2>
+      <p>Review the text before sending. No extra Enter key is added.</p>
+      <button id="paste-read" type="button">Read local clipboard</button>
+      <label for="paste-text">Text to paste (up to 32 KiB)</label>
+      <textarea id="paste-text" rows="8" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+      <label id="paste-lines" hidden><input id="paste-confirm" type="checkbox" /> I understand that line breaks may run commands.</label>
+      <p id="paste-status" role="status" aria-live="polite"></p>
+      <div class="paste-actions"><button id="paste-close" type="button">Close</button><button id="paste-send" type="button">Paste into terminal</button></div>
+    </dialog>
+  </body>
+</html>

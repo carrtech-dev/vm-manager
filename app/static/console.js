@@ -4,6 +4,11 @@ import { bindConsolePaste } from "./console-paste.js";
 bindCopyButtons();
 const vm = new URLSearchParams(location.search).get("vm");
 const status = document.getElementById("console-status");
+if (vm?.startsWith("incus:")) {
+  const link = document.getElementById("text-terminal");
+  link.href = "/terminal?vm=" + encodeURIComponent(vm);
+  link.hidden = false;
+}
 let connection, retryTimer, healthTimer;
 let ready = false, spice;
 bindConsolePaste(() => ({ connection, ready, spice }));

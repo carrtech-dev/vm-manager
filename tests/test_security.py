@@ -395,6 +395,140 @@ def test_console_requires_auth_and_origin(client):
             pass
 
 
+@pytest.mark.parametrize('role,origin,csrf,provider', [
+    (None, 'http://testserver', True, 'incus'),
+    ('viewer', 'http://testserver', True, 'incus'),
+    ('operator', 'https://elsewhere.invalid', True, 'incus'),
+    ('operator', 'http://testserver', False, 'incus'),
+    ('operator', 'http://testserver', True, 'libvirt'),
+])
+def test_terminal_rejects_unauthorized_connections_before_exec(client, monkeypatch, role, origin, csrf, provider):
+    headers = login(client, role) if role else {}
+    monkeypatch.setattr(incus, 'request', lambda *args, **kwargs: pytest.fail('Unauthorized exec'))
+    token = headers.get('X-CSRF-Token', '') if csrf else 'wrong'
+    with pytest.raises(Exception):
+        with client.websocket_connect('/api/terminal/' + provider + ':demo?csrf=' + token,
+                                      headers={'Origin': origin}):
+            pass
+
+
+def test_terminal_streams_exact_input_resizes_revokes_and_closes_channels(client, monkeypatch):
+    import asyncio
+    import json
+    from app import guest_terminal
+
+    headers = login(client, 'operator')
+    calls = []
+
+    class Channel:
+        def __init__(self, control=False):
+            self.control, self.sent, self.closed = control, [], False
+            self.queue = asyncio.Queue()
+
+        async def send(self, data):
+            self.sent.append(data)
+            if not self.control:
+                self.queue.put_nowait(b'echo:' + data)
+
+        async def recv(self):
+            return await self.queue.get()
+
+        async def close(self):
+            self.closed = True
+
+    control, data = Channel(True), Channel()
+
+    async def connect(path, *, uri, **kwargs):
+        return control if 'secret=control' in uri else data
+
+    def request(method, path, payload=None, wait=True):
+        calls.append((method, path, payload))
+        return {'operation': '/1.0/operations/terminal-test', 'metadata': {'metadata': {
+            'fds': {'control': 'control', '0': 'data'}}}}
+
+    monkeypatch.setattr(incus, 'vm', lambda _: {'type': 'virtual-machine', 'status': 'Running'})
+    monkeypatch.setattr(incus, 'request', request)
+    monkeypatch.setattr(guest_terminal, 'unix_connect', connect)
+    monkeypatch.setattr('app.main.CONSOLE_AUTH_INTERVAL', .02)
+    with client.websocket_connect('/api/terminal/incus:demo?csrf=' + headers['X-CSRF-Token'],
+                                  headers={'Origin': 'http://testserver'}) as ws:
+        assert ws.receive_json() == {'type': 'ready'}
+        ws.send_json({'type': 'resize', 'cols': 160, 'rows': 45})
+        value = 'a "quoted" command | £ 🙂\nsecond line'
+        ws.send_json({'type': 'input', 'data': value})
+        assert ws.receive_bytes() == b'echo:' + value.encode()
+        ws.send_json({'type': 'ack'})
+        ws.send_json({'type': 'input', 'data': 'after parser acknowledgement'})
+        assert ws.receive_bytes() == b'echo:after parser acknowledgement'
+        assert json.loads(control.sent[0]) == {'command': 'window-resize', 'args': {'width': '160', 'height': '45'}}
+        assert calls[0][2]['interactive'] is True
+        assert calls[0][2]['record-output'] is False
+        assert value not in str(calls)
+        with store.db() as db:
+            db.execute("UPDATE users SET enabled=0 WHERE username='operator'")
+        assert ws.receive_json()['type'] == 'error'
+    assert control.closed and data.closed
+    assert json.loads(control.sent[-1]) == {'command': 'signal', 'signal': 15}
+    with store.db() as db:
+        row = db.execute("SELECT action,detail FROM audit WHERE action='terminal.open' ORDER BY id DESC LIMIT 1").fetchone()
+    assert row['action'] == 'terminal.open' and value not in row['detail']
+
+
+def test_terminal_protocol_rejects_unbounded_input_and_invalid_resize():
+    import json
+    from app.guest_terminal import terminal_message
+
+    for message in [[], {'type': 'resize', 'cols': 0, 'rows': 40},
+                    {'type': 'resize', 'cols': True, 'rows': 40},
+                    {'type': 'resize', 'cols': 80, 'rows': 201},
+                    {'type': 'input', 'data': 'x' * 65537},
+                    {'type': 'input', 'data': 1}, {'type': 'exec', 'command': 'arbitrary'}]:
+        with pytest.raises(ValueError):
+            terminal_message(json.dumps(message))
+    assert terminal_message(json.dumps({'type': 'input', 'data': '\x03'})) == ('input', b'\x03')
+
+
+def test_terminal_setup_failure_cleans_up_operation_and_explains_agent_requirement(client, monkeypatch):
+    from app import guest_terminal
+
+    headers = login(client, 'operator')
+    calls = []
+
+    def request(method, path, payload=None, wait=True):
+        calls.append((method, path))
+        return {'operation': '/1.0/operations/failed-terminal', 'metadata': {'metadata': {
+            'fds': {'control': 'control', '0': 'data'}}}}
+
+    async def fail(*args, **kwargs):
+        raise OSError('Unavailable private host path')
+
+    monkeypatch.setattr(incus, 'vm', lambda _: {'type': 'virtual-machine', 'status': 'Running'})
+    monkeypatch.setattr(incus, 'request', request)
+    monkeypatch.setattr(guest_terminal, 'unix_connect', fail)
+    with client.websocket_connect('/api/terminal/incus:demo?csrf=' + headers['X-CSRF-Token'],
+                                  headers={'Origin': 'http://testserver'}) as ws:
+        error = ws.receive_json()
+        assert error['type'] == 'error' and 'agent' in error['message']
+        assert 'private' not in error['message']
+        with pytest.raises(Exception):
+            ws.receive_bytes()
+    assert ('DELETE', '/1.0/operations/failed-terminal') in calls
+
+
+def test_terminal_page_permissions_and_stopped_vm(client, monkeypatch):
+    assert client.get('/terminal').status_code == 401
+    login(client, 'viewer')
+    assert client.get('/terminal').status_code == 403
+    headers = login(client, 'operator')
+    page = client.get('/terminal')
+    assert page.status_code == 200 and 'Copy output' in page.text
+    monkeypatch.setattr(incus, 'vm', lambda _: {'type': 'virtual-machine', 'status': 'Stopped'})
+    monkeypatch.setattr(incus, 'request', lambda *args: pytest.fail('Stopped VM exec'))
+    with client.websocket_connect('/api/terminal/incus:demo?csrf=' + headers['X-CSRF-Token'],
+                                  headers={'Origin': 'http://testserver'}) as ws:
+        assert ws.receive_json()['type'] == 'error'
+
+
 def test_login_failures_are_rate_limited_and_audited(client):
     for _ in range(12):
         assert (

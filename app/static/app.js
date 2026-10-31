@@ -592,7 +592,7 @@ function renderVM() {
     return (
       html +
       (running
-        ? `<div class="console-intro"><span>Graphical console · ${v.provider === "incus" ? "SPICE" : "VNC"} · Click inside to capture keyboard input</span><a class="button small" href="/console?vm=${encodeURIComponent(v.id)}" target="_blank" rel="noopener">Open in new tab ↗</a></div><iframe class="console-frame" title="${esc(v.name)} console" src="/console?vm=${encodeURIComponent(v.id)}" allow="fullscreen"></iframe>`
+        ? `<div class="console-intro">${v.provider === "incus" ? `<a class="button small" href="/terminal?vm=${encodeURIComponent(v.id)}" target="_blank" rel="noopener">Open text terminal ↗</a>` : ""}<span>Graphical console · ${v.provider === "incus" ? "SPICE" : "VNC"} · Click inside to capture keyboard input</span><a class="button small" href="/console?vm=${encodeURIComponent(v.id)}" target="_blank" rel="noopener">Open in new tab ↗</a></div><iframe class="console-frame" title="${esc(v.name)} console" src="/console?vm=${encodeURIComponent(v.id)}" allow="fullscreen"></iframe>`
         : empty(
             "Start the VM to connect",
             "The graphical console is available while the VM is running.",
