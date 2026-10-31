@@ -11,6 +11,8 @@ import {
   duration,
   can,
   api,
+  apiURL,
+  hostURL,
   toast,
   modal,
   field,
@@ -24,7 +26,9 @@ import {
 import { watchTaskDetail } from "./task-detail.js";
 import { renderEmbeddedConsole, switchEmbeddedConsole, toggleConsoleFullscreen, bindEmbeddedConsoleEvents } from "./console-view.js";
 import { monitoringPanel, refreshMonitoring } from "./monitoring.js";
+import { hostPicker, renderCluster, clusterAction, switchHost } from "./cluster-ui.js";
 const pageNames = {
+  cluster: "Cluster",
   overview: "Overview",
   vms: "Virtual machines",
   networks: "Networks",
@@ -41,6 +45,7 @@ const pageNames = {
   vm: "Virtual machine",
 };
 const navItems = [
+  ["cluster", "▦", "Cluster"],
   ["overview", "▦", "Overview"],
   ["vms", "▣", "Virtual machines"],
   ["networks", "◇", "Networks"],
@@ -275,21 +280,21 @@ function organizeResource(kind, resource) {
     },
   );
 }
-function navigate() {
+function navigate(repaint = true) {
   const parts = location.hash.slice(1).split("/");
   state.page = parts[0] || "overview";
   if (state.page === "vm") {
     state.vm = decodeURIComponent(parts[1] || "");
     state.tab = parts[2] || "summary";
   }
-  if (state.user) {
+  if (state.user && repaint) {
     render();
     refreshVMMetrics();
   }
 }
 function renderLogin(message = "") {
   $("#app").innerHTML =
-    `<main class="login-screen"><form class="login-card" id="login-form"><div class="login-brand">▣ CARRTECH</div><span class="product">VM MANAGER</span><h1>Sign in to your infrastructure</h1><p class="host-address">${copyValue("ctlnxdbn001")} · ${copyAddresses("192.168.8.235")}</p>${field("Username", "username", "", { placeholder: "Your username" })}${field("Password", "password", "", { type: "password", placeholder: "Your password" })}<div class="form-error" role="alert" ${message ? "" : "hidden"}>${esc(message)}</div><button class="button primary" type="submit">Sign in</button><p class="login-foot">Local accounts · Session protected</p></form></main>`;
+    `<main class="login-screen"><form class="login-card" id="login-form"><div class="login-brand">▣ CARRTECH</div><span class="product">VM MANAGER</span><h1>Sign in to your infrastructure</h1><p class="host-address">VM Manager · Host administration</p>${field("Username", "username", "", { placeholder: "Your username" })}${field("Password", "password", "", { type: "password", placeholder: "Your password" })}<div class="form-error" role="alert" ${message ? "" : "hidden"}>${esc(message)}</div><button class="button primary" type="submit">Sign in</button><p class="login-foot">Local accounts · Session protected</p></form></main>`;
   $("input[name=username]").autocomplete = "username";
   $("input[name=password]").autocomplete = "current-password";
   $("#login-form").onsubmit = async (event) => {
@@ -342,13 +347,14 @@ function render() {
       )
       .join(
         "",
-      )}</nav><div class="nav-heading">RESOURCE TREE</div><div class="resource-tree" id="resource-tree">${renderTree()}</div><div class="host-online"><strong>● HOST CONNECTED</strong><small>${copyAddresses(inv.host.address)}</small></div></aside><section class="workspace"><header class="topbar"><button class="icon-button mobile-menu" data-action="toggle-sidebar" aria-label="Toggle navigation">☰</button><div class="breadcrumb"><a href="#overview">Datacenter</a><span>/</span><span>${copyValue(inv.host.name)}</span><span>/</span><strong>${state.page === "vm" && vm ? copyValue(vm.name) : esc(pageNames[state.page] || "Overview")}</strong></div>${can() ? btn("+ Create VM", "create-vm", "", "primary") : ""}<button class="icon-button" data-action="help" aria-label="Help">?</button><button class="account-button" data-action="account" aria-label="Your account"><span class="avatar">${esc(state.user.username.slice(0, 2).toUpperCase())}</span><span class="account-name">${esc(state.user.username)}</span><span class="role-label">${esc(state.user.role)}</span></button></header><main class="content" id="main-content">${inv.warnings.length ? `<div class="error-banner"><strong>Some host information is unavailable.</strong><br>${inv.warnings.map(esc).join("<br>")}</div>` : ""}${renderOrganizationFilters()}${renderPage()}</main><section class="task-dock" aria-label="Recent tasks" id="task-dock">${renderDock()}</section></section></div>`;
+      )}</nav><div class="nav-heading">RESOURCE TREE</div><div class="resource-tree" id="resource-tree">${renderTree()}</div><div class="host-online"><strong>● HOST CONNECTED</strong><small>${copyAddresses(inv.host.address)}</small></div></aside><section class="workspace"><header class="topbar"><button class="icon-button mobile-menu" data-action="toggle-sidebar" aria-label="Toggle navigation">☰</button><div class="breadcrumb"><a href="#overview">Datacenter</a><span>/</span><span>${copyValue(inv.host.name)}</span><span>/</span><strong>${state.page === "vm" && vm ? copyValue(vm.name) : esc(pageNames[state.page] || "Overview")}</strong></div>${hostPicker()}${can() && !["cluster", "users", "account"].includes(state.page) ? btn("+ Create VM", "create-vm", "", "primary") : ""}<button class="icon-button" data-action="help" aria-label="Help">?</button><button class="account-button" data-action="account" aria-label="Your account"><span class="avatar">${esc(state.user.username.slice(0, 2).toUpperCase())}</span><span class="account-name">${esc(state.user.username)}</span><span class="role-label">${esc(state.user.role)}</span></button></header><main class="content" id="main-content">${inv.warnings.length ? `<div class="error-banner"><strong>Some host information is unavailable.</strong><br>${inv.warnings.map(esc).join("<br>")}</div>` : ""}${["cluster", "users", "account"].includes(state.page) ? "" : renderOrganizationFilters()}${renderPage()}</main><section class="task-dock" aria-label="Recent tasks" id="task-dock">${renderDock()}</section></section></div>`;
   bindPage();
   refreshMonitoring();
   if ($("#resource-tree")) $("#resource-tree").scrollTop = treeScroll;
   if ($("#main-content")) $("#main-content").scrollTop = contentScroll;
 }
 function renderTree() {
+  if (["cluster", "users", "account"].includes(state.page)) return '<p class="muted">Choose a host or VM from Cluster to browse its resources.</p>';
   return `<div class="tree-host"><button type="button" class="tree-host-toggle" data-action="toggle-host-tree" aria-expanded="${!hostTreeCollapsed}" aria-controls="host-tree-resources" aria-label="${hostTreeCollapsed ? "Expand" : "Collapse"} ${esc(state.inventory.host.name)} resources"><span aria-hidden="true">${hostTreeCollapsed ? "▸" : "▾"}</span></button>${copyValue(state.inventory.host.name, "hostname", `<a href="#overview">${esc(state.inventory.host.name)}</a>`)}</div><div id="host-tree-resources"${hostTreeCollapsed ? " hidden" : ""}>${[
     "incus",
     "libvirt",
@@ -367,6 +373,8 @@ function renderTree() {
 }
 function renderPage() {
   switch (state.page) {
+    case "cluster":
+      return renderCluster();
     case "vms":
       return renderVMs();
     case "vm":
@@ -789,7 +797,7 @@ const agentInstallCommand = `sudo sh -c 'set -eu; ${agentSELinuxSetup}; if [ ! -
 
 function installAgent(v) {
   const dialog = modal("Install Incus agent · " + v.name,
-    `<p>First-time installation needs a command inside the VM. Linux with systemd is supported by this installer. The command first uses Incus’s built-in shared filesystem (9p), which requires no CD.</p><ol><li><p>Optional CD fallback: try the command below first. Prepare the installer CD if the shared filesystem is unavailable, then run the command again. Preparing also repairs older installer CDs with an incompatible device ID. Guests using the CD need it attached at boot for agent files and connection credentials; it does not need to stay mounted inside Linux.</p><button type="button" class="button secondary" id="agent-prepare">Prepare optional installer CD</button><p id="agent-prepare-status" role="status"></p></li><li><p>Start the VM if needed, open its console and log in. Run this command in a Linux terminal with sudo access, or omit sudo in a root shell. On SELinux guests it configures the agent permissions and installs SELinux management tools if needed, keeping SELinux enabled. It can also repair an already installed agent without remounting its CD.</p><div class="hint" style="overflow-wrap:anywhere">${copyValue(agentInstallCommand, "installation command", `<code style="white-space:pre-wrap">${esc(agentInstallCommand)}</code>`)}</div><p><a class="button secondary" href="/console?vm=${encodeURIComponent(v.id)}" target="_blank" rel="noopener">Open VM console ↗</a></p><p class="muted">If the CD is not visible after attaching it, restart the VM and try again. This installs the guest agent; automatic storage mounts also need /usr/bin/python3.</p></li><li><p>After installation, verify the guest connection and mounting prerequisites.</p><button type="button" class="button secondary" id="agent-check">Check agent</button><p id="agent-status" role="status" aria-live="polite"></p></li></ol>`,
+    `<p>First-time installation needs a command inside the VM. Linux with systemd is supported by this installer. The command first uses Incus’s built-in shared filesystem (9p), which requires no CD.</p><ol><li><p>Optional CD fallback: try the command below first. Prepare the installer CD if the shared filesystem is unavailable, then run the command again. Preparing also repairs older installer CDs with an incompatible device ID. Guests using the CD need it attached at boot for agent files and connection credentials; it does not need to stay mounted inside Linux.</p><button type="button" class="button secondary" id="agent-prepare">Prepare optional installer CD</button><p id="agent-prepare-status" role="status"></p></li><li><p>Start the VM if needed, open its console and log in. Run this command in a Linux terminal with sudo access, or omit sudo in a root shell. On SELinux guests it configures the agent permissions and installs SELinux management tools if needed, keeping SELinux enabled. It can also repair an already installed agent without remounting its CD.</p><div class="hint" style="overflow-wrap:anywhere">${copyValue(agentInstallCommand, "installation command", `<code style="white-space:pre-wrap">${esc(agentInstallCommand)}</code>`)}</div><p><a class="button secondary" href="${esc(hostURL("/console?vm=" + encodeURIComponent(v.id)))}" target="_blank" rel="noopener">Open VM console ↗</a></p><p class="muted">If the CD is not visible after attaching it, restart the VM and try again. This installs the guest agent; automatic storage mounts also need /usr/bin/python3.</p></li><li><p>After installation, verify the guest connection and mounting prerequisites.</p><button type="button" class="button secondary" id="agent-check">Check agent</button><p id="agent-status" role="status" aria-live="polite"></p></li></ol>`,
     async () => {}, { wide: true, submit: "Done" });
   $("footer .close-modal", dialog).textContent = "Close";
   let disposed = false, timer;
@@ -1668,7 +1676,7 @@ async function uploadFiles(files) {
         $("#upload-label").textContent = "Uploading " + file.name;
       await new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open("POST", "/api/isos");
+        xhr.open("POST", apiURL("/isos"));
         xhr.setRequestHeader("X-CSRF-Token", state.user.csrf);
         xhr.upload.onprogress = (e) => {
           if (e.lengthComputable) {
@@ -1710,8 +1718,16 @@ async function uploadFiles(files) {
 async function refresh(force = false) {
   if (busy || !state.user) return;
   busy = true;
+  const page = state.page;
   try {
-    state.inventory = await api("/inventory");
+    state.clusterHosts = await api("/cluster/hosts");
+    const inventory = await api("/inventory", "GET", null, {local: ["cluster", "users", "account"].includes(page)});
+    if (page !== state.page) return;
+    state.inventory = inventory;
+    if (state.page === "cluster") {
+      state.clusterInventory = await api("/cluster/inventory");
+      if (can("admin")) state.clusterKeys = await api("/cluster/keys");
+    }
     normalizeOrganizationFilters();
     if (state.page === "vm" && state.tab === "snapshots") await refreshSnapshots(state.vm, false);
     if (state.page === "vm" && state.tab === "summary") refreshVMMetrics();
@@ -1733,9 +1749,13 @@ async function refresh(force = false) {
     )
       render();
   } catch (e) {
-    if (state.user) toast(e.message, "error");
+    if (state.user) {
+      toast(e.message, "error");
+      if (!state.inventory) $("#app").innerHTML = `<div class="initial-loading">${esc(e.message)} <a href="/#cluster">Open cluster</a></div>`;
+    }
   } finally {
     busy = false;
+    if (page !== state.page) refresh(true);
   }
 }
 async function refreshTasks() {
@@ -1770,6 +1790,7 @@ async function refreshTasks() {
   }
 }
 async function action(name, id) {
+  if (name.startsWith("cluster-")) return clusterAction(name, id, refresh);
   const v = currentVM(id.split("|")[0]);
   switch (name) {
     case "install-agent": installAgent(v); break;
@@ -2153,8 +2174,8 @@ document.addEventListener("click", (event) => {
   );
 });
 window.addEventListener("hashchange", async () => {
-  navigate();
-  if (["users", "audit"].includes(state.page)) await refresh(true);
+  navigate(false);
+  await refresh(true);
 });
 window.addEventListener("session-expired", () => {
   state.user = null;
@@ -2168,7 +2189,7 @@ async function init() {
   bindEmbeddedConsoleEvents();
   try {
     state.user = await api("/me");
-    navigate();
+    navigate(false);
     await refresh(true);
     await refreshTasks();
   } catch {
@@ -2187,6 +2208,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && st
 init();
 
  document.addEventListener("change", event => {
+  if (event.target.id === "cluster-host") switchHost(event.target.value);
   if (event.target.matches(".vm-select")) {
     if (event.target.checked) selectedVMs.add(event.target.value);
     else selectedVMs.delete(event.target.value);

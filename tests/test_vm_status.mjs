@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 import * as core from "../app/static/core.js";
 import { renderEmbeddedConsole } from "../app/static/console-view.js";
+import { hostPicker } from "../app/static/cluster-ui.js";
 
 // Run the actual page renderer and refresh path without browser startup/timers.
 const source = readFileSync(new URL("../app/static/app.js", import.meta.url), "utf8")
@@ -22,10 +23,11 @@ function consolePage(provider = "incus") {
   const modal = { open: false };
   const document = { activeElement: { tagName: "IFRAME" }, addEventListener() {} };
   const context = createContext({
-    ...core, renderEmbeddedConsole, document, window: { addEventListener() {} }, setInterval() {},
+    ...core, renderEmbeddedConsole, hostPicker, document, window: { addEventListener() {} }, setInterval() {},
     bindCopyButtons() {}, refreshMonitoring() {},
     $: selector => ({ "#app": app, "#modal": modal })[selector] || null,
     api: async path => {
+      if (path === '/cluster/hosts') return { local: { name: 'host' }, hosts: [] };
       assert.equal(path, "/inventory");
       return structuredClone(nextInventory);
     },

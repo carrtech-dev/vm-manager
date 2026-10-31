@@ -49,6 +49,7 @@ from . import guest_agent
 from . import guest_terminal
 from . import backups
 from . import templates
+from . import cluster as federation
 from .power import PowerInterrupted, PowerRequests
 from .protection import ProtectionPower
 from .task_output import Recorder, capture, emit
@@ -61,6 +62,7 @@ ISOS = DATA / "isos"
 ISOS.mkdir(exist_ok=True)
 store = Store(DATA)
 store.bootstrap(DATA)
+cluster = federation.Cluster(store)
 backups.initialize(store)
 incus, libvirt = Incus(), Libvirt()
 history = monitoring.History(store)
@@ -196,6 +198,9 @@ def task(user, action, resource, fn, resources=None):
 
 
 def session(request):
+    peer = cluster.peer_user(request)
+    if peer:
+        return peer
     raw = request.cookies.get("vmm_session", "")
     with store.db() as db:
         row = db.execute(
@@ -212,7 +217,7 @@ def require(permission="read"):
         user = session(request)
         if permission not in ROLES.get(user["role"], set()):
             raise HTTPException(403, "Your role does not permit this action")
-        if request.method not in ("GET", "HEAD", "OPTIONS"):
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not user.get('peer'):
             if not secrets.compare_digest(
                 request.headers.get("X-CSRF-Token", ""), user["csrf"]
             ):
@@ -243,14 +248,17 @@ async def security_headers(request: Request, call_next):
     if request.url.path.startswith("/api/") and request.url.path != "/api/login":
         try:
             user = session(request)
-            if request.method not in ("GET", "HEAD", "OPTIONS"):
+            if request.method not in ("GET", "HEAD", "OPTIONS") and not user.get('peer'):
                 if not secrets.compare_digest(
                     request.headers.get("X-CSRF-Token", ""), user["csrf"]
                 ):
                     raise HTTPException(
                         403, "Session validation failed; refresh and try again"
                     )
-                if request.url.path == "/api/isos" and "operate" not in ROLES.get(
+            if request.method not in ("GET", "HEAD", "OPTIONS"):
+                upload = request.url.path == '/api/isos' or (
+                    request.url.path.startswith('/api/cluster/hosts/') and request.url.path.endswith('/proxy/isos'))
+                if upload and "operate" not in ROLES.get(
                     user["role"], set()
                 ):
                     raise HTTPException(403, "Your role does not permit ISO uploads")
@@ -2592,5 +2600,7 @@ def frontend_page(filename):
 
 
 from .limits import BodyLimit
+
+federation.install(app, cluster, session, require, get_inventory)
 
 app.add_middleware(BodyLimit)

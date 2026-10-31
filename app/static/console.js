@@ -1,5 +1,5 @@
 import RFB from "/static/vendor/novnc/core/rfb.js";
-import { copyValue, bindCopyButtons } from "./core.js";
+import { copyValue, bindCopyButtons, apiURL, hostURL } from "./core.js";
 import { bindConsolePaste } from "./console-paste.js";
 import { bindConsoleNavigation } from "./console-navigation.js";
 bindCopyButtons();
@@ -8,7 +8,7 @@ const status = document.getElementById("console-status");
 bindConsoleNavigation({ linkId: "text-terminal", mode: "text" });
 if (vm?.startsWith("incus:")) {
   const link = document.getElementById("text-terminal");
-  link.href = "/terminal?vm=" + encodeURIComponent(vm);
+  link.href = hostURL("/terminal?vm=" + encodeURIComponent(vm));
   link.hidden = false;
 }
 let connection, retryTimer, healthTimer;
@@ -62,7 +62,7 @@ async function connect() {
   }
   const user = await response.json();
   if (attempt !== generation || leaving) return;
-  const uri = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/console/${encodeURIComponent(vm)}?csrf=${encodeURIComponent(user.csrf)}`;
+  const uri = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${apiURL('/console/' + encodeURIComponent(vm))}?csrf=${encodeURIComponent(user.csrf)}`;
   document.getElementById("spice-screen").replaceChildren();
   message("Connecting to display…");
   if (vm.startsWith("incus:")) {

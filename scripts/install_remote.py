@@ -2,6 +2,7 @@
 
 import datetime
 import grp
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -15,7 +16,10 @@ import tarfile
 import time
 import urllib.request
 
-revision, archive = sys.argv[1:]
+revision, archive, address = sys.argv[1:]
+ipaddress.ip_address(address)
+authority = '[' + address + ']' if ':' in address else address
+health_url = 'https://' + authority + ':8443/health'
 base = Path("/opt/carrtech/vm-manager")
 release = base / "releases" / revision
 state = Path("/var/lib/vm-manager")
@@ -105,9 +109,9 @@ if not (certs / "server.key").exists():
             "-out",
             str(certs / "server.crt"),
             "-subj",
-            "/CN=192.168.8.235",
+            "/CN=" + address,
             "-addext",
-            "subjectAltName=IP:192.168.8.235,DNS:ctlnxdbn001,DNS:localhost",
+            "subjectAltName=IP:" + address + ",DNS:localhost",
         ],
         check=True,
         stdout=subprocess.DEVNULL,
@@ -144,7 +148,7 @@ if (state / "manager.sqlite3").exists():
         external_backup = backup.with_suffix(".external.json")
         shutil.copyfile(storage_state / "external.json", external_backup)
         external_backup.chmod(0o600)
-unit = (release / "scripts" / "vm-manager.service").read_text()
+unit = (release / "scripts" / "vm-manager.service").read_text().replace('192.168.8.235', address)
 Path("/etc/systemd/system/vm-manager.service").write_text(unit)
 Path("/etc/systemd/system/vm-manager-storage.service").write_text(
     (release / "scripts" / "vm-manager-storage.service").read_text())
@@ -160,7 +164,7 @@ healthy = False
 for attempt in range(20):
     try:
         with urllib.request.urlopen(
-            "https://192.168.8.235:8443/health", context=context, timeout=3
+            health_url, context=context, timeout=3
         ) as response:
             health = json.load(response)
             healthy = (

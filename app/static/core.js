@@ -15,6 +15,15 @@ export const state = {
   samples: [],
   taskFilter: "all",
 };
+export const selectedHost = () => new URLSearchParams(globalThis.location?.search || '').get('host') || '';
+export const apiURL = (path, host = selectedHost()) => {
+  const local = /^\/(me|login|logout|password|users|cluster)(\/|\?|$)/.test(path);
+  return '/api' + (host && !local ? '/cluster/hosts/' + encodeURIComponent(host) + '/proxy' : '') + path;
+};
+export const hostURL = (url) => {
+  const host = selectedHost();
+  return url + (host ? (url.includes('?') ? '&' : '?') + 'host=' + encodeURIComponent(host) : '');
+};
 export const matchesOrganization = (resource) =>
   (state.project === "all" ||
     (state.project === "unassigned"
@@ -133,13 +142,14 @@ export const can = (permission) =>
     ? state.user?.role === "administrator"
     : ["administrator", "operator"].includes(state.user?.role);
 export async function api(path, method = "GET", body = null, options = {}) {
+  const { local = false, ...fetchOptions } = options;
   const headers = {};
   if (state.user?.csrf) headers["X-CSRF-Token"] = state.user.csrf;
   if (body !== null) {
     headers["Content-Type"] = "application/json";
     body = JSON.stringify(body);
   }
-  const response = await fetch("/api" + path, { ...options, method, headers, body });
+  const response = await fetch(apiURL(path, local ? '' : selectedHost()), { ...fetchOptions, method, headers, body });
   let data;
   try {
     data = await response.json();
@@ -147,7 +157,7 @@ export async function api(path, method = "GET", body = null, options = {}) {
     throw new Error("The server returned an unreadable response");
   }
   if (!response.ok) {
-    if (response.status === 401 && path !== "/login")
+    if (response.status === 401 && path !== "/login" && !(response.url || "").includes('/proxy/'))
       window.dispatchEvent(new CustomEvent("session-expired"));
     const message = Array.isArray(data.detail)
       ? data.detail

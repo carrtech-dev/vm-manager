@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
+import { apiURL, hostURL } from "../app/static/core.js";
 
 const source = readFileSync(new URL("../app/static/terminal.js", import.meta.url), "utf8").replace(/^import .*;\n/gm, "");
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -35,7 +36,7 @@ async function browser() {
   }
   let authRequests = 0;
   runInNewContext(source, {
-    Terminal, FitAddon: class {}, WebSocket, URLSearchParams, Uint8Array, ArrayBuffer,
+    Terminal, FitAddon: class {}, WebSocket, URLSearchParams, Uint8Array, ArrayBuffer, apiURL, hostURL,
     location: {search: "?vm=incus:logout-test", protocol: "https:", host: "manager.test"},
     document: {getElementById: element}, window: {addEventListener() {}},
     ResizeObserver: class { observe() {} }, bindConsoleNavigation() {},

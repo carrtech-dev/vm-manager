@@ -1,6 +1,6 @@
 # CarrTech VM Manager
 
-A self-hosted virtualization console for `ctlnxdbn001` (`192.168.8.235`). Manages Incus virtual machines and discovers existing libvirt machines through `qemu:///system`. Incus containers are intentionally excluded from the VM list.
+A self-hosted virtualization console with linked-host cluster management. The established installation runs on `ctlnxdbn001` (`192.168.8.235`). Each installation manages its own Incus virtual machines and discovers existing libvirt machines through `qemu:///system`. Incus containers are intentionally excluded from the VM list.
 
 ## Open the manager
 
@@ -646,3 +646,76 @@ Network SMB/S3 mounts are independent filesystems and are not counted as VM bloc
 disk usage. Stopped VMs, unavailable metrics and service downtime create gaps,
 not artificial zero usage. Collector errors are isolated from VM operations;
 slow/unavailable hosts can delay a collection cycle beyond 10 seconds.
+
+
+## Linked-host cluster management
+
+Install VM Manager on each Linux host with existing Incus and libvirt. Each host
+keeps its own VMs, disks, networks, ISO library, projects, tags, snapshots, backup
+plans, monitoring and task history. The **Cluster** page combines VM inventories
+from the local manager and up to 32 explicitly linked hosts. VM identity includes
+its owning host, so identical VM names on different hosts remain independent.
+
+Deploy from clean integrated `main`, supplying the target SSH account and HTTPS
+listen IP. The installer generates a certificate for that address and configures
+the service accordingly; existing certificates are preserved. Use a stable IP or
+DHCP reservation. Python 3.13 and Debian 13 are the established deployment target.
+The installer does not initialize or replace hypervisors.
+
+```sh
+python3 scripts/deploy.py --host administrator@192.168.8.236
+# A private host reachable through an SSH jump host:
+python3 scripts/deploy.py --host root@10.100.0.119 --jump claude@192.168.8.235
+# When the SSH name differs from the listen address:
+python3 scripts/deploy.py --host administrator@other-host --address 192.168.8.236
+```
+
+1. Sign into the additional host as an administrator. Open **Cluster**, choose
+   **Create link key**, name the connection and copy the key shown once.
+2. On the manager you want to use as your central interface, open **Cluster** →
+   **Link host**. Supply a name, HTTPS origin, and the additional host's key.
+3. For the installer's self-signed HTTPS certificate, copy the public contents of
+   `/opt/carrtech/vm-manager/tls/server.crt` from the additional host into the
+   certificate field. For public HTTPS, leave the field blank. Certificate and
+   hostname verification remain enabled; redirects and environment HTTP proxies
+   are not followed. The central server must be able to reach the additional host.
+4. Choose **Manage VM** from the combined cluster list, or use **Resources on**
+   in the top bar to select a host. All existing VM, network, storage, ISO,
+   template, backup, metrics and task controls then operate on that host.
+   Graphical consoles, text terminals, ISO uploads and live task output pass
+   through the central server; the browser needs access only to that server.
+
+Switching hosts reloads the page, closing active consoles and task streams and
+clearing resource selections. Host ownership stays in the URL, including viewer
+pop-outs. Do not switch hosts during an upload. Access control and your own
+account always refer to the manager you signed into; audit and task history refer
+to the selected resource host. The Cluster page covers all hosts regardless of
+host-local project/tag filters. Unavailable hosts are identified explicitly and
+do not hide healthy inventories. An interrupted request is never automatically
+replayed: inspect the owning host's task history before retrying a mutation.
+
+Links are directional. To use another manager as a central interface too, create
+the required links there. A central manager uses its own users and roles: viewers
+can inspect resources, operators can operate them, and administrators can also
+open root terminals. Only administrators can link/unlink hosts or create/revoke
+keys. Link keys trust the other manager to assert users and roles, including
+administrator access to resources; link only managers whose administrators you
+trust. Peer credentials cannot administer accounts or other trust links, and
+links do not recurse. Remote audit entries identify the incoming key name and
+central username. Existing browser session/CSRF and console origin checks still
+apply; central session/role checks continue throughout forwarded streams.
+
+**Unlink** removes only that connection and retains remote VMs/data. **Revoke**
+on the resource host withdraws an incoming key; established streams close at
+their next authorization check (within 20 seconds). To rotate a key, create a
+replacement on the resource host, unlink/relink it at the central manager, then
+revoke the old key. Incoming keys are stored as SHA-256 digests; outbound link
+credentials are stored in the mode-0600 manager SQLite database and its deployment
+backups. Protect these backups as credentials. Keys never appear in inventory,
+ordinary key listings, browser storage or audit logs.
+
+This is federated management, not an Incus storage/compute cluster. It does not
+provide live migration, shared disks, automatic scheduling or automatic failover.
+A managed VM can host a second manager for testing, provided nested KVM is
+available to run its own VMs. Its availability then depends on its parent host;
+use independent physical hosts for independent failure domains.

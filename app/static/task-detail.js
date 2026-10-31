@@ -1,4 +1,4 @@
-import { $, api } from "./core.js";
+import { $, api, apiURL } from "./core.js";
 
 // One connection per expanded output panel. A cursor avoids replay on reopening.
 export class TaskOutputStream {
@@ -10,7 +10,7 @@ export class TaskOutputStream {
   }
   open() {
     if (this.source || this.finished) return;
-    const source = new this.Source(`/api/tasks/${encodeURIComponent(this.taskId)}/output?after=${this.cursor}`);
+    const source = new this.Source(apiURL(`/tasks/${encodeURIComponent(this.taskId)}/output?after=${this.cursor}`));
     this.source = source;
     this.status("Connecting…");
     source.onopen = () => { if (this.source === source) this.status("Live host output"); };

@@ -10,7 +10,9 @@ class BodyLimit:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope.get("method") in ("GET", "HEAD", "OPTIONS"):
             return await self.app(scope, receive, send)
-        limit = 32 * 1024**3 + 1024**2 if scope.get("path") == "/api/isos" else 1024**2
+        path = scope.get('path', '')
+        remote_iso = path.startswith('/api/cluster/hosts/') and path.endswith('/proxy/isos')
+        limit = 32 * 1024**3 + 1024**2 if path == "/api/isos" or remote_iso else 1024**2
         headers = dict(scope.get("headers", []))
         try:
             advertised = int(headers.get(b"content-length", b"0"))

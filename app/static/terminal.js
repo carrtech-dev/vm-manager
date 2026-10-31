@@ -1,6 +1,6 @@
 import { Terminal } from "./vendor/xterm/xterm.mjs";
 import { FitAddon } from "./vendor/addon-fit/addon-fit.mjs";
-import { copyText } from "./core.js";
+import { copyText, apiURL, hostURL } from "./core.js";
 import { terminalText, terminalPaste, inputMessages } from "./terminal-buffer.js";
 import { bindConsoleNavigation } from "./console-navigation.js";
 
@@ -43,7 +43,7 @@ async function connect(mode = "login") {
     return;
   }
   document.getElementById("terminal-title").textContent = vm.slice(6) + " · Terminal";
-  document.getElementById("graphical-console").href = "/console?vm=" + encodeURIComponent(vm);
+  document.getElementById("graphical-console").href = hostURL("/console?vm=" + encodeURIComponent(vm));
   message("Connecting to guest terminal…");
   const response = await fetch("/api/me");
   if (!response.ok) throw new Error("Your session expired. Sign in to the manager, then reconnect.");
@@ -51,7 +51,7 @@ async function connect(mode = "login") {
   if (attempt !== generation) return;
   document.getElementById("terminal-root").hidden = user.role !== "administrator";
   if (mode === "root" && user.role !== "administrator") throw new Error("Root terminal access requires an administrator.");
-  const current = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/terminal/${encodeURIComponent(vm)}?csrf=${encodeURIComponent(user.csrf)}&mode=${mode}`);
+  const current = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${apiURL('/terminal/' + encodeURIComponent(vm))}?csrf=${encodeURIComponent(user.csrf)}&mode=${mode}`);
   socket = current;
   let loggedOut = false;
   current.binaryType = "arraybuffer";

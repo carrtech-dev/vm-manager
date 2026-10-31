@@ -1,8 +1,8 @@
-import { esc } from "./core.js";
+import { esc, hostURL } from "./core.js";
 
 const modes = new Map();
 const graphicalLabel = provider => provider === "incus" ? "SPICE" : "VNC";
-const viewURL = (vm, mode) => `${mode === "text" ? "/terminal" : "/console"}?vm=${encodeURIComponent(vm)}`;
+const viewURL = (vm, mode) => hostURL(`${mode === "text" ? "/terminal" : "/console"}?vm=${encodeURIComponent(vm)}`);
 
 export function renderEmbeddedConsole(vm) {
   const mode = vm.provider === "incus" ? modes.get(vm.id) || "text" : "graphical";
