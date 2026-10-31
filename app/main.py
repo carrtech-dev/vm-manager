@@ -41,6 +41,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from .hypervisor import Incus, Libvirt, HypervisorError, name, run, bytes_size
 from .security import Store, ROLES, hash_password, verify_password, token_hash
+from . import monitoring
 from . import organization
 from . import storage
 from . import external_storage
@@ -61,6 +62,7 @@ store = Store(DATA)
 store.bootstrap(DATA)
 backups.initialize(store)
 incus, libvirt = Incus(), Libvirt()
+history = monitoring.History(store)
 snapshots = Snapshots(store, incus, libvirt)
 
 
@@ -73,15 +75,22 @@ async def backup_lifespan(application):
             except Exception:
                 logging.exception('Backup scheduler failed')
             await asyncio.sleep(15)
+    async def monitor_loop():
+        while True:
+            started = time.monotonic()
+            try:
+                await asyncio.to_thread(monitor_tick)
+            except Exception:
+                logging.exception('Monitoring collection failed')
+            await asyncio.sleep(max(0, 10 - (time.monotonic() - started)))
     scheduler = asyncio.create_task(loop())
+    monitor = asyncio.create_task(monitor_loop())
     try:
         yield
     finally:
-        scheduler.cancel()
-        try:
-            await scheduler
-        except asyncio.CancelledError:
-            pass
+        for worker in (scheduler, monitor):
+            worker.cancel()
+        await asyncio.gather(scheduler, monitor, return_exceptions=True)
 
 
 app = FastAPI(
@@ -1532,6 +1541,12 @@ def cpu_percentage(vm_id, counter, identity, cpus, now):
 
 @app.get("/api/vms/{vm_id}/metrics")
 def vm_metrics(vm_id: str, user=Depends(require())):
+    return collect_vm_metrics(vm_id)
+
+
+def collect_vm_metrics(vm_id, incus_driver=None, libvirt_driver=None):
+    incus = incus_driver or globals()["incus"]
+    libvirt = libvirt_driver or globals()["libvirt"]
     provider, vm_name = vm_ref(vm_id)
     memory_used, memory_source, cpu_source, counter, identity = (
         None,
@@ -1623,6 +1638,86 @@ def vm_metrics(vm_id: str, user=Depends(require())):
         "memory_source": memory_source,
         "updated": time.time(),
     }
+
+
+class MonitoringLibvirt(Libvirt):
+    def cli(self, *args, stdin=None):
+        return run("virsh", "-c", "qemu:///system", *args, stdin=stdin, timeout=3)
+
+
+monitor_incus = Incus(timeout=3)
+monitor_libvirt = MonitoringLibvirt()
+
+
+def monitor_vm(vm):
+    """One VM failure must not stop collection for other VMs or the host."""
+    samples = []
+    try:
+        metrics = collect_vm_metrics(vm['id'], monitor_incus, monitor_libvirt)
+        samples.extend([
+            dict(metric='cpu', label='CPU usage', value=metrics['cpu_percent'], total=100,
+                 source=metrics['cpu_source'] or 'VM stopped or CPU unavailable'),
+            dict(metric='memory', label='Memory usage', value=metrics['memory_used'],
+                 total=metrics['memory_total'], source=metrics['memory_source'] or 'VM stopped or memory unavailable'),
+        ])
+    except Exception:
+        for metric in ('cpu', 'memory'):
+            samples.append(dict(metric=metric, label=metric.title() + ' usage', value=None,
+                                source='Measurement unavailable'))
+    try:
+        samples.extend(monitoring.vm_disks(vm, monitor_libvirt))
+    except Exception:
+        logging.exception('VM disk monitoring failed for %s', vm['id'])
+    history.write(vm['id'], samples)
+
+
+def monitor_tick():
+    from concurrent.futures import ThreadPoolExecutor
+    memory = psutil.virtual_memory()
+    samples = [dict(metric='cpu', label='CPU usage', value=psutil.cpu_percent(interval=0.1), total=100,
+                    source='Host CPU · all logical CPUs'),
+               dict(metric='memory', label='Memory usage', value=memory.total - memory.available,
+                    total=memory.total, source='Host memory · excludes available cache')]
+    try:
+        pools = [p for p in monitor_incus.pools() if not p['name'].startswith('vmm-block-')]
+        spaces = [p.get('resources', {}).get('space', {}) for p in pools]
+        complete = bool(spaces) and all(p.get('total', 0) > 0 and 'used' in p for p in spaces)
+        samples.append(dict(metric='disk', label='Disk space',
+                            value=sum(p['used'] for p in spaces) if complete else None,
+                            total=sum(p['total'] for p in spaces) if complete else None,
+                            source='Underlying VM storage pools · allocated space'))
+    except Exception:
+        samples.append(dict(metric='disk', label='Disk space', value=None, source='Storage pools unavailable'))
+    history.write('host', samples)
+    vms = []
+    for driver in (monitor_incus, monitor_libvirt):
+        try:
+            vms.extend(driver.vms())
+        except Exception:
+            logging.exception('Monitoring inventory unavailable')
+    try:
+        media = {(iso.get('pool'), iso['name']) for iso in monitor_incus.isos()}
+        for vm in vms:
+            vm['iso_sources'] = media
+    except Exception:
+        logging.exception('Monitoring installation media inventory unavailable')
+    with ThreadPoolExecutor(max_workers=8, thread_name_prefix='monitoring') as workers:
+        list(workers.map(monitor_vm, vms))
+
+
+@app.get('/api/monitoring/host')
+def host_history(window: str = Query('5m', alias='range'), user=Depends(require())):
+    if window not in monitoring.RANGES:
+        raise HTTPException(422, 'Unsupported monitoring range')
+    return history.read('host', window)
+
+
+@app.get('/api/vms/{vm_id}/monitoring')
+def vm_history(vm_id: str, window: str = Query('5m', alias='range'), user=Depends(require())):
+    vm_ref(vm_id)
+    if window not in monitoring.RANGES:
+        raise HTTPException(422, 'Unsupported monitoring range')
+    return history.read(vm_id, window)
 
 
 def cpu_count(value):

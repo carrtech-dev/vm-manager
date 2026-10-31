@@ -23,6 +23,7 @@ import {
 } from "./core.js";
 import { watchTaskDetail } from "./task-detail.js";
 import { renderEmbeddedConsole, switchEmbeddedConsole, toggleConsoleFullscreen, bindEmbeddedConsoleEvents } from "./console-view.js";
+import { monitoringPanel, refreshMonitoring } from "./monitoring.js";
 const pageNames = {
   overview: "Overview",
   vms: "Virtual machines",
@@ -339,6 +340,7 @@ function render() {
         "",
       )}</nav><div class="nav-heading">RESOURCE TREE</div><div class="resource-tree" id="resource-tree">${renderTree()}</div><div class="host-online"><strong>● HOST CONNECTED</strong><small>${copyAddresses(inv.host.address)}</small></div></aside><section class="workspace"><header class="topbar"><button class="icon-button mobile-menu" data-action="toggle-sidebar" aria-label="Toggle navigation">☰</button><div class="breadcrumb"><a href="#overview">Datacenter</a><span>/</span><span>${copyValue(inv.host.name)}</span><span>/</span><strong>${state.page === "vm" && vm ? copyValue(vm.name) : esc(pageNames[state.page] || "Overview")}</strong></div>${can() ? btn("+ Create VM", "create-vm", "", "primary") : ""}<button class="icon-button" data-action="help" aria-label="Help">?</button><button class="account-button" data-action="account" aria-label="Your account"><span class="avatar">${esc(state.user.username.slice(0, 2).toUpperCase())}</span><span class="account-name">${esc(state.user.username)}</span><span class="role-label">${esc(state.user.role)}</span></button></header><main class="content" id="main-content">${inv.warnings.length ? `<div class="error-banner"><strong>Some host information is unavailable.</strong><br>${inv.warnings.map(esc).join("<br>")}</div>` : ""}${renderOrganizationFilters()}${renderPage()}</main><section class="task-dock" aria-label="Recent tasks" id="task-dock">${renderDock()}</section></section></div>`;
   bindPage();
+  refreshMonitoring();
   if ($("#resource-tree")) $("#resource-tree").scrollTop = treeScroll;
   if ($("#main-content")) $("#main-content").scrollTop = contentScroll;
 }
@@ -406,7 +408,7 @@ function renderOverview() {
       "Host metrics and virtual machines in the current resource view",
       btn("↻ Refresh", "refresh"),
     ) +
-    `<div class="resource-cards">${stat("CPU usage", host.cpu_percent.toFixed(1) + "%", host.cpu_count + " logical CPUs", host.cpu_percent)}${stat("Memory", Math.round(host.memory_used / 1024 ** 3) + " / " + Math.round(host.memory_total / 1024 ** 3) + " GiB", host.memory_percent.toFixed(1) + "% used", host.memory_percent)}${stat("Storage", size(used, 0) + " / " + size(total, 1), pools.length + " storage pools", total ? (used / total) * 100 : 0)}${stat("Virtual machines", running + " / " + vms.length, "running / total", vms.length ? (running / vms.length) * 100 : 0)}</div><div class="overview-columns">${panel(
+    `<div class="resource-cards">${stat("CPU usage", host.cpu_percent.toFixed(1) + "%", host.cpu_count + " logical CPUs", host.cpu_percent)}${stat("Memory", Math.round(host.memory_used / 1024 ** 3) + " / " + Math.round(host.memory_total / 1024 ** 3) + " GiB", host.memory_percent.toFixed(1) + "% used", host.memory_percent)}${stat("Storage", size(used, 0) + " / " + size(total, 1), pools.length + " storage pools", total ? (used / total) * 100 : 0)}${stat("Virtual machines", running + " / " + vms.length, "running / total", vms.length ? (running / vms.length) * 100 : 0)}</div>${monitoringPanel("host", [""])}<div class="overview-columns">${panel(
       "Virtual machines",
       vmTable(
         vms
@@ -581,7 +583,8 @@ function renderVM() {
       ? `${btn("Console", "console", v.id, "secondary", !running)}${btn(running ? "Shutdown" : "Start", running ? "shutdown" : "start", v.id, "primary", !["running", "stopped"].includes(v.status))}${btn(v.pending?.length ? "Restart & apply" : "Restart", "restart", v.id, "secondary", !running)}${btn("Force stop", "force-stop", v.id, "danger", !running)}`
       : "",
   );
-  html += `<div class="tabs">${["summary", "hardware", "snapshots", "backups", "console", "options"].map((t) => `<button class="tab ${state.tab === t ? "active" : ""}" data-action="vm-tab" data-id="${t}" ${t === "console" && !can() ? "disabled" : ""}>${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</div>`;
+  html += `<div class="tabs">${["summary", "monitor", "hardware", "snapshots", "backups", "console", "options"].map((t) => `<button class="tab ${state.tab === t ? "active" : ""}" data-action="vm-tab" data-id="${t}" ${t === "console" && !can() ? "disabled" : ""}>${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</div>`;
+  if (state.tab === "monitor") return html + monitoringPanel(v.id, Object.entries(v.devices).filter(([key,d]) => d.type === "disk" && key !== "cdrom" && (d.kind || "disk") === "disk" && d.source !== "agent:config" && !d.source?.toLowerCase().endsWith(".iso") && !state.inventory.isos.some(i => i.pool === d.pool && i.name === d.source)).map(([key]) => key));
   if (state.tab === "snapshots") {
     if (vmSnapshots?.vm !== v.id) {
       refreshSnapshots(v.id);
@@ -2099,6 +2102,8 @@ setInterval(() => {
   if (!document.hidden) refresh();
 }, 10000);
 setInterval(() => { if (!document.hidden) refreshVMMetrics(); }, 5000);
+setInterval(() => { if (!document.hidden && state.user) refreshMonitoring(); }, 10000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden && state.user) refreshMonitoring(); });
 init();
 
  document.addEventListener("change", event => {

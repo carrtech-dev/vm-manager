@@ -77,8 +77,9 @@ def bytes_size(value):
 
 
 class Incus:
-    def __init__(self):
+    def __init__(self, timeout=190):
         self.socket = os.environ.get("INCUS_SOCKET", "/var/lib/incus/unix.socket")
+        self.timeout = timeout
 
     def request(self, method, path, data=None, wait=True, etag=None):
         mutating = method != "GET" and capturing()
@@ -87,7 +88,7 @@ class Incus:
         with httpx.Client(
             transport=httpx.HTTPTransport(uds=self.socket),
             base_url="http://incus",
-            timeout=190,
+            timeout=self.timeout,
         ) as client:
             response = client.request(
                 method, path, json=data, headers={"If-Match": etag} if etag else None

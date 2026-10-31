@@ -23,7 +23,7 @@ function consolePage(provider = "incus") {
   const document = { activeElement: { tagName: "IFRAME" }, addEventListener() {} };
   const context = createContext({
     ...core, renderEmbeddedConsole, document, window: { addEventListener() {} }, setInterval() {},
-    bindCopyButtons() {},
+    bindCopyButtons() {}, refreshMonitoring() {},
     $: selector => ({ "#app": app, "#modal": modal })[selector] || null,
     api: async path => {
       assert.equal(path, "/inventory");

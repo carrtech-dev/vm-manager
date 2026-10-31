@@ -554,3 +554,39 @@ its own sources, mounts, backups, restores and account. It does not provision or
 remove the supplied guests/endpoints. `--browser-state <path>` pauses before
 cleanup for a browser check; protect/remove that session file, and create
 `<path>.continue` to resume cleanup. Do not supply production datasets or VMs.
+
+## Monitoring history
+
+**Overview** has host CPU, memory and disk-space charts. Each VM's **Monitor** tab
+has CPU and memory charts plus a chart for every configured data/system disk
+(CD-ROM and agent installer media are excluded). Choose the last **5 minutes**,
+**1 Hour**, **12 Hours**, **1 Day**, **1 Week**, **1 Month**, **6 Months**, or
+**12 Months**. Charts refresh every 10 seconds while visible. Hover over a chart,
+or focus it and use the arrow keys, to inspect timestamped values and min/max peaks.
+
+A background collector samples every 10 seconds, including when nobody is signed
+in. History begins at deployment; earlier usage cannot be reconstructed. SQLite
+stores 10-second samples for two days, five-minute summaries for 32 days and
+hourly summaries for up to 12 calendar months. Expired samples are pruned hourly;
+SQLite reuses their storage. Longer chart ranges use weighted averages and retain
+min/max peaks, with at most about 750 points per series. History is included in
+the existing deployment database backups and survives upgrades/restarts.
+
+Host disk space is the aggregate allocated space of underlying VM storage pools,
+matching the Overview storage card (child storage blocks are excluded). Host
+memory excludes available cache. VM CPU is normalized to its allocated vCPUs;
+VM memory retains the guest/host-resident source labels used on Summary.
+
+VM disk charts measure **used space in mounted guest filesystems**, summed per
+configured disk, rather than virtual disk capacity, thin-provisioned host
+allocation or disk I/O. Incus Linux guests need a connected Incus agent, Python 3
+and `lsblk`; libvirt guests need a responding QEMU guest agent with filesystem
+information support. Collection is read-only and never installs guest software,
+formats disks or mounts filesystems. Disk identities are matched through guest
+serials or libvirt's filesystem-to-target mapping; guest device order is never
+assumed. Bind mounts are deduplicated. Filesystems spanning multiple disks,
+unformatted/unmounted disks and guests without usable telemetry show unavailable.
+Network SMB/S3 mounts are independent filesystems and are not counted as VM block
+disk usage. Stopped VMs, unavailable metrics and service downtime create gaps,
+not artificial zero usage. Collector errors are isolated from VM operations;
+slow/unavailable hosts can delay a collection cycle beyond 10 seconds.

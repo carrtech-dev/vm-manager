@@ -1917,3 +1917,17 @@ def test_task_records_running_output_and_terminal_failure(client):
         pytest.fail('Task did not finish')
     text = client.get('/api/tasks/' + task_id + '/output').text
     assert 'early host output' in text and 'Failed: injected host failure' in text
+
+
+def test_monitoring_requires_login_allows_viewers_and_validates_ranges(client):
+    from app.main import history
+    import time
+    for path in ('/api/monitoring/host', '/api/vms/incus:demo/monitoring'):
+        assert client.get(path).status_code == 401
+    login(client, 'viewer')
+    history.write('host', [dict(metric='cpu', label='CPU usage', value=42, total=100, source='Host CPU')])
+    assert client.get('/api/monitoring/host').json()['series'][0]['points'][-1][1] == 42
+    assert client.get('/api/monitoring/host?range=12mo').status_code == 200
+    assert client.get('/api/vms/incus:demo/monitoring?range=1d').status_code == 200
+    assert client.get('/api/monitoring/host?range=invalid').status_code == 422
+    assert client.get('/api/vms/incus:demo/monitoring?range=invalid').status_code == 422

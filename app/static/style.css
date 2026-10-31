@@ -1499,3 +1499,31 @@ dialog .warning {
   font: 12px/1.6 ui-monospace, monospace;
 }
 .task-output-text:empty { display: none; }
+
+#monitoring { margin: 24px 0; }
+.monitor-toolbar { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px; margin-bottom:12px; }
+.monitor-toolbar h2 { font-size:16px; margin:0 0 6px; }
+.monitor-toolbar p { margin:0; font-size:12px; }
+.monitor-toolbar label { display:flex; gap:10px; align-items:center; font-size:12px; color:var(--text-secondary); }
+.monitor-toolbar select { min-width:155px; }
+#monitor-status { font-size:11px; min-height:18px; margin-bottom:8px; }
+.monitor-charts { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr)); gap:16px; }
+.monitor-chart { border:1px solid var(--border-default); border-radius:8px; padding:18px 14px 12px; background:var(--bg-surface); min-width:0; }
+.monitor-chart-heading { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
+.monitor-chart-heading h3 { margin:0; font-size:13px; }
+.monitor-chart-heading strong { font-size:17px; font-weight:600; }
+.monitor-chart-heading small { font-size:11px; font-weight:400; color:var(--text-secondary); }
+.monitor-source { font-size:10px; color:var(--text-secondary); min-height:24px; margin:8px 0; }
+.monitor-plot { position:relative; }
+.monitor-plot svg { width:100%; display:block; overflow:visible; }
+.monitor-gridline { stroke:var(--border-default); stroke-dasharray:3 4; }
+.monitor-axis { fill:var(--text-secondary); font-size:16px; }
+.monitor-line { fill:none; stroke:var(--accent-orange); stroke-width:2; stroke-linecap:round; }
+.monitor-capacity { fill:none; stroke:var(--text-secondary); stroke-width:1; stroke-dasharray:5 4; }
+.monitor-peaks { fill:none; stroke:var(--accent-orange); stroke-opacity:.35; stroke-width:3; }
+.monitor-dot { fill:var(--accent-orange); }
+.monitor-empty { position:absolute; inset:20% 0 auto; text-align:center; color:var(--text-secondary); font-size:12px; }
+.monitor-tooltip { position:absolute; left:8%; bottom:30%; right:0; padding:8px; border:1px solid var(--border-strong); border-radius:5px; background:var(--bg-base); font-size:11px; pointer-events:none; }
+.monitor-legend { display:flex; flex-wrap:wrap; gap:12px; font-size:10px; color:var(--text-secondary); padding-left:9%; }
+.monitor-legend span:first-child { color:var(--accent-orange); }
+.monitor-note { font-size:11px; line-height:1.6; margin:14px 0 24px; }
