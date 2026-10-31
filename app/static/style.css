@@ -353,9 +353,27 @@ small {
 }
 .tree-host {
   font-size: 12px;
-  padding: 8px 14px;
+  padding: 4px 14px 4px 4px;
   color: var(--text-primary);
-  display: block;
+  display: flex;
+  align-items: center;
+}
+.tree-host-toggle {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.tree-host-toggle:hover {
+  background: var(--bg-rowHover);
+}
+.tree-host-toggle:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
 }
 .tree-group summary {
   cursor: pointer;

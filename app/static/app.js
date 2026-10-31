@@ -55,6 +55,7 @@ let busy = false,
   renderedPath = "";
 const selectedVMs = new Set();
 const collapsedVMProjects = new Set();
+let hostTreeCollapsed = false;
 const seenTasks = new Map();
 let vmMetrics = null, metricsBusy = false;
 let vmSnapshots = null, snapshotsLoading = null;
@@ -346,7 +347,7 @@ function render() {
   if ($("#main-content")) $("#main-content").scrollTop = contentScroll;
 }
 function renderTree() {
-  return `<div class="tree-host">${copyValue(state.inventory.host.name, "hostname", `<a href="#overview">⌄ &nbsp;${esc(state.inventory.host.name)}</a>`)}</div>${[
+  return `<div class="tree-host"><button type="button" class="tree-host-toggle" data-action="toggle-host-tree" aria-expanded="${!hostTreeCollapsed}" aria-controls="host-tree-resources" aria-label="${hostTreeCollapsed ? "Expand" : "Collapse"} ${esc(state.inventory.host.name)} resources"><span aria-hidden="true">${hostTreeCollapsed ? "▸" : "▾"}</span></button>${copyValue(state.inventory.host.name, "hostname", `<a href="#overview">${esc(state.inventory.host.name)}</a>`)}</div><div id="host-tree-resources"${hostTreeCollapsed ? " hidden" : ""}>${[
     "incus",
     "libvirt",
   ]
@@ -360,7 +361,7 @@ function renderTree() {
       );
       return `<details class="tree-group" open><summary>${provider === "incus" ? "Incus" : "libvirt"} <span class="subtle">(${vms.length})</span></summary>${vms.map((v) => `<div class="tree-vm ${state.page === "vm" && state.vm === v.id ? "active" : ""}"><span class="dot ${v.status}"></span>${copyValue(v.name, "hostname", `<a href="#vm/${encodeURIComponent(v.id)}/summary" title="${esc(v.name)}">${esc(v.name)}</a>`)}</div>`).join("")}${!vms.length ? '<div class="tree-vm subtle">No matching VMs</div>' : ""}</details>`;
     })
-    .join("")}`;
+    .join("")}</div>`;
 }
 function renderPage() {
   switch (state.page) {
@@ -1916,6 +1917,15 @@ async function action(name, id) {
     case "cdrom":
       editCDROM(v);
       break;
+    case "toggle-host-tree": {
+      hostTreeCollapsed = !hostTreeCollapsed;
+      const button = $(".tree-host-toggle");
+      button.setAttribute("aria-expanded", String(!hostTreeCollapsed));
+      button.setAttribute("aria-label", `${hostTreeCollapsed ? "Expand" : "Collapse"} ${state.inventory.host.name} resources`);
+      button.firstElementChild.textContent = hostTreeCollapsed ? "▸" : "▾";
+      $("#host-tree-resources").hidden = hostTreeCollapsed;
+      break;
+    }
     case "toggle-vm-project":
       if (collapsedVMProjects.has(id)) collapsedVMProjects.delete(id);
       else collapsedVMProjects.add(id);
