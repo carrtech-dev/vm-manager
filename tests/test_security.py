@@ -52,6 +52,26 @@ def login(client, username="admin"):
     return {"X-CSRF-Token": r.json()["csrf"]}
 
 
+def test_agent_endpoints_require_operator_and_csrf(client, monkeypatch):
+    from app import main
+    path = '/api/vms/incus:demo/agent'
+    assert client.get(path).status_code == 401
+    headers = login(client, 'viewer')
+    assert client.get(path).status_code == 403
+    assert client.post(path + '/prepare', headers=headers).status_code == 403
+    headers = login(client, 'operator')
+    assert client.post(path + '/prepare').status_code == 403
+    calls = []
+    monkeypatch.setattr(main.guest_agent, 'status', lambda *a: {'connected': True})
+    monkeypatch.setattr(main, 'task', lambda user, action, resource, fn:
+                        calls.append((action, resource)) or {'task_id': 'queued'})
+    assert client.get(path).json()['connected']
+    assert client.post(path + '/prepare', headers=headers).json()['task_id'] == 'queued'
+    assert calls == [('vm.agent.prepare', 'incus:demo')]
+    assert client.post('/api/vms/libvirt:demo/agent/prepare', headers=headers).status_code == 409
+    assert client.get('/api/vms/libvirt:demo/agent').status_code == 409
+
+
 def test_snapshot_api_permissions_confirmations_and_validation(client, monkeypatch):
     from app.main import snapshots
     path = "/api/vms/incus:demo/snapshots"

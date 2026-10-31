@@ -58,6 +58,16 @@ def test_calendar_schedules_and_dst():
         backups.Plan(block_id=BLOCK, time='25:60')
 
 
+def test_agent_config_cd_is_retained_in_backup_configuration(environment):
+    _, manager, _ = environment
+    vm = dict(devices={'root': dict(type='disk', path='/', pool='pool'),
+                       'agent': dict(type='disk', source='agent:config', readonly='true')})
+    manager.incus.vm = lambda _: vm
+    config, volumes, media = manager.inspect_incus('demo')
+    assert config['devices']['agent']['source'] == 'agent:config'
+    assert not volumes and not media
+
+
 def test_backup_requires_explicit_purpose_and_mounted_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, 'broker', lambda *a: [{'id': BLOCK, 'purpose': 'vm', 'status': 'ready', 'path': str(tmp_path)}])
     with pytest.raises(HypervisorError, match='wrong purpose'):

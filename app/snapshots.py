@@ -87,6 +87,8 @@ class Snapshots:
         for key, device in sorted(devices.items()):
             if device.get("type") != "disk" or device.get("path") == "/":
                 continue
+            if device.get("source") == "agent:config":
+                continue
             if device.get("readonly") == "true":
                 continue
             pool, source = device.get("pool"), device.get("source")

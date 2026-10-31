@@ -616,7 +616,7 @@ function renderVM() {
           ["Description", esc(v.description || "No description")],
           ["Project & tags", organizationChips(v) || "Unassigned · No tags"],
         ]),
-      )}${panel("Quick actions", `<div class="storage-body"><p class="muted">Configure disks, network adapters and installation media from the Hardware tab.</p><div class="actions" style="margin-top:16px">${btn("View hardware", "vm-tab", "hardware")}${can() ? btn("Assign project & tags", "organize-vm", v.id) : ""}${can() ? btn("Edit resources", "edit-vm", v.id, "secondary") : ""}</div></div>`)}</div>`
+      )}${panel("Quick actions", `<div class="storage-body"><p class="muted">Configure disks, network adapters and installation media from the Hardware tab.</p><div class="actions" style="margin-top:16px">${btn("View hardware", "vm-tab", "hardware")}${agentButton(v)}${can() ? btn("Assign project & tags", "organize-vm", v.id) : ""}${can() ? btn("Edit resources", "edit-vm", v.id, "secondary") : ""}</div></div>`)}</div>`
     );
   }
   if (state.tab === "backups") return html + renderVMBackups(v);
@@ -682,8 +682,10 @@ function renderVM() {
   ];
   for (const [key, d] of Object.entries(v.devices)) {
     if (!["disk", "nic"].includes(d.type)) continue;
+    const isAgent = d.type === "disk" && d.source === "agent:config";
     const isNIC = d.type === "nic";
     const isISO =
+      isAgent ||
       d.kind === "cdrom" ||
       key === "cdrom" ||
       d.source?.endsWith(".iso") ||
@@ -697,7 +699,8 @@ function renderVM() {
       : `${esc(d.source ? d.source.split("/").pop() : d.pool || "Disk")} ${d.size ? `<span class="subtle">· ${esc(d.size)}</span>` : ""}${isRoot ? ' <span class="subtle">· Root disk</span>' : ""}`;
     let actions = "";
     if (can()) {
-      if (isNIC)
+      if (isAgent) actions += agentButton(v);
+      else if (isNIC)
         actions += smallAction(
           "Edit",
           "edit-nic",
@@ -723,7 +726,7 @@ function renderVM() {
     }
     hardware.push([
       `${isNIC ? "Network adapter" : isISO ? "CD/DVD drive" : "Hard disk"} (${esc(key)})`,
-      value,
+      isAgent ? "Incus agent installer · Keep attached for future boots" : value,
       actions,
     ]);
   }
@@ -740,8 +743,72 @@ function renderVM() {
         .join(""),
     ) +
     renderExternalMounts(v) +
+    (v.provider === "incus" ? panel("Guest integration", `<div class="storage-body"><p class="muted">Install the Incus agent to enable guest commands and automatic storage mounting. Linux mounts also require Python 3 and systemd.</p><div class="actions">${agentButton(v)}</div></div>`) : "") +
     `<p class="subtle" style="font-size:11px">Disk expansion increases the virtual device. Extend partitions and filesystems inside the guest afterwards.</p>`
   );
+}
+
+function agentButton(v) {
+  return can() && v.provider === "incus"
+    ? btn("Install Incus agent", "install-agent", v.id, "secondary", !["running", "stopped"].includes(v.status)) : "";
+}
+
+const agentInstallCommand = `sudo sh -c 'set -eu; d=$(mktemp -d /run/incus-agent.XXXXXX); trap "cd /; umount $d; rmdir $d" EXIT; mount -t 9p -o ro config "$d" || mount -o ro /dev/disk/by-id/scsi-0QEMU_QEMU_CD-ROM_incus_agent "$d"; cd "$d"; ./install.sh; cd /; umount "$d"; rmdir "$d"; trap - EXIT; systemctl start incus-agent'`;
+
+function installAgent(v) {
+  const dialog = modal("Install Incus agent · " + v.name,
+    `<p>First-time installation needs a command inside the VM. Linux with systemd is supported by this installer.</p><ol><li><p>Attach the installer CD. Keep it attached so the agent can load its credentials on every boot.</p><button type="button" class="button secondary" id="agent-prepare">Attach installer CD</button><p id="agent-prepare-status" role="status"></p></li><li><p>Start the VM if needed, open its console and log in. Run this command in a Linux terminal with sudo access, or omit sudo in a root shell.</p><div class="hint" style="overflow-wrap:anywhere">${copyValue(agentInstallCommand, "installation command", `<code style="white-space:pre-wrap">${esc(agentInstallCommand)}</code>`)}</div><p><a class="button secondary" href="/console?vm=${encodeURIComponent(v.id)}" target="_blank" rel="noopener">Open VM console ↗</a></p><p class="muted">If the CD is not visible after attaching it, restart the VM and try again. This installs the guest agent; automatic storage mounts also need /usr/bin/python3.</p></li><li><p>After installation, verify the guest connection and mounting prerequisites.</p><button type="button" class="button secondary" id="agent-check">Check agent</button><p id="agent-status" role="status" aria-live="polite"></p></li></ol>`,
+    async () => {}, { wide: true, submit: "Done" });
+  $("footer .close-modal", dialog).textContent = "Close";
+  let disposed = false, timer;
+  const active = () => !disposed && dialog.open;
+  const prepare = $("#agent-prepare", dialog);
+  const note = $("#agent-prepare-status", dialog);
+  const check = $("#agent-check", dialog);
+  const status = $("#agent-status", dialog);
+  const dispose = () => { disposed = true; clearTimeout(timer); };
+  dialog.addEventListener("close", dispose, { once: true });
+  dialog.addEventListener("modal-replace", dispose, { once: true });
+  check.onclick = async () => {
+    check.disabled = true;
+    status.textContent = "Checking guest connection…";
+    try {
+      const result = await api(ref(v.id) + "/agent");
+      if (!active()) return;
+      status.textContent = result.message;
+      if (result.installer_attached && !prepare.disabled) note.textContent = "Installer CD is attached.";
+    } catch (error) {
+      if (active()) status.textContent = error.message;
+    } finally {
+      if (active()) check.disabled = false;
+    }
+  };
+  prepare.onclick = async () => {
+    prepare.disabled = true;
+    note.textContent = "Preparing installer CD…";
+    try {
+      const result = await queue(ref(v.id) + "/agent/prepare", "POST", {});
+      const update = async () => {
+        if (!active()) return;
+        try {
+          const task = await api("/tasks/" + result.task_id);
+          if (!active()) return;
+          if (["queued", "running"].includes(task.status)) {
+            note.textContent = "Preparing installer CD · " + task.status;
+            timer = setTimeout(update, 1000);
+          } else {
+            note.textContent = task.message;
+            prepare.disabled = false;
+          }
+        } catch (error) {
+          if (active()) { note.textContent = error.message; prepare.disabled = false; }
+        }
+      };
+      await update();
+    } catch (error) {
+      if (active()) { note.textContent = error.message; prepare.disabled = false; }
+    }
+  };
 }
 function renderVMMetrics(v) {
   const m = vmMetrics?.vm_id === v.id ? vmMetrics : null;
@@ -1391,7 +1458,7 @@ function addDisk(v) {
     "Add disk · " + v.name,
     select("Storage source", "source_id", [["", "Local virtual disk"], ...externalSources().map(s => [s.id, `${s.name} · ${s.kind.toUpperCase()}`])]) +
     `<div id="local-drive-fields"><div class="form-grid">${field("Disk size (GiB)", "size_gib", 16, { type: "number", min: 1, max: 4096 })}${v.provider === "incus" ? select("Storage pool", "pool", poolOptions(), defaultVMPool()) : field("Storage", "storage", "Application disk storage", { readonly: true })}</div><div class="hint">A new blank disk will be attached. Partition and format it inside the guest.</div></div>` +
-    `<div id="external-drive-fields" hidden>${field("Mount path inside Linux", "path", "/mnt/shared", {hint: "An empty folder below /mnt or /media. Existing files are never covered."})}${check("Read-only access", "readonly")}<div class="hint">VM Manager installs the mount tools and enables automatic mounting after reboot. The Linux VM must be running with its guest agent, Python 3 and systemd. Mounted data is separate from VM disk backups.</div><div id="external-drive-note" class="hint"></div></div>`,
+    `<div id="external-drive-fields" hidden>${field("Mount path inside Linux", "path", "/mnt/shared", {hint: "An empty folder below /mnt or /media. Existing files are never covered."})}${check("Read-only access", "readonly")}<div class="hint">VM Manager installs the mount tools and enables automatic mounting after reboot. The Linux VM must be running with its guest agent, Python 3 and systemd.${v.provider === "incus" ? " Use Install Incus agent on the VM Summary or Hardware tab for first-time setup." : ""} Mounted data is separate from VM disk backups.</div><div id="external-drive-note" class="hint"></div></div>`,
     async f => {
       if (f.get("source_id")) {
         if (v.status !== "running") throw new Error("Start the Linux VM before adding mounted storage.");
@@ -1641,6 +1708,7 @@ async function refreshTasks() {
 async function action(name, id) {
   const v = currentVM(id.split("|")[0]);
   switch (name) {
+    case "install-agent": installAgent(v); break;
     case "refresh-snapshots":
       await refreshSnapshots(id);
       break;

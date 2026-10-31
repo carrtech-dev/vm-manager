@@ -327,6 +327,8 @@ class Manager:
             if device.get('type') != 'disk' or device.get('path') == '/':
                 continue
             pool, source = device.get('pool'), device.get('source')
+            if source == 'agent:config':
+                continue  # Incus regenerates this integration CD on restore/start.
             if not pool and device.get('readonly') == 'true' and source and source.lower().endswith('.iso'):
                 media.append(key)
                 continue

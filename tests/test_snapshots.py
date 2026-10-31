@@ -78,6 +78,12 @@ def test_snapshots_include_extra_disks_and_record_lineage(engine):
     assert all(change[2]["expires_at"] == "0001-01-01T00:00:00Z" for change in engine.incus.changes)
 
 
+def test_agent_config_cd_does_not_block_snapshots(engine):
+    engine.incus.instance['devices']['agent'] = dict(type='disk', source='agent:config')
+    plan = engine.plan('incus', 'demo')
+    assert [d['device'] for d in plan['disks']] == ['root', 'disk1']
+
+
 def test_older_zfs_restore_and_parent_delete_are_rejected_before_mutation(engine):
     create(engine)
     create(engine, "two")

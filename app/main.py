@@ -44,6 +44,7 @@ from .security import Store, ROLES, hash_password, verify_password, token_hash
 from . import organization
 from . import storage
 from . import external_storage
+from . import guest_agent
 from . import backups
 from .power import PowerInterrupted, PowerRequests
 from .protection import ProtectionPower
@@ -478,6 +479,24 @@ def ensure_stopped(provider, vm_name):
         libvirt.stopped(vm_name)
     elif incus.vm(vm_name)["status"].lower() != "stopped":
         raise HypervisorError("Shut down the VM before editing its hardware.")
+
+
+def incus_agent_vm(vm_id):
+    provider, vm_name = vm_ref(vm_id)
+    if provider != 'incus':
+        raise HypervisorError('Incus agent installation is available for Incus VMs only')
+    return vm_name
+
+
+@app.post('/api/vms/{vm_id}/agent/prepare')
+def prepare_guest_agent(vm_id: str, user=Depends(require('operate'))):
+    vm_name = incus_agent_vm(vm_id)
+    return task(user, 'vm.agent.prepare', vm_id, lambda: guest_agent.prepare(incus, vm_name))
+
+
+@app.get('/api/vms/{vm_id}/agent')
+def check_guest_agent(vm_id: str, user=Depends(require('operate'))):
+    return guest_agent.status(incus, incus_agent_vm(vm_id))
 
 
 @app.get("/api/inventory")

@@ -391,6 +391,20 @@ integration prerequisite; VM Manager cannot configure an arbitrary OS without a
 working guest agent. Windows guests are not supported by this mount installer.
 For new Linux VMs, use an image with the appropriate agent prepared.
 
+For an existing Incus VM, select **Install Incus agent** on its **Summary** or
+**Hardware** tab. Attach the installer CD, then open the VM console, log in and
+run the provided Linux command with sudo (or as root without sudo). First-time
+setup requires this guest-side step because guest commands need an agent already
+running. **Check agent** verifies the connection and whether Python 3 and systemd
+are available for automatic mounts. It reports an unavailable connection without
+assuming the agent is absent. The CD can be prepared while running or stopped;
+if it is not visible inside a running guest, restart the VM. Keep the CD attached
+for credentials and agent updates at future boots. Preparation is queued and
+audited, preserves other devices and installation media, and is safe to repeat.
+This guided installer supports Linux with systemd; libvirt VMs still need their
+QEMU guest agent prepared separately. See the
+[Incus agent installation documentation](https://linuxcontainers.org/incus/docs/main/howto/instances_create/#install-the-incus-agent-into-virtual-machine-instances).
+
 VM Manager installs `cifs-utils` for SMB or `rclone`/`fuse3` for S3 when necessary,
 using apt or dnf. Those guests need access to their package repositories, or the
 packages must already be installed (some distributions require an additional
