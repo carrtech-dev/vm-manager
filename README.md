@@ -431,6 +431,16 @@ Preparation replaces only local generated installer CDs and retains profile
 devices, ordinary disks and OS installation media. If another device already
 uses `agent`, preparation stops without changes so that device can be renamed
 deliberately. **Check agent** identifies installer CDs that need this repair.
+On SELinux guests, the console command installs `semanage`/`restorecon` tools
+through dnf or apt if needed, registers the persistent `bin_t` file context for
+`/run/incus_agent/incus-agent`, and relabels an existing binary before restarting
+the service. SELinux remains enabled. This handles older host installers that
+only attempt the `/var/run` alias or skip labelling when `semanage` is absent.
+If the installed service and cached agent binary are already present, rerunning
+the command repairs permissions and restarts the service without requiring the
+ejected installer CD. The persistent context also applies when the agent's boot
+setup copies a fresh binary from the CD. Restarting the agent interrupts current
+guest-command sessions.
 This guided installer supports Linux with systemd; libvirt VMs still need their
 QEMU guest agent prepared separately. See the
 [Incus agent installation documentation](https://linuxcontainers.org/incus/docs/main/howto/instances_create/#install-the-incus-agent-into-virtual-machine-instances).

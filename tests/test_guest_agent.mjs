@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import { spawnSync } from "node:child_process";
 import * as core from "../app/static/core.js";
@@ -27,7 +29,7 @@ function setup(role = "operator", needsRepair = false) {
     queue: async () => ({ task_id: "task" }),
   });
   runInContext(source, context);
-  return { ...runInContext("({agentButton, installAgent, agentInstallCommand})", context), nodes, listeners,
+  return { ...runInContext("({agentButton, installAgent, agentInstallCommand, agentSELinuxSetup})", context), nodes, listeners,
     get html() { return html; } };
 }
 
@@ -58,7 +60,70 @@ test("copied installer command is valid shell and avoids shared mount directorie
   const shell = spawnSync("sh", ["-n"], { input: agentInstallCommand, encoding: "utf8" });
   assert.equal(shell.status, 0, shell.stderr);
   assert.match(agentInstallCommand, /mktemp -d \/run\/incus-agent/);
-  assert.match(agentInstallCommand, /systemctl start incus-agent/);
+  const inner = agentInstallCommand.slice("sudo sh -c '".length, -1);
+  assert.equal(spawnSync("sh", ["-n"], { input: inner, encoding: "utf8" }).status, 0);
+  assert.match(agentInstallCommand, /systemctl restart incus-agent/);
+  assert.ok(agentInstallCommand.length <= 4096);
+  assert.doesNotMatch(agentInstallCommand, /setenforce|SELINUX=disabled|selinux=0/);
+});
+
+test("SELinux bootstrap installs missing tools and uses the canonical persistent context", (t) => {
+  const { agentSELinuxSetup } = setup();
+  for (const manager of ["dnf", "apt-get"]) {
+    const directory = mkdtempSync(join(tmpdir(), "vmm-agent-tools-"));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    writeFileSync(join(directory, "getenforce"), "#!/bin/sh\necho Enforcing\n", { mode: 0o700 });
+    writeFileSync(join(directory, manager), `#!/bin/sh
+echo "packages: $*"
+/bin/cat > "$VMM_TEST_BIN/semanage" <<'SH'
+#!/bin/sh
+echo "policy: $*"
+SH
+/bin/cat > "$VMM_TEST_BIN/restorecon" <<'SH'
+#!/bin/sh
+echo "label: $*"
+SH
+/bin/chmod +x "$VMM_TEST_BIN/semanage" "$VMM_TEST_BIN/restorecon"
+`, { mode: 0o700 });
+    const result = spawnSync("/bin/sh", ["-c", "set -eu; " + agentSELinuxSetup], {
+      env: { PATH: directory, VMM_TEST_BIN: directory }, encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /packages: install -y policycoreutils policycoreutils-python-utils/);
+    assert.match(result.stdout, /policy: fcontext -a -t bin_t \/run\/incus_agent\/incus-agent/);
+  }
+  const disabled = spawnSync("/bin/sh", ["-c", "set -eu; getenforce() { echo Disabled; }; " + agentSELinuxSetup], {
+    env: { PATH: "" }, encoding: "utf8",
+  });
+  assert.equal(disabled.status, 0, disabled.stderr);
+  assert.equal(disabled.stdout, "");
+  const missing = spawnSync("/bin/sh", ["-c", "set -eu; getenforce() { echo Enforcing; }; " + agentSELinuxSetup], {
+    env: { PATH: "" }, encoding: "utf8",
+  });
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /Install semanage and restorecon/);
+});
+
+test("cached-agent recovery modifies an existing context and relabels before restarting without CD access", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "vmm-agent-label-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  writeFileSync(join(directory, "incus-agent"), "cached agent", { mode: 0o700 });
+  const { agentInstallCommand } = setup();
+  const body = agentInstallCommand.slice("sudo sh -c '".length, -1).replaceAll("/run/incus_agent", directory);
+  const functions = `
+    getenforce() { echo Enforcing; }
+    semanage() { if [ "$2" = -a ]; then return 1; fi; echo "policy: $*"; }
+    restorecon() { echo "label: $*"; }
+    systemctl() { echo "service: $*" >&2; }
+    mount() { echo "must not remount CD" >&2; return 77; }
+  `;
+  const result = spawnSync("/bin/sh", ["-c", functions + body], { env: { PATH: "" }, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /policy: fcontext -m -t bin_t/);
+  assert.match(result.stdout, /label: -v/);
+  assert.match(result.stderr, /service: reset-failed incus-agent/);
+  assert.match(result.stderr, /service: restart incus-agent/);
+  assert.doesNotMatch(result.stderr, /must not remount CD/);
 });
 
 test("agent check offers CD repair when its hardware ID is incompatible", async () => {
