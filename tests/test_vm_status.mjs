@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 import * as core from "../app/static/core.js";
+import { renderEmbeddedConsole } from "../app/static/console-view.js";
 
 // Run the actual page renderer and refresh path without browser startup/timers.
 const source = readFileSync(new URL("../app/static/app.js", import.meta.url), "utf8")
@@ -21,7 +22,7 @@ function consolePage(provider = "incus") {
   const modal = { open: false };
   const document = { activeElement: { tagName: "IFRAME" }, addEventListener() {} };
   const context = createContext({
-    ...core, document, window: { addEventListener() {} }, setInterval() {},
+    ...core, renderEmbeddedConsole, document, window: { addEventListener() {} }, setInterval() {},
     bindCopyButtons() {},
     $: selector => ({ "#app": app, "#modal": modal })[selector] || null,
     api: async path => {
@@ -45,6 +46,13 @@ for (const provider of ["incus", "libvirt"]) {
     const page = consolePage(provider);
     assert.match(page.html, /badge running/);
     assert.match(page.html, /<iframe/);
+    if (provider === "incus") {
+      assert.match(page.html, /data-mode="text"/);
+      assert.match(page.html, /src="\/terminal\?vm=incus%3Atest&amp;embedded=1"/);
+    } else {
+      assert.match(page.html, /data-mode="graphical"/);
+      assert.doesNotMatch(page.html, /data-console-frame="text"/);
+    }
     await page.refresh();
     assert.equal(page.draws, 1, "unchanged running VM must retain its console");
     page.status("stopped");

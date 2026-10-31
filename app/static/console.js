@@ -1,9 +1,11 @@
 import RFB from "/static/vendor/novnc/core/rfb.js";
 import { copyValue, bindCopyButtons } from "./core.js";
 import { bindConsolePaste } from "./console-paste.js";
+import { bindConsoleNavigation } from "./console-navigation.js";
 bindCopyButtons();
 const vm = new URLSearchParams(location.search).get("vm");
 const status = document.getElementById("console-status");
+bindConsoleNavigation({ linkId: "text-terminal", mode: "text" });
 if (vm?.startsWith("incus:")) {
   const link = document.getElementById("text-terminal");
   link.href = "/terminal?vm=" + encodeURIComponent(vm);
@@ -106,11 +108,6 @@ document.getElementById("reconnect").addEventListener("click", () => {
   retryDelay = 2000;
   connect().catch((e) => reconnectSoon(e.message));
 });
-document
-  .getElementById("fullscreen")
-  .addEventListener("click", () =>
-    document.getElementById("console-screen").requestFullscreen(),
-  );
 document.getElementById("send-keys").addEventListener("click", async () => {
   if (connection?.sendCtrlAltDel) connection.sendCtrlAltDel();
   else {

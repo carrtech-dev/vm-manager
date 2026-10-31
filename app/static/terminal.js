@@ -2,8 +2,10 @@ import { Terminal } from "./vendor/xterm/xterm.mjs";
 import { FitAddon } from "./vendor/addon-fit/addon-fit.mjs";
 import { copyText } from "./core.js";
 import { terminalText, terminalPaste, inputMessages } from "./terminal-buffer.js";
+import { bindConsoleNavigation } from "./console-navigation.js";
 
 const vm = new URLSearchParams(location.search).get("vm");
+bindConsoleNavigation({ linkId: "graphical-console", mode: "graphical" });
 const status = document.getElementById("console-status");
 const feedback = document.getElementById("terminal-feedback");
 const screen = document.getElementById("terminal-screen");
@@ -19,6 +21,7 @@ function message(text, error = false) {
   status.className = error ? "error" : "";
 }
 function resize() {
+  if (!screen.clientWidth || !screen.clientHeight) return;
   fit.fit();
   if (terminal.cols > 500 || terminal.rows > 200)
     terminal.resize(Math.min(500, terminal.cols), Math.min(200, terminal.rows));

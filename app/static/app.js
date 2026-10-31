@@ -22,6 +22,7 @@ import {
   matchesOrganization,
 } from "./core.js";
 import { watchTaskDetail } from "./task-detail.js";
+import { renderEmbeddedConsole, switchEmbeddedConsole, toggleConsoleFullscreen, bindEmbeddedConsoleEvents } from "./console-view.js";
 const pageNames = {
   overview: "Overview",
   vms: "Virtual machines",
@@ -592,10 +593,10 @@ function renderVM() {
     return (
       html +
       (running
-        ? `<div class="console-intro">${v.provider === "incus" ? `<a class="button small" href="/terminal?vm=${encodeURIComponent(v.id)}" target="_blank" rel="noopener">Open text terminal ↗</a>` : ""}<span>Graphical console · ${v.provider === "incus" ? "SPICE" : "VNC"} · Click inside to capture keyboard input</span><a class="button small" href="/console?vm=${encodeURIComponent(v.id)}" target="_blank" rel="noopener">Open in new tab ↗</a></div><iframe class="console-frame" title="${esc(v.name)} console" src="/console?vm=${encodeURIComponent(v.id)}" allow="fullscreen"></iframe>`
+        ? renderEmbeddedConsole(v)
         : empty(
             "Start the VM to connect",
-            "The graphical console is available while the VM is running.",
+            "The console is available while the VM is running.",
             can() ? btn("Start VM", "start", v.id, "primary") : "",
           ))
     );
@@ -1866,6 +1867,12 @@ async function action(name, id) {
     case "console":
       location.hash = "#vm/" + encodeURIComponent(id) + "/console";
       break;
+    case "console-mode":
+      switchEmbeddedConsole(id);
+      break;
+    case "console-fullscreen":
+      await toggleConsoleFullscreen();
+      break;
     case "edit-vm":
       editVM(v);
       break;
@@ -2075,6 +2082,7 @@ window.addEventListener("session-expired", () => {
 });
 window.addEventListener("refresh-tasks", () => refreshTasks());
 async function init() {
+  bindEmbeddedConsoleEvents();
   try {
     state.user = await api("/me");
     navigate();

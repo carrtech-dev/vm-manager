@@ -920,7 +920,14 @@ td small {
   margin-bottom: 14px;
   color: var(--text-secondary);
   font-size: 12px;
+  flex-wrap: wrap;
+  gap: 12px;
 }
+.console-view-switch { display: flex; gap: 6px; }
+.console-view-switch [aria-pressed="true"] { background: var(--accent-primary, #c2410c); color: #fff; }
+.vm-console:fullscreen { box-sizing: border-box; display: flex; flex-direction: column; width: 100%; height: 100dvh; padding: 16px; overflow: hidden; background: var(--bg-canvas); }
+.vm-console:fullscreen .console-intro { flex-shrink: 0; }
+.vm-console:fullscreen .console-frame { flex: 1; height: auto; min-height: 0; }
 .login-screen {
   display: grid;
   place-items: center;

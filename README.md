@@ -42,9 +42,16 @@ partially typed text in the VM before retrying. Reconnection stops the transfer
 and never automatically replays it. Clipboard text stays in the browser and the
 console channel; it is not stored in task history.
 
-For ordinary Linux shell work on an Incus VM with a connected guest agent, choose
-**Open text terminal** on the VM's Console tab or **Text terminal** in the SPICE
-toolbar. This opens a separate root shell with normal text paste, selectable
+For ordinary Linux shell work on an Incus VM with a connected guest agent, the
+VM's **Console** tab defaults to the embedded **Text terminal**. Use the
+**Text terminal / SPICE** switch above it at any time. Both views remain loaded
+after first use, preserving the text shell and its scrollback while switching;
+the SPICE connection starts only when selected. **Full screen** expands the
+selected embedded view and keeps the switch available; Escape exits. **Open in
+new tab** opens the selected view separately, where each viewer also has a
+full-screen control. Libvirt VMs retain their embedded VNC view because text
+terminals currently require Incus.
+The text terminal opens a separate root shell with normal text paste, selectable
 output and 5,000 lines of browser scrollback. **Copy output** copies the selection
 or retained output; **Download output** saves it as text. Cmd+V / Ctrl+Shift+V
 pastes directly; multiline text opens a review dialog because line breaks can
