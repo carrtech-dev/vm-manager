@@ -421,13 +421,7 @@ function renderOverview() {
     ) +
     `<div class="resource-cards">${stat("CPU usage", host.cpu_percent.toFixed(1) + "%", host.cpu_count + " logical CPUs", host.cpu_percent)}${stat("Memory", Math.round(host.memory_used / 1024 ** 3) + " / " + Math.round(host.memory_total / 1024 ** 3) + " GiB", host.memory_percent.toFixed(1) + "% used", host.memory_percent)}${stat("Storage", size(used, 0) + " / " + size(total, 1), pools.length + " storage pools", total ? (used / total) * 100 : 0)}${stat("Virtual machines", running + " / " + vms.length, "running / total", vms.length ? (running / vms.length) * 100 : 0)}</div>${monitoringPanel("host", [""])}<div class="overview-columns">${panel(
       "Virtual machines",
-      vmTable(
-        vms
-          .slice()
-          .sort((a, b) => (b.status === "running") - (a.status === "running"))
-          .slice(0, 9),
-        true,
-      ),
+      `<div id="overview-vm-table">${vmTable(vms, true, false, true)}</div>`,
       '<a href="#vms">View all →</a>',
     )}${panel(
       "Host summary",
@@ -1978,7 +1972,9 @@ async function action(name, id) {
     case "toggle-vm-project":
       if (collapsedVMProjects.has(id)) collapsedVMProjects.delete(id);
       else collapsedVMProjects.add(id);
-      updateVMTable();
+      if (state.page === "overview") {
+        $("#overview-vm-table").innerHTML = vmTable(state.inventory.vms.filter(matchesOrganization), true, false, true);
+      } else updateVMTable();
       $$(".vm-project-toggle").find(button => button.dataset.id === id)?.focus();
       break;
     case "clear-vm-selection":
