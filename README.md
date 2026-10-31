@@ -129,9 +129,11 @@ Networks and ISO media that are still referenced cannot be deleted. Existing lib
 
 Open **Projects & tags** to create, rename or delete projects and tags. Each VM and network can belong to one project and carry multiple tags, including existing Incus and libvirt resources. Use **Assign project & tags** on a VM's Summary tab or **Organize** in the Networks list. Assignments can be changed while VMs are running and networks are in use.
 
-The **Virtual machines** list groups VMs into project folders across both hypervisors, with **Unassigned** VMs in their own folder. Click a folder to expand or collapse it; its state is retained during live refreshes and navigation. Folder counts reflect the current filters. Collapsing a folder clears its selections, and **Select all** selects only the VM rows in expanded folders.
+The **Overview** and **Virtual machines** lists group VMs into project folders across both hypervisors, with **Unassigned** VMs in their own folder. Click a folder to expand or collapse it; its state is retained during live refreshes and navigation. Folder counts reflect the current filters. Collapsing a folder clears its selections, and **Select all** selects only the VM rows in expanded folders.
 
 The **Project** and **Tag** filters above each page combine to narrow VM and network lists, overview resource counts, and the resource tree. **View resources** on a project or tag opens a combined view of its VMs and networks. **Unassigned resources** and **Untagged resources** help find resources to organize; **Clear filters** restores the full view. Host CPU, memory and storage metrics always describe the whole host.
+
+Overview includes every VM in the current project/tag view so folders are never truncated; unassigned VMs appear last.
 
 Projects are inventory groups within VM Manager, independent of Incus projects and user permissions. Assigning a VM does not assign its attached networks automatically; shared networks can remain unassigned or belong to a different project. Metadata is kept in the existing SQLite database and included in deployment backups. Deleting a project or tag removes its assignments and retains the VMs, networks and data. Administrators and operators can manage assignments; viewers can browse and filter them. Changes are audited.
 
