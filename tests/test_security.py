@@ -482,8 +482,8 @@ def test_terminal_streams_exact_input_resizes_revokes_and_closes_channels(client
         assert calls[0][2]['record-output'] is False
         payload = calls[0][2]
         if mode == 'login':
-            assert 'exec /bin/login;' in payload['command'][2]
-            assert 'exec /usr/bin/login;' in payload['command'][2]
+            assert 'login=/bin/login' in payload['command'][2]
+            assert 'login=/usr/bin/login' in payload['command'][2]
             assert '/bin/bash' not in payload['command'][2]
             assert '-f' not in payload['command'][2]
             assert payload['environment'] == {'TERM': 'xterm-256color'}
