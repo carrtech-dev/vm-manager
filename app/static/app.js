@@ -26,7 +26,7 @@ import {
 import { watchTaskDetail } from "./task-detail.js";
 import { renderEmbeddedConsole, switchEmbeddedConsole, toggleConsoleFullscreen, bindEmbeddedConsoleEvents } from "./console-view.js";
 import { monitoringPanel, refreshMonitoring } from "./monitoring.js";
-import { hostPicker, renderCluster, clusterAction, switchHost } from "./cluster-ui.js";
+import { hostPicker, renderCluster, clusterAction, switchHost, renderClusterTree, toggleClusterHost } from "./cluster-ui.js";
 import { renderOperations, operationAction, selectOperation, clearOperationSelection } from "./operations.js";
 const pageNames = {
   cluster: "Cluster",
@@ -65,7 +65,7 @@ let busy = false,
   renderedPath = "";
 const selectedVMs = new Set();
 const collapsedVMProjects = new Set();
-let hostTreeCollapsed = false;
+let clusterBusy = false;
 const seenTasks = new Map();
 let vmMetrics = null, metricsBusy = false;
 let vmSnapshots = null, snapshotsLoading = null;
@@ -151,7 +151,7 @@ function normalizeOrganizationFilters() {
 }
 function renderOrganizationFilters() {
   const inv = state.inventory;
-  return `<div class="organization-filters" aria-label="Resource filters">${select("Project", "project-filter", [["all", "All projects"], ["unassigned", "Unassigned resources"], ...inv.projects.map((p) => [p.id, p.name])], state.project)}${select("Tag", "tag-filter", [["all", "All tags"], ["untagged", "Untagged resources"], ...inv.tags.map((t) => [t.id, t.name])], state.tag)}${state.project !== "all" || state.tag !== "all" ? btn("Clear filters", "clear-filters") : ""}<small>Filters apply to VM and network lists and the resource tree.</small></div>`;
+  return `<div class="organization-filters" aria-label="Resource filters">${select("Project", "project-filter", [["all", "All projects"], ["unassigned", "Unassigned resources"], ...inv.projects.map((p) => [p.id, p.name])], state.project)}${select("Tag", "tag-filter", [["all", "All tags"], ["untagged", "Untagged resources"], ...inv.tags.map((t) => [t.id, t.name])], state.tag)}${state.project !== "all" || state.tag !== "all" ? btn("Clear filters", "clear-filters") : ""}<small>Filters apply to VM and network lists on this host. The resource tree shows the whole cluster.</small></div>`;
 }
 function organizationChips(resource, showProject = true) {
   const project = showProject && state.inventory.projects.find(
@@ -311,6 +311,7 @@ function renderLogin(message = "") {
       state.page = "overview";
       location.hash = "#overview";
       await refresh(true);
+      if (state.page !== "cluster") refreshClusterTree();
     } catch (e) {
       const error = $(".form-error");
       error.textContent = e.message;
@@ -357,23 +358,32 @@ function render() {
   if ($("#main-content")) $("#main-content").scrollTop = contentScroll;
 }
 function renderTree() {
-  if (["cluster", "users", "account"].includes(state.page)) return '<p class="muted">Choose a host or VM from Cluster to browse its resources.</p>';
-  return `<div class="tree-host"><button type="button" class="tree-host-toggle" data-action="toggle-host-tree" aria-expanded="${!hostTreeCollapsed}" aria-controls="host-tree-resources" aria-label="${hostTreeCollapsed ? "Expand" : "Collapse"} ${esc(state.inventory.host.name)} resources"><span aria-hidden="true">${hostTreeCollapsed ? "▸" : "▾"}</span></button>${copyValue(state.inventory.host.name, "hostname", `<a href="#overview">${esc(state.inventory.host.name)}</a>`)}</div><div id="host-tree-resources"${hostTreeCollapsed ? " hidden" : ""}>${[
-    "incus",
-    "libvirt",
-  ]
-    .map((provider) => {
-      const vms = state.inventory.vms.filter(
-        (v) =>
-          v.provider === provider &&
-          matchesOrganization(v) &&
-          (!state.search ||
-            v.name.toLowerCase().includes(state.search.toLowerCase())),
-      );
-      return `<details class="tree-group" open><summary>${provider === "incus" ? "Incus" : "libvirt"} <span class="subtle">(${vms.length})</span></summary>${vms.map((v) => `<div class="tree-vm ${state.page === "vm" && state.vm === v.id ? "active" : ""}"><span class="dot ${v.status}"></span>${copyValue(v.name, "hostname", `<a href="#vm/${encodeURIComponent(v.id)}/summary" title="${esc(v.name)}">${esc(v.name)}</a>`)}</div>`).join("")}${!vms.length ? '<div class="tree-vm subtle">No matching VMs</div>' : ""}</details>`;
-    })
-    .join("")}</div>`;
+  return renderClusterTree();
 }
+function updateResourceTree() {
+  const tree = $('#resource-tree');
+  if (!tree) return;
+  const scroll = tree.scrollTop;
+  tree.innerHTML = renderTree();
+  tree.scrollTop = scroll;
+}
+async function refreshClusterTree() {
+  if (clusterBusy || !state.user) return;
+  clusterBusy = true;
+  const user = state.user;
+  try {
+    const inventory = await api('/cluster/inventory');
+    if (state.user !== user) return;
+    state.clusterInventory = inventory;
+    updateResourceTree();
+    if (state.page === 'cluster' && !$('#modal').open) $('#main-content').innerHTML = renderCluster();
+  } catch (error) {
+    if (state.user === user) console.warn(error.message);
+  } finally {
+    clusterBusy = false;
+  }
+}
+
 function renderPage() {
   switch (state.page) {
     case "cluster":
@@ -1730,10 +1740,11 @@ async function refresh(force = false) {
     if (page !== state.page) return;
     state.inventory = inventory;
     if (state.page === "cluster") {
-      state.clusterInventory = await api("/cluster/inventory");
+      await refreshClusterTree();
       if (can("admin")) state.clusterKeys = await api("/cluster/keys");
     }
     normalizeOrganizationFilters();
+    updateResourceTree();
     if (state.page === "vm" && state.tab === "snapshots") await refreshSnapshots(state.vm, false);
     if (state.page === "vm" && state.tab === "summary") refreshVMMetrics();
     if (can("admin") && state.page === "users")
@@ -1981,15 +1992,9 @@ async function action(name, id) {
     case "cdrom":
       editCDROM(v);
       break;
-    case "toggle-host-tree": {
-      hostTreeCollapsed = !hostTreeCollapsed;
-      const button = $(".tree-host-toggle");
-      button.setAttribute("aria-expanded", String(!hostTreeCollapsed));
-      button.setAttribute("aria-label", `${hostTreeCollapsed ? "Expand" : "Collapse"} ${state.inventory.host.name} resources`);
-      button.firstElementChild.textContent = hostTreeCollapsed ? "▸" : "▾";
-      $("#host-tree-resources").hidden = hostTreeCollapsed;
+    case "toggle-host-tree":
+      toggleClusterHost(id);
       break;
-    }
     case "toggle-vm-project":
       if (collapsedVMProjects.has(id)) collapsedVMProjects.delete(id);
       else collapsedVMProjects.add(id);
@@ -2125,6 +2130,8 @@ async function action(name, id) {
       state.user = null;
       clearOperationSelection();
       state.inventory = null;
+      state.clusterInventory = null;
+      state.clusterHosts = null;
       renderLogin();
       break;
     case "task-detail": {
@@ -2189,6 +2196,8 @@ window.addEventListener("session-expired", () => {
   selectedVMs.clear();
   clearOperationSelection();
   state.inventory = null;
+  state.clusterInventory = null;
+  state.clusterHosts = null;
   $("#modal").close();
   renderLogin("Your session expired. Sign in to continue.");
 });
@@ -2199,6 +2208,7 @@ async function init() {
     state.user = await api("/me");
     navigate(false);
     await refresh(true);
+    if (state.page !== "cluster") refreshClusterTree();
     await refreshTasks();
   } catch {
     renderLogin();
@@ -2208,7 +2218,7 @@ setInterval(() => {
   if (!document.hidden) refreshTasks();
 }, 2000);
 setInterval(() => {
-  if (!document.hidden) refresh();
+  if (!document.hidden) { refresh(); if (state.page !== "cluster") refreshClusterTree(); }
 }, 10000);
 setInterval(() => { if (!document.hidden) refreshVMMetrics(); }, 5000);
 setInterval(() => { if (!document.hidden && state.user) refreshMonitoring(); }, 10000);

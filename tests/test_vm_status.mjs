@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 import * as core from "../app/static/core.js";
 import { renderEmbeddedConsole } from "../app/static/console-view.js";
-import { hostPicker } from "../app/static/cluster-ui.js";
+import { hostPicker, renderClusterTree } from "../app/static/cluster-ui.js";
 
 // Run the actual page renderer and refresh path without browser startup/timers.
 const source = readFileSync(new URL("../app/static/app.js", import.meta.url), "utf8")
@@ -15,18 +15,20 @@ function consolePage(provider = "incus") {
   const vm = { id: `${provider}:test`, name: "test", provider, status: "running" };
   const inventory = { vms: [vm], projects: [], tags: [], warnings: [], host: { name: "host", address: "127.0.0.1" } };
   Object.assign(core.state, {
-    user: { username: "operator", role: "operator" }, inventory, tasks: [],
+    clusterInventory: null, user: { username: "operator", role: "operator" }, inventory, tasks: [],
     page: "vm", vm: vm.id, tab: "console", search: "", project: "all", tag: "all",
   });
   let draws = 0, html = "", nextInventory = inventory;
+  const tree = {scrollTop: 21, innerHTML: ""};
   const app = { set innerHTML(value) { html = value; draws++; } };
   const modal = { open: false };
   const document = { activeElement: { tagName: "IFRAME" }, addEventListener() {} };
   const context = createContext({
-    ...core, renderEmbeddedConsole, hostPicker, document, window: { addEventListener() {} }, setInterval() {},
+    ...core, renderEmbeddedConsole, hostPicker, renderClusterTree, document, window: { addEventListener() {} }, setInterval() {},
     bindCopyButtons() {}, refreshMonitoring() {},
-    $: selector => ({ "#app": app, "#modal": modal })[selector] || null,
+    $: selector => ({ "#app": app, "#modal": modal, "#resource-tree": tree })[selector] || null,
     api: async path => {
+      if (path === '/cluster/inventory') return { hosts: [{id:'',name:'host',status:'online',host:nextInventory.host,vms:nextInventory.vms}, {id:'other',name:'other',host:{name:'other-host'},status:'online',vms:[{id:'incus:remote',name:'remote',status:'running',provider:'incus'}]}] };
       if (path === '/cluster/hosts') return { local: { name: 'host' }, hosts: [] };
       assert.equal(path, "/inventory");
       return structuredClone(nextInventory);
@@ -34,10 +36,10 @@ function consolePage(provider = "incus") {
     toast: message => assert.fail(message),
   });
   runInContext(source, context);
-  const page = runInContext("({render, refresh})", context);
+  const page = runInContext("({render, refresh, refreshClusterTree})", context);
   page.render();
   return {
-    ...page, modal,
+    ...page, modal, tree,
     get html() { return html; }, get draws() { return draws; },
     status(value) { nextInventory = { ...inventory, vms: value == null ? [] : [{ ...vm, status: value }] }; },
   };
@@ -93,4 +95,15 @@ test("a deleted VM removes its stale console and running badge", async () => {
   assert.equal(page.draws, 2);
   assert.match(page.html, /Virtual machine unavailable/);
   assert.doesNotMatch(page.html, /<iframe|badge running/);
+});
+
+
+test("cluster polling updates the sidebar while preserving a running console and tree scroll", async () => {
+  const page = consolePage();
+  await page.refreshClusterTree();
+  assert.equal(page.draws, 1);
+  assert.match(page.tree.innerHTML, /other-host/);
+  assert.match(page.tree.innerHTML, /incus%3Aremote/);
+  assert.equal(page.tree.scrollTop, 21);
+  assert.match(page.html, /<iframe/);
 });

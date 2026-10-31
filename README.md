@@ -131,7 +131,7 @@ Open **Projects & tags** to create, rename or delete projects and tags. Each VM 
 
 The **Overview** and **Virtual machines** lists group VMs into project folders across both hypervisors, with **Unassigned** VMs in their own folder. Click a folder to expand or collapse it; its state is retained during live refreshes and navigation. Folder counts reflect the current filters. Collapsing a folder clears its selections, and **Select all** selects only the VM rows in expanded folders.
 
-The **Project** and **Tag** filters above each page combine to narrow VM and network lists, overview resource counts, and the resource tree. **View resources** on a project or tag opens a combined view of its VMs and networks. **Unassigned resources** and **Untagged resources** help find resources to organize; **Clear filters** restores the full view. Host CPU, memory and storage metrics always describe the whole host.
+The **Project** and **Tag** filters above each page combine to narrow VM and network lists and overview resource counts on the selected host. The resource tree keeps showing VMs across the whole cluster. **View resources** on a project or tag opens a combined view of its VMs and networks. **Unassigned resources** and **Untagged resources** help find resources to organize; **Clear filters** restores the full view. Host CPU, memory and storage metrics always describe the whole host.
 
 Overview includes every VM in the current project/tag view so folders are never truncated; unassigned VMs appear last.
 
@@ -721,8 +721,11 @@ slow/unavailable hosts can delay a collection cycle beyond 10 seconds.
 
 Install VM Manager on each Linux host with existing Incus and libvirt. Each host
 keeps its own VMs, disks, networks, ISO library, projects, tags, snapshots, backup
-plans, monitoring and task history. The **Cluster** page combines VM inventories
-from the local manager and up to 32 explicitly linked hosts. VM identity includes
+plans, monitoring and task history. The left resource tree shows the local manager and up to 32 explicitly linked
+hosts as independently collapsible groups, each containing that host’s VMs.
+Groups use the actual hostname, refresh on every page, and remember their collapse
+state across navigation and host switches. The **Cluster** page manages host
+membership, connection status and incoming link keys. VM identity includes
 its owning host, so identical VM names on different hosts remain independent.
 
 Deploy from clean integrated `main`, supplying the target SSH account and HTTPS
@@ -748,7 +751,7 @@ python3 scripts/deploy.py --host administrator@other-host --address 192.168.8.23
    certificate field. For public HTTPS, leave the field blank. Certificate and
    hostname verification remain enabled; redirects and environment HTTP proxies
    are not followed. The central server must be able to reach the additional host.
-4. Choose **Manage VM** from the combined cluster list, or use **Resources on**
+4. Choose a VM under its host in the left resource tree, or use **Resources on**
    in the top bar to select a host. All existing VM, network, storage, ISO,
    template, backup, Linux patching, metrics and task controls then operate on that host.
    Graphical consoles, text terminals, ISO uploads and live task output pass
@@ -758,8 +761,8 @@ Switching hosts reloads the page, closing active consoles and task streams and
 clearing resource selections. Host ownership stays in the URL, including viewer
 pop-outs. Do not switch hosts during an upload. Access control and your own
 account always refer to the manager you signed into; audit and task history refer
-to the selected resource host. The Cluster page covers all hosts regardless of
-host-local project/tag filters. Unavailable hosts are identified explicitly and
+to the selected resource host. The resource tree covers all hosts regardless of
+host-local project/tag filters; its search matches VM names across the cluster. Unavailable hosts are identified explicitly and
 do not hide healthy inventories. An interrupted request is never automatically
 replayed: inspect the owning host's task history before retrying a mutation.
 

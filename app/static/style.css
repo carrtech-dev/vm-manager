@@ -1591,3 +1591,13 @@ dialog .warning {
 .host-picker select { max-width:220px; padding:7px; background:var(--bg-inputBg); color:inherit; border:1px solid var(--border-default); border-radius:6px; }
 .cluster-host-summary { padding:0 20px; margin:14px 0; overflow-wrap:anywhere; }
 @media (max-width:900px) { .host-picker { max-width:180px; } .host-picker select { max-width:130px; } }
+
+.tree-host-group { margin-bottom: 6px; }
+.tree-host-name { min-width: 0; overflow-wrap: anywhere; }
+.tree-host-count { margin-left: auto; padding-left: 6px; font-size: 10px; }
+.tree-host.selected .tree-host-name { color: var(--accent-orange); }
+.tree-host-resources .tree-vm { padding-left: 25px; gap: 6px; }
+.tree-host-resources .tree-vm > a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-vm-provider { margin-left: auto; font-size: 9px; color: var(--text-muted); flex: none; }
+
+.tree-host > .copy-value { min-width: 0; }
