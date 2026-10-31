@@ -1800,7 +1800,7 @@ def test_vm_creation_and_backup_restore_reserve_correct_vm_keys(client, monkeypa
     monkeypatch.setattr(main, 'get_iso', lambda _: None)
     main.create_vm(main.VMCreate(name='new-vm', pool='pool', network='net'), {'username': 'operator'})
     assert submitted[-1] == {'incus:new-vm'}
-    monkeypatch.setattr(main.backup_manager, 'record', lambda _: {'status': 'completed', 'vm_id': 'libvirt:source'})
+    monkeypatch.setattr(main.backup_manager, 'record', lambda _: {'status': 'completed', 'vm_id': 'libvirt:source', 'trigger': 'manual'})
     main.restore_backup('backup', main.backups.Restore(name='restored'), {'username': 'operator'})
     assert submitted[-1] == {'libvirt:source', 'libvirt:restored'}
 

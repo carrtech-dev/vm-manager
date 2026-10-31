@@ -48,6 +48,7 @@ from . import external_storage
 from . import guest_agent
 from . import guest_terminal
 from . import backups
+from . import templates
 from .power import PowerInterrupted, PowerRequests
 from .protection import ProtectionPower
 from .task_output import Recorder, capture, emit
@@ -531,7 +532,8 @@ def get_inventory(user=Depends(require())):
         external, external_error = {'sources': [], 'mounts': []}, str(exc)
     return dict(result, external_storage=external, external_storage_error=external_error,
                 storage_blocks=blocks, storage_defaults=storage.defaults(store),
-                storage_error=error, backup_plans=backups.plans(store), vm_backups=backups.catalog(store))
+                storage_error=error, backup_plans=backups.plans(store), vm_backups=backups.catalog(store),
+                vm_templates=templates.catalog(store))
 
 
 @app.get('/api/storage/sources')
@@ -993,7 +995,7 @@ def remove_vm_contents(vm_id, cleanup, preserve_backups, actor):
         snapshots.delete_all(provider, vm_name, vm_id)
         if not preserve_backups:
             with store.db() as db:
-                backup_ids = [r['id'] for r in db.execute("SELECT id FROM vm_backups WHERE vm_id=?", (vm_id,))]
+                backup_ids = [r['id'] for r in db.execute("SELECT id FROM vm_backups WHERE vm_id=? AND trigger!='template'", (vm_id,))]
             for backup_id in backup_ids:
                 backup_manager.delete(backup_id)
                 store.audit(actor, 'backup.delete', backup_id, 'Bulk VM deletion: ' + vm_id)
@@ -2394,7 +2396,7 @@ def list_backups(user=Depends(require())):
     return {'backups': backups.catalog(store), 'plans': backups.plans(store)}
 
 
-def queue_backups(user, vm_ids, block_id, shutdown=False, trigger='manual', keep=None, mode=None):
+def queue_backups(user, vm_ids, block_id, shutdown=False, trigger='manual', keep=None, mode=None, template=None):
     with backup_manager.lock:
         if deleting_vms.intersection(vm_ids):
             raise HypervisorError('A selected VM is being deleted; wait for deletion to finish')
@@ -2405,8 +2407,13 @@ def queue_backups(user, vm_ids, block_id, shutdown=False, trigger='manual', keep
             with store.db() as db:
                 db.executemany("INSERT INTO vm_backups(id,vm_id,block_id,status,created,trigger) VALUES(?,?,?,'queued',?,?)",
                                [(bid, vm_id, block_id, now, trigger) for bid, vm_id in rows])
+                if template is not None:
+                    db.execute('INSERT INTO vm_templates(id,name,description) VALUES(?,?,?)',
+                               (rows[0][0], template.name, template.description))
         except sqlite3.IntegrityError as exc:
-            raise HypervisorError('A selected VM already has a queued or running backup') from exc
+            if 'vm_templates.name' in str(exc):
+                raise HypervisorError('A template with this name already exists') from exc
+            raise HypervisorError('A selected VM already has a queued or running backup or template capture') from exc
         result = []
         for backup_id, vm_id in rows:
             cancelled = power_requests.register(vm_id, 'backup')
@@ -2419,8 +2426,9 @@ def queue_backups(user, vm_ids, block_id, shutdown=False, trigger='manual', keep
                 message = backup_manager.create(backup_id, shutdown, cancelled, mode)
                 if trigger == 'scheduled' and keep is not None:
                     backup_manager.retain(vm_id, block_id, keep)
-                return message
-            queued = task(user, 'backup.create', vm_id, create)
+                return 'Template captured: ' + template.name if template is not None else message
+            queued = (task(user, 'template.capture', vm_id, create, resources={vm_id, 'template:' + backup_id})
+                      if template is not None else task(user, 'backup.create', vm_id, create))
             with store.db() as db:
                 db.execute('UPDATE vm_backups SET task_id=? WHERE id=?', (queued['task_id'], backup_id))
             result.append(dict(queued, backup_id=backup_id, vm_id=vm_id))
@@ -2461,6 +2469,8 @@ def remove_backup_plan(vm_id: str, user=Depends(require('operate'))):
 @app.post('/api/backups/{backup_id}/restore')
 def restore_backup(backup_id: str, body: backups.Restore, user=Depends(require('operate'))):
     row = backup_manager.record(backup_id)
+    if row['trigger'] == 'template':
+        raise HypervisorError('Use the Templates library to create a VM from this template')
     if row['status'] != 'completed':
         raise HypervisorError('Only completed backups can be restored')
     def restore():
@@ -2475,9 +2485,55 @@ def restore_backup(backup_id: str, body: backups.Restore, user=Depends(require('
 @app.delete('/api/backups/{backup_id}')
 def delete_backup(backup_id: str, body: Confirm, user=Depends(require('operate'))):
     row = backup_manager.record(backup_id)
+    if row['trigger'] == 'template':
+        raise HypervisorError('Use the Templates library to delete this template')
     if body.confirm_name != row['vm_id'].split(':', 1)[1]:
         raise HTTPException(400, 'Type the source VM name to delete this backup')
     return task(user, 'backup.delete', row['vm_id'], lambda: backup_manager.delete(backup_id))
+
+
+@app.get('/api/templates')
+def list_templates(user=Depends(require())):
+    return {'templates': templates.catalog(store)}
+
+
+@app.post('/api/templates')
+def capture_template(body: templates.Capture, user=Depends(require('operate'))):
+    with storage.lock:
+        backups.destination(store, DATA, body.block_id)
+    result = queue_backups(user, [body.vm_id], body.block_id, mode=body.mode,
+                           trigger='template', template=body)['tasks'][0]
+    return {'task_id': result['task_id'], 'template_id': result['backup_id']}
+
+
+@app.post('/api/templates/{template_id}/vms')
+def create_from_template(template_id: str, body: backups.Restore, user=Depends(require('operate'))):
+    row = templates.record(store, template_id)
+    if row['status'] != 'completed':
+        raise HypervisorError('Only completed templates can create VMs')
+    provider = row['vm_id'].split(':', 1)[0]
+    def create():
+        try:
+            return backup_manager.restore(template_id, body)
+        except Exception as exc:
+            raise HypervisorError(str(exc) + '. Inspect destination ' + body.name +
+                                  ' for partial resources before retrying; the template is retained.') from exc
+    return task(user, 'template.create-vm', row['name'] + ' → ' + body.name, create,
+                resources={'template:' + template_id, provider + ':' + body.name})
+
+
+@app.delete('/api/templates/{template_id}')
+def delete_template(template_id: str, body: Confirm, user=Depends(require('operate'))):
+    row = templates.record(store, template_id)
+    if body.confirm_name != row['name']:
+        raise HTTPException(400, 'Type the template name to delete it')
+    if row['status'] in ('queued', 'running'):
+        raise HypervisorError('Wait for template capture to finish')
+    def delete():
+        backup_manager.delete(template_id)
+        return 'Template deleted; VMs created from it are retained.'
+    return task(user, 'template.delete', row['name'], delete,
+                resources={'template:' + template_id})
 
 
 def backup_tick(now=None):

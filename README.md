@@ -338,6 +338,44 @@ actual hard quotas, capacity reservation, upload/backup routing, expansion and
 deletion guards; restores existing defaults and removes its own resources. It
 uses a temporary operator and never resets existing passwords.
 
+## VM templates
+
+Open a VM and select **Create template**, or use **Templates → Create template**.
+Choose a unique template name, an optional description, and a backup storage block
+or writable SMB/S3 source. Templates use the portable full-archive engine for
+both Incus and libvirt, including supported private data disks and configuration.
+Choose stopped-only capture (the default), graceful shutdown/capture/restart, or
+live crash-consistent capture. The backup engine's disk, device, live-capture and
+local-staging restrictions below also apply to templates. The source VM is retained.
+
+In **Templates**, select **Create VM**, enter an unused VM name and, for Incus,
+choose VM disk storage. The new VM uses the template's hypervisor and configuration,
+has independent disks and new VM UUIDs/MAC addresses, and remains stopped with
+autostart disabled and ISO media ejected. Libvirt disks use application disk storage.
+Edit CPU, memory or network settings on the new VM before starting it if needed.
+Prepare/generalize the guest before capture, or review copied hostnames, static
+IPs, machine/application identities, secrets and automatic external mounts before
+starting copies alongside other VMs. VM Manager does not rewrite guest disk contents
+or generalize the installed OS. Shared/external data and host network definitions
+are not copied. Failed creation can leave partial destination resources for inspection.
+
+Templates are independent, reusable capture points: changing/deleting the source
+VM or any copy does not change the template. Bulk VM deletion and backup retention
+preserve templates. Only explicit, exact-name-confirmed template deletion removes
+the template/archive; existing VMs remain. Failed/interrupted captures remain in
+the library for inspection/deletion. Templates occupy full archive space until
+deleted and keep their storage referenced. Template capture, creation and deletion
+appear in Task history and the audit trail. Administrators and operators manage
+templates; viewers can browse. Deployment SQLite backups include template metadata,
+not guest archives; protect the chosen storage independently.
+
+`scripts/template_check.py` is an opt-in root-only acceptance check on the
+hypervisor using the deployed service. It creates uniquely named disposable VMs,
+a temporary backup block and an operator/session. It checks both providers,
+repeated creation, independent disk contents/identities, source deletion, template
+deletion, checksum rejection and storage guards, then removes its own resources.
+Do not substitute production VMs or disks into this check.
+
 ## VM backups and restore
 
 Create storage with purpose **VM & configuration backups** in **Storage**. Open a

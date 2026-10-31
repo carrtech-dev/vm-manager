@@ -89,6 +89,8 @@ def initialize(store):
                 task_id TEXT, trigger TEXT NOT NULL);
             CREATE UNIQUE INDEX IF NOT EXISTS backup_one_active ON vm_backups(vm_id)
                 WHERE status IN ('queued','running');
+            CREATE TABLE IF NOT EXISTS vm_templates(id TEXT PRIMARY KEY,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE, description TEXT NOT NULL DEFAULT '');
         """)
         db.execute("UPDATE vm_backups SET status='interrupted', finished=?, message='Service restarted. Partial files are retained; delete this entry before retrying if space is needed.' WHERE status IN ('queued','running')", (time.time(),))
 
@@ -117,7 +119,7 @@ def plans(store):
 
 def catalog(store):
     with store.db() as db:
-        return [dict(r) for r in db.execute("SELECT * FROM vm_backups ORDER BY created DESC")]
+        return [dict(r) for r in db.execute("SELECT * FROM vm_backups WHERE trigger!='template' ORDER BY created DESC")]
 
 
 def destination(store, data, block_id):
@@ -429,6 +431,7 @@ class Manager:
             if path.exists():
                 shutil.rmtree(path)
             with self.store.db() as db:
+                db.execute('DELETE FROM vm_templates WHERE id=?', (backup_id,))
                 db.execute('DELETE FROM vm_backups WHERE id=?', (backup_id,))
             # Leave the mount empty so that storage deletion remains possible.
             if path.parent.is_dir() and not any(path.parent.iterdir()):

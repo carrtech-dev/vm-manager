@@ -33,6 +33,7 @@ const pageNames = {
   isos: "ISO library",
   storage: "Storage",
   backups: "Backups",
+  templates: "Templates",
   users: "Access control",
   tasks: "Task history",
   audit: "Audit trail",
@@ -47,6 +48,7 @@ const navItems = [
   ["isos", "◉", "ISO library"],
   ["storage", "▤", "Storage"],
   ["backups", "↺", "Backups"],
+  ["templates", "▧", "Templates"],
   ["users", "♧", "Access control"],
 ];
 let busy = false,
@@ -381,6 +383,8 @@ function renderPage() {
       return renderStorage();
     case "backups":
       return renderBackups();
+    case "templates":
+      return renderTemplates();
     case "users":
       return renderUsers();
     case "tasks":
@@ -522,7 +526,7 @@ function renderVMs() {
     title(
       "Virtual machines",
       "Manage Incus and libvirt guests",
-      can() ? btn("+ Create VM", "create-vm", "", "primary") : "",
+      can() ? btn("From template", "templates") + btn("+ Create VM", "create-vm", "", "primary") : "",
     ) +
     `<div class="toolbar"><input id="vm-search" aria-label="Search virtual machines" placeholder="⌕  Search virtual machines" value="${esc(state.search)}"><select id="provider-filter" aria-label="Hypervisor filter">${[
       ["all", "All hypervisors"],
@@ -606,7 +610,7 @@ function renderVM() {
     `<span class="title-status">${copyValue(v.name)} ${badge(v.status)}</span>`,
     `${v.provider === "incus" ? "Incus" : "libvirt"} virtual machine${v.managed ? " · Created in VM Manager" : ""}`,
     can()
-      ? `${btn("Console", "console", v.id, "secondary", !running)}${btn(running ? "Shutdown" : "Start", running ? "shutdown" : "start", v.id, "primary", !["running", "stopped"].includes(v.status))}${btn(v.pending?.length ? "Restart & apply" : "Restart", "restart", v.id, "secondary", !running)}${btn("Force stop", "force-stop", v.id, "danger", !running)}`
+      ? `${btn("Console", "console", v.id, "secondary", !running)}${btn("Create template", "capture-template", v.id, "secondary", !["running", "stopped"].includes(v.status))}${btn(running ? "Shutdown" : "Start", running ? "shutdown" : "start", v.id, "primary", !["running", "stopped"].includes(v.status))}${btn(v.pending?.length ? "Restart & apply" : "Restart", "restart", v.id, "secondary", !running)}${btn("Force stop", "force-stop", v.id, "danger", !running)}`
       : "",
   );
   html += `<div class="tabs">${["summary", "monitor", "hardware", "snapshots", "backups", "console", "options"].map((t) => `<button class="tab ${state.tab === t ? "active" : ""}" data-action="vm-tab" data-id="${t}" ${t === "console" && !can() ? "disabled" : ""}>${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</div>`;
@@ -989,6 +993,36 @@ function renderISOs() {
     `<p class="subtle" style="font-size:11px">Uploaded images are stored persistently and verified with SHA-256. Existing Incus ISO volumes are discovered automatically. Eject media from all VMs before deleting it.</p>`
   );
 }
+const templateRows = () => state.inventory.vm_templates || [];
+function renderTemplates() {
+  const rows = templateRows().filter(t => !state.search || `${t.name} ${t.description} ${t.vm_id}`.toLowerCase().includes(state.search.toLowerCase()));
+  return title("VM templates", "Capture a configured VM once, then create independent VMs from it", can() ? btn("Create template", "capture-template", "", "primary", !state.inventory.vms.length) : "") +
+    `<div class="hint">Templates include VM configuration, root disks and supported private data disks. They remain available after the source VM is deleted. Each new VM uses the same hypervisor as its template and starts stopped, with independent disks and new VM IDs and MAC addresses. Prepare a generalized guest before capture, or review its hostname, static IPs, credentials and automatic external mounts before starting each copy. Shared data and ISO media are excluded. CPU, memory and network settings can be edited on the new VM before starting.</div>` +
+    panel("Template library", table(["Template", "Source VM", "Created", "Storage", "Status", "Size", "Actions"], rows.map(t => `<tr><td class="name">${esc(t.name)}${t.description ? `<small>${esc(t.description)}</small>` : ""}</td><td>${resourceName(t.vm_id)}<small>${esc(t.vm_id.split(":")[0])}</small></td><td>${when(t.created)}</td><td>${esc(backupBlockName(t.block_id))}</td><td>${badge(t.status)}${t.message ? `<small>${esc(t.message)}</small>` : ""}</td><td>${size(t.size)}</td><td><div class="actions">${can() ? smallAction("Create VM", "use-template", t.id, t.status !== "completed") + smallAction("Delete", "delete-template", t.id, ["queued", "running"].includes(t.status)) : "Read only"}</div></td></tr>`)));
+}
+function captureTemplate(vmId = "") {
+  if (!backupDestinations().length) throw new Error("Add a backup block or writable external source in Storage first");
+  const vms = state.inventory.vms.filter(v => ["running", "stopped"].includes(v.status));
+  if (!vms.length) throw new Error("A running or stopped VM is required to create a template");
+  const v = vms.find(v => v.id === vmId) || vms[0];
+  modal("Create VM template", select("Source VM", "vm_id", vms.map(v => [v.id, `${v.name} · ${v.provider} · ${v.status}`]), v.id) +
+    field("Template name", "name", v.name + " template", {hint: "A unique template name, up to 100 characters."}) + textarea("Description (optional)", "description") +
+    select("Template storage", "block_id", backupDestinations(), state.inventory.storage_defaults?.backup || backupDestinations()[0][0]) +
+    select("Capture mode", "mode", [["stopped", "Require VM to be stopped"], ["shutdown", "Gracefully shut down, capture, then restart"], ["live", "Live capture (crash-consistent)"]], "stopped") +
+    `<div class="warning">Prepare the guest for reuse before capture. Templates retain guest hostnames, static IPs, secrets and automatic external mounts. Live capture excludes memory and unsaved data; shutdown mode allows downtime during capture. The source VM is retained. Templates use full archive space and remain until explicitly deleted.</div>`,
+    async f => { await queue("/templates", "POST", {vm_id: f.get("vm_id"), name: f.get("name"), description: f.get("description"), block_id: f.get("block_id"), mode: f.get("mode")}); location.hash = "templates"; },
+    {submit: "Capture template", wide: true});
+}
+function useTemplate(id) {
+  const t = templateRows().find(t => t.id === id);
+  if (!t || t.status !== "completed") throw new Error("Choose a completed template");
+  modal("Create VM from template", `<p>Template: <strong>${esc(t.name)}</strong> · ${esc(t.vm_id.split(":")[0])}</p><div class="warning">Creates an independent, stopped VM with new VM IDs and MAC addresses. Autostart is disabled and ISO media is ejected. Review copied hostnames, static IPs, application identities and external mounts/credentials before starting. Failed creation may leave partial resources for inspection.</div>` +
+    field("New VM name", "name", "", {hint: "A unique name, up to 63 letters, digits, underscores or hyphens; start with a letter."}) +
+    (t.vm_id.startsWith("incus:") ? select("VM disk storage", "pool", poolOptions(), defaultVMPool()) : `<div class="hint">Libvirt disks use application disk storage.</div>`),
+    f => queue("/templates/" + id + "/vms", "POST", {name: f.get("name"), pool: f.get("pool") || ""}),
+    {submit: "Create VM", wide: true});
+}
+
 const backupPlans = () => state.inventory.backup_plans || [];
 const backupRows = () => state.inventory.vm_backups || [];
 const selectedBackupVMs = new Set();
@@ -1762,6 +1796,15 @@ async function action(name, id) {
       const snapshot = id.split("|")[1];
       confirmAction("Delete snapshot", snapshot, "This permanently removes this restore point from all included disks. The current VM disk contents are retained. Delete child snapshots first.",
         () => queue(ref(v.id) + "/snapshots/" + encodeURIComponent(snapshot), "DELETE", { confirm_name: snapshot }));
+      break;
+    }
+    case "templates": location.hash = "templates"; break;
+    case "capture-template": captureTemplate(id); break;
+    case "use-template": useTemplate(id); break;
+    case "delete-template": {
+      const t = templateRows().find(t => t.id === id);
+      if (!t) return;
+      confirmAction("Delete VM template", t.name, "Permanently delete this template and its archive? The source VM and VMs created from this template are retained.", () => queue("/templates/" + id, "DELETE", {confirm_name: t.name}));
       break;
     }
     case "backup-now": backupForm([id]); break;
