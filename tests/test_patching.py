@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from app import main, patching, guest_patch
 from app.hypervisor import HypervisorError
+from app.power import PowerInterrupted
 from app.security import Store, hash_password
 
 real_task = main.task
@@ -93,13 +94,13 @@ def test_uncertain_disconnect_blocks_new_runs_and_retries_only_status(env, monke
     monkeypatch.setattr(patching, 'guest', guest)
     env.manager.create(patching.Request(vm_ids=['incus:one']), 'operator')
     env.manager.tick()
-    with pytest.raises(HypervisorError):
+    with pytest.raises(PowerInterrupted):
         env.jobs[0].fn()
     assert rows(env)[0]['status'] == 'reconnecting'
     with pytest.raises(HypervisorError):
         env.manager.create(patching.Request(vm_ids=['incus:one']), 'operator')
     env.manager.tick(time.time() + 61)
-    with pytest.raises(HypervisorError):
+    with pytest.raises(PowerInterrupted):
         env.jobs[-1].fn()
     assert env.calls == ['probe', 'launch', 'status']
 

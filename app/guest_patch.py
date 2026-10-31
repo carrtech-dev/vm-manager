@@ -171,7 +171,7 @@ def execute(body):
         state['reboot_requested_at'] = time.time()
         write(state_file, state)
         result = command(['systemd-run', '--unit=vmm-patch-reboot-' + run_id,
-                          '--on-active=5s', '/usr/bin/systemctl', 'reboot'])
+                          '--on-active=5s', '--timer-property=AccuracySec=1s', '/usr/bin/systemctl', 'reboot'])
         if result.returncode:
             state['reboot_error'] = 'Unable to schedule reboot; reboot manually'
             write(state_file, state)

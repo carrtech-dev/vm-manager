@@ -49,7 +49,16 @@ def main():
     client, viewer = clients
 
     def request(method, path, body=None):
-        response = client.request(method, path, json=body)
+        # Reads can race a deployment/restart. Never blindly retry mutations:
+        # their response may have been lost after the operation was accepted.
+        for attempt in range(60 if method == 'GET' else 1):
+            try:
+                response = client.request(method, path, json=body)
+                break
+            except httpx.TransportError:
+                if method != 'GET' or attempt == 59:
+                    raise
+                time.sleep(1)
         assert response.status_code == 200, (method, path, response.status_code, response.text)
         return response.json()
 
@@ -145,9 +154,9 @@ def main():
             while args.browser_state.exists() and time.monotonic() < deadline:
                 time.sleep(1)
     finally:
-        for sid in schedules:
-            client.delete(root + '/schedules/' + sid)
         with db:
+            for sid in schedules:
+                db.execute('DELETE FROM patch_schedules WHERE id=?', (sid,))
             for uid in users:
                 db.execute('DELETE FROM sessions WHERE user_id=?', (uid,))
                 db.execute('DELETE FROM users WHERE id=?', (uid,))

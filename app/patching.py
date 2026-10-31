@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from . import backups, storage
 from .guest_exec import execute
 from .hypervisor import HypervisorError, name
+from .power import PowerInterrupted
 from .task_output import emit
 
 ACTIVE = ('pending', 'dispatched', 'running', 'reconnecting')
@@ -225,6 +226,7 @@ class Manager:
                 current = db.execute('SELECT status FROM patch_runs WHERE id=?', (run_id,)).fetchone()[0]
             if current == 'running':
                 self.finish(run_id, 'reconnecting', {'message': str(exc)})
+                raise PowerInterrupted(str(exc) + '; the original guest transaction will be checked again') from exc
             raise
 
     def tick(self, now=None):
