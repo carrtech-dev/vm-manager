@@ -36,7 +36,7 @@ def prepare(incus, vm_name):
         }
 
     incus.update(vm_name, attach)
-    return 'Agent installer CD ready. Run the command in the VM console, then use Check agent. Keep the CD attached for future boots.'
+    return 'Optional agent installer CD ready. Run the command in the VM console, then use Check agent. Keep the CD attached only if the guest relies on it at boot; it does not need to stay mounted inside Linux.'
 
 
 def status(incus, vm_name):

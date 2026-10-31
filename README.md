@@ -392,15 +392,19 @@ working guest agent. Windows guests are not supported by this mount installer.
 For new Linux VMs, use an image with the appropriate agent prepared.
 
 For an existing Incus VM, select **Install Incus agent** on its **Summary** or
-**Hardware** tab. Attach the installer CD, then open the VM console, log in and
+**Hardware** tab. Open the VM console, log in and
 run the provided Linux command with sudo (or as root without sudo). First-time
 setup requires this guest-side step because guest commands need an agent already
 running. **Check agent** verifies the connection and whether Python 3 and systemd
 are available for automatic mounts. It reports an unavailable connection without
-assuming the agent is absent. The CD can be prepared while running or stopped;
-if it is not visible inside a running guest, restart the VM. Keep the CD attached
-for credentials and agent updates at future boots. Preparation is queued and
-audited, preserves other devices and installation media, and is safe to repeat.
+assuming the agent is absent. The command first uses Incus's built-in shared
+filesystem (9p), which requires no CD. Attach the optional installer CD only if
+that filesystem is unavailable, then run the command again. The CD can be
+prepared while running or stopped; if it is not visible inside a running guest,
+restart the VM. Guests that rely on the CD need it attached at boot for
+credentials and agent updates; it need not stay mounted inside Linux. CD
+preparation is queued and audited, preserves other devices and installation
+media, and is safe to repeat.
 This guided installer supports Linux with systemd; libvirt VMs still need their
 QEMU guest agent prepared separately. See the
 [Incus agent installation documentation](https://linuxcontainers.org/incus/docs/main/howto/instances_create/#install-the-incus-agent-into-virtual-machine-instances).

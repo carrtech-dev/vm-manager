@@ -726,7 +726,7 @@ function renderVM() {
     }
     hardware.push([
       `${isNIC ? "Network adapter" : isISO ? "CD/DVD drive" : "Hard disk"} (${esc(key)})`,
-      isAgent ? "Incus agent installer · Keep attached for future boots" : value,
+      isAgent ? "Incus agent CD · Needed at boot only when the guest uses the CD fallback" : value,
       actions,
     ]);
   }
@@ -757,7 +757,7 @@ const agentInstallCommand = `sudo sh -c 'set -eu; d=$(mktemp -d /run/incus-agent
 
 function installAgent(v) {
   const dialog = modal("Install Incus agent · " + v.name,
-    `<p>First-time installation needs a command inside the VM. Linux with systemd is supported by this installer.</p><ol><li><p>Attach the installer CD. Keep it attached so the agent can load its credentials on every boot.</p><button type="button" class="button secondary" id="agent-prepare">Attach installer CD</button><p id="agent-prepare-status" role="status"></p></li><li><p>Start the VM if needed, open its console and log in. Run this command in a Linux terminal with sudo access, or omit sudo in a root shell.</p><div class="hint" style="overflow-wrap:anywhere">${copyValue(agentInstallCommand, "installation command", `<code style="white-space:pre-wrap">${esc(agentInstallCommand)}</code>`)}</div><p><a class="button secondary" href="/console?vm=${encodeURIComponent(v.id)}" target="_blank" rel="noopener">Open VM console ↗</a></p><p class="muted">If the CD is not visible after attaching it, restart the VM and try again. This installs the guest agent; automatic storage mounts also need /usr/bin/python3.</p></li><li><p>After installation, verify the guest connection and mounting prerequisites.</p><button type="button" class="button secondary" id="agent-check">Check agent</button><p id="agent-status" role="status" aria-live="polite"></p></li></ol>`,
+    `<p>First-time installation needs a command inside the VM. Linux with systemd is supported by this installer. The command first uses Incus’s built-in shared filesystem (9p), which requires no CD.</p><ol><li><p>Optional CD fallback: try the command below first. Attach the installer CD only if the shared filesystem is unavailable, then run the command again. Guests using the CD need it attached at boot for agent files and connection credentials; it does not need to stay mounted inside Linux.</p><button type="button" class="button secondary" id="agent-prepare">Attach optional installer CD</button><p id="agent-prepare-status" role="status"></p></li><li><p>Start the VM if needed, open its console and log in. Run this command in a Linux terminal with sudo access, or omit sudo in a root shell.</p><div class="hint" style="overflow-wrap:anywhere">${copyValue(agentInstallCommand, "installation command", `<code style="white-space:pre-wrap">${esc(agentInstallCommand)}</code>`)}</div><p><a class="button secondary" href="/console?vm=${encodeURIComponent(v.id)}" target="_blank" rel="noopener">Open VM console ↗</a></p><p class="muted">If the CD is not visible after attaching it, restart the VM and try again. This installs the guest agent; automatic storage mounts also need /usr/bin/python3.</p></li><li><p>After installation, verify the guest connection and mounting prerequisites.</p><button type="button" class="button secondary" id="agent-check">Check agent</button><p id="agent-status" role="status" aria-live="polite"></p></li></ol>`,
     async () => {}, { wide: true, submit: "Done" });
   $("footer .close-modal", dialog).textContent = "Close";
   let disposed = false, timer;
@@ -776,7 +776,7 @@ function installAgent(v) {
       const result = await api(ref(v.id) + "/agent");
       if (!active()) return;
       status.textContent = result.message;
-      if (result.installer_attached && !prepare.disabled) note.textContent = "Installer CD is attached.";
+      if (result.installer_attached && !prepare.disabled) note.textContent = "Optional installer CD is attached. Keep it attached if the guest relies on the CD at boot.";
     } catch (error) {
       if (active()) status.textContent = error.message;
     } finally {
