@@ -33,7 +33,7 @@ def terminal_message(raw):
     raise ValueError('Unknown terminal message')
 
 
-async def bridge(ws, incus, vm_name, authorize, audit, auth_interval=20):
+async def bridge(ws, incus, vm_name, authorize, audit, auth_interval=20, mode="login"):
     operation = None
     data_socket = control = None
     pending = []
@@ -42,13 +42,23 @@ async def bridge(ws, incus, vm_name, authorize, audit, auth_interval=20):
         vm = await asyncio.to_thread(incus.vm, vm_name)
         if vm.get('type') != 'virtual-machine' or vm.get('status', '').lower() != 'running':
             raise HypervisorError('A running virtual machine is required')
+        authorize()
+        # Login owns guest authentication (including PAM and password echo).
+        # Never fall back to a shell when login is unavailable or fails.
+        command = (['/bin/sh', '-c',
+                    'if [ -x /bin/login ]; then exec /bin/login; '
+                    'elif [ -x /usr/bin/login ]; then exec /usr/bin/login; '
+                    'else printf "Guest login program unavailable. Use the graphical console.\\n"; exit 1; fi']
+                   if mode == 'login' else
+                   ['/bin/sh', '-c', 'if [ -x /bin/bash ]; then exec /bin/bash -l; else exec /bin/sh -l; fi'])
         operation = await asyncio.to_thread(incus.request, 'POST',
             '/1.0/instances/' + quote(vm_name) + '/exec', {
-                'command': ['/bin/sh', '-c', 'if [ -x /bin/bash ]; then exec /bin/bash -l; else exec /bin/sh -l; fi'],
+                'command': command,
                 'interactive': True, 'wait-for-websocket': True,
                 'record-output': False, 'width': 100, 'height': 30,
-                'environment': {'TERM': 'xterm-256color', 'HOME': '/root', 'USER': 'root'},
-                'user': 0, 'group': 0, 'cwd': '/root',
+                'environment': ({'TERM': 'xterm-256color', 'HOME': '/root', 'USER': 'root'}
+                                if mode == 'root' else {'TERM': 'xterm-256color'}),
+                'user': 0, 'group': 0, 'cwd': '/root' if mode == 'root' else '/',
             }, False)
         url = urlsplit(operation['operation'])
         base = 'ws://incus' + url.path + '/websocket?'
@@ -60,7 +70,7 @@ async def bridge(ws, incus, vm_name, authorize, audit, auth_interval=20):
                                          max_size=1024 * 1024, ping_interval=20, ping_timeout=20)
         authorize()
         audit()
-        await ws.send_json({'type': 'ready'})
+        await ws.send_json({'type': 'ready', 'mode': mode})
         output_credit = asyncio.Event()
         output_credit.set()
 

@@ -51,8 +51,16 @@ selected embedded view and keeps the switch available; Escape exits. **Open in
 new tab** opens the selected view separately, where each viewer also has a
 full-screen control. Libvirt VMs retain their embedded VNC view because text
 terminals currently require Incus.
-The text terminal opens a separate root shell with normal text paste, selectable
-output and 5,000 lines of browser scrollback. **Copy output** copies the selection
+The text terminal starts at the VM’s own login prompt. Sign in with an account
+and password configured inside that VM; VM Manager credentials do not sign you
+into the guest. Guest login policies apply, so locked/passwordless cloud-image
+accounts may need a password configured first. VM Manager administrators can
+choose **Open as root** to start a root shell directly without guest credentials.
+Operators always use guest login. **Reconnect to login** starts a fresh guest
+login session, including after using root access. The guest must provide a Linux
+`login` program; if it is unavailable, use the graphical console.
+The terminal supports normal text paste, selectable output and 5,000 lines of
+browser scrollback. **Copy output** copies the selection
 or retained output; **Download output** saves it as text. Cmd+V / Ctrl+Shift+V
 pastes directly; multiline text opens a review dialog because line breaks can
 run commands. No additional Enter is added. The **Paste** button also supports
@@ -63,7 +71,7 @@ Terminal history stays in the open browser tab, including after a disconnect.
 Reloading/closing the tab discards that browser buffer. Reconnect starts a new
 shell and never replays input. Closing the connection terminates that terminal's
 guest exec session. Shells can keep their normal history files inside the guest;
-VM Manager records the terminal connection in audit history, not its commands
+VM Manager records the terminal connection and login/root mode in audit history, not its commands
 or output. Terminal access requires an operator/administrator, same-origin
 session and CSRF token, with ongoing role/session checks. It currently supports
 running Incus VMs only and requires the Incus agent. The graphical SPICE/VNC

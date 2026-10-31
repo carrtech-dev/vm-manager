@@ -2077,11 +2077,17 @@ console_lock = asyncio.Lock()
 
 @app.websocket('/api/terminal/{vm_id}')
 async def terminal(ws: WebSocket, vm_id: str):
+    mode = ws.query_params.get('mode', 'login')
+    if mode not in ('login', 'root'):
+        await ws.close(code=4400, reason='Invalid terminal mode')
+        return
     try:
         def authorize():
             current = session(ws)
             if 'operate' not in ROLES.get(current['role'], set()):
                 raise HTTPException(403, 'Terminal access requires an operator')
+            if mode == 'root' and current['role'] != 'administrator':
+                raise HTTPException(403, 'Root terminal access requires an administrator')
             return current
 
         user = authorize()
@@ -2095,7 +2101,8 @@ async def terminal(ws: WebSocket, vm_id: str):
             await ws.close(code=4400, reason='Text terminals currently require Incus')
             return
         await guest_terminal.bridge(ws, incus, vm_name, authorize,
-            lambda: store.audit(user['username'], 'terminal.open', vm_id), CONSOLE_AUTH_INTERVAL)
+            lambda: store.audit(user['username'], 'terminal.open', vm_id, 'mode=' + mode),
+            CONSOLE_AUTH_INTERVAL, mode=mode)
     except (HTTPException, HypervisorError):
         await ws.close(code=4403)
 

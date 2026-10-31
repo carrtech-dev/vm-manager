@@ -412,12 +412,29 @@ def test_terminal_rejects_unauthorized_connections_before_exec(client, monkeypat
             pass
 
 
-def test_terminal_streams_exact_input_resizes_revokes_and_closes_channels(client, monkeypatch):
+@pytest.mark.parametrize('role,mode,code', [
+    ('operator', 'root', 4403), ('viewer', 'root', 4403),
+    ('admin', 'invalid', 4400), ('operator', 'Root', 4400),
+])
+def test_terminal_mode_permissions_reject_before_guest_access(client, monkeypatch, role, mode, code):
+    from starlette.websockets import WebSocketDisconnect
+    headers = login(client, role)
+    monkeypatch.setattr(incus, 'vm', lambda *a: pytest.fail('Unauthorized guest access'))
+    monkeypatch.setattr(incus, 'request', lambda *a: pytest.fail('Unauthorized exec'))
+    with pytest.raises(WebSocketDisconnect) as denied:
+        with client.websocket_connect('/api/terminal/incus:demo?mode=' + mode + '&csrf=' + headers['X-CSRF-Token'],
+                                      headers={'Origin': 'http://testserver'}):
+            pass
+    assert denied.value.code == code
+
+
+@pytest.mark.parametrize('role,mode', [('operator', 'login'), ('admin', 'login'), ('admin', 'root')])
+def test_terminal_streams_exact_input_resizes_revokes_and_closes_channels(client, monkeypatch, role, mode):
     import asyncio
     import json
     from app import guest_terminal
 
-    headers = login(client, 'operator')
+    headers = login(client, role)
     calls = []
 
     class Channel:
@@ -450,9 +467,9 @@ def test_terminal_streams_exact_input_resizes_revokes_and_closes_channels(client
     monkeypatch.setattr(incus, 'request', request)
     monkeypatch.setattr(guest_terminal, 'unix_connect', connect)
     monkeypatch.setattr('app.main.CONSOLE_AUTH_INTERVAL', .02)
-    with client.websocket_connect('/api/terminal/incus:demo?csrf=' + headers['X-CSRF-Token'],
+    with client.websocket_connect('/api/terminal/incus:demo?csrf=' + headers['X-CSRF-Token'] + ('&mode=root' if mode == 'root' else ''),
                                   headers={'Origin': 'http://testserver'}) as ws:
-        assert ws.receive_json() == {'type': 'ready'}
+        assert ws.receive_json() == {'type': 'ready', 'mode': mode}
         ws.send_json({'type': 'resize', 'cols': 160, 'rows': 45})
         value = 'a "quoted" command | £ 🙂\nsecond line'
         ws.send_json({'type': 'input', 'data': value})
@@ -463,15 +480,31 @@ def test_terminal_streams_exact_input_resizes_revokes_and_closes_channels(client
         assert json.loads(control.sent[0]) == {'command': 'window-resize', 'args': {'width': '160', 'height': '45'}}
         assert calls[0][2]['interactive'] is True
         assert calls[0][2]['record-output'] is False
+        payload = calls[0][2]
+        if mode == 'login':
+            assert 'exec /bin/login;' in payload['command'][2]
+            assert 'exec /usr/bin/login;' in payload['command'][2]
+            assert '/bin/bash' not in payload['command'][2]
+            assert '-f' not in payload['command'][2]
+            assert payload['environment'] == {'TERM': 'xterm-256color'}
+            assert payload['cwd'] == '/'
+        else:
+            assert 'exec /bin/bash -l' in payload['command'][2]
+            assert payload['user'] == 0 and payload['cwd'] == '/root'
         assert value not in str(calls)
         with store.db() as db:
-            db.execute("UPDATE users SET enabled=0 WHERE username='operator'")
+            if mode == 'root':
+                # An administrator demoted to operator must lose root access,
+                # even though ordinary login terminals remain permitted.
+                db.execute("UPDATE users SET role='operator' WHERE username=?", (role,))
+            else:
+                db.execute("UPDATE users SET enabled=0 WHERE username=?", (role,))
         assert ws.receive_json()['type'] == 'error'
     assert control.closed and data.closed
     assert json.loads(control.sent[-1]) == {'command': 'signal', 'signal': 15}
     with store.db() as db:
         row = db.execute("SELECT action,detail FROM audit WHERE action='terminal.open' ORDER BY id DESC LIMIT 1").fetchone()
-    assert row['action'] == 'terminal.open' and value not in row['detail']
+    assert row['action'] == 'terminal.open' and row['detail'] == 'mode=' + mode
 
 
 def test_terminal_protocol_rejects_unbounded_input_and_invalid_resize():

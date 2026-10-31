@@ -34,7 +34,7 @@ terminal.onData(data => {
   for (const chunk of inputMessages(data)) socket.send(chunk);
 });
 
-async function connect() {
+async function connect(mode = "login") {
   const attempt = ++generation;
   ready = false;
   socket?.close();
@@ -49,7 +49,9 @@ async function connect() {
   if (!response.ok) throw new Error("Your session expired. Sign in to the manager, then reconnect.");
   const user = await response.json();
   if (attempt !== generation) return;
-  const current = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/terminal/${encodeURIComponent(vm)}?csrf=${encodeURIComponent(user.csrf)}`);
+  document.getElementById("terminal-root").hidden = user.role !== "administrator";
+  if (mode === "root" && user.role !== "administrator") throw new Error("Root terminal access requires an administrator.");
+  const current = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/terminal/${encodeURIComponent(vm)}?csrf=${encodeURIComponent(user.csrf)}&mode=${mode}`);
   socket = current;
   current.binaryType = "arraybuffer";
   current.addEventListener("message", event => {
@@ -64,7 +66,7 @@ async function connect() {
     const data = JSON.parse(event.data);
     if (data.type === "ready") {
       ready = true;
-      message("Connected as root · 5,000 lines of scrollback");
+      message(data.mode === "root" ? "Connected as root · Administrator session" : "VM login · Sign in with your VM account");
       resize();
       terminal.focus();
     } else if (data.type === "error") message(data.message, true);
@@ -79,6 +81,10 @@ async function connect() {
 document.getElementById("reconnect").addEventListener("click", () => {
   terminal.writeln("\r\n── New terminal session ──\r\n");
   connect().catch(error => message(error.message, true));
+});
+document.getElementById("terminal-root").addEventListener("click", () => {
+  terminal.writeln("\r\n── New root session ──\r\n");
+  connect("root").catch(error => message(error.message, true));
 });
 async function copyOutput() {
   try {
