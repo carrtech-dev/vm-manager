@@ -21,9 +21,21 @@ keys.set("\n", { scan: 28, code: "Enter", shift: false });
 keys.set("\t", { scan: 15, code: "Tab", shift: false });
 
 export function pasteKeys(text, layout = "us") {
-  if (!["us", "uk"].includes(layout)) throw new Error("Choose a US or UK guest keyboard layout.");
+  if (!["linux", "us", "uk"].includes(layout)) throw new Error("Choose a paste destination.");
   if (!text.length) throw new Error("Paste some text first.");
   if (text.length > MAX_PASTE_LENGTH) throw new Error(`Send at most ${MAX_PASTE_LENGTH.toLocaleString("en-GB")} characters at a time.`);
+  const characters = [...text.replace(/\r\n?/g, "\n")];
+  if (layout === "linux") {
+    // Linux virtual consoles accept decimal Alt+numpad input independently of
+    // letter/punctuation mappings, Caps Lock and Num Lock. This is not a
+    // desktop-terminal input method; retain physical keys for those guests.
+    return characters.map(character => {
+      const value = character.codePointAt(0);
+      if ((value < 32 || value > 126) && character !== "\n" && character !== "\t")
+        throw new Error(`Linux text console paste supports ASCII text. Remove ${JSON.stringify(character)} before sending.`);
+      return { numeric: String(value) };
+    });
+  }
   const mapping = new Map(keys);
   if (layout === "uk") {
     for (const [character, scan, code, shift] of [
@@ -33,7 +45,7 @@ export function pasteKeys(text, layout = "us") {
       ["|", 86, "IntlBackslash", true], ["¬", 41, "Backquote", true],
     ]) mapping.set(character, { scan, code, shift });
   }
-  return [...text.replace(/\r\n?/g, "\n")].map(character => {
+  return characters.map(character => {
     const key = mapping.get(character);
     if (!key) throw new Error(`This keyboard layout cannot type ${JSON.stringify(character)}. Remove it before sending.`);
     return { ...key, keysym: character === "\n" ? 0xff0d : character === "\t" ? 0xff09 : character.codePointAt(0) };
@@ -51,6 +63,9 @@ const modifiers = [
   { scan: 0xe05c, code: "MetaRight", keysym: 0xffec },
 ];
 const shift = modifiers[4];
+const alt = modifiers[2];
+const numpad = [82, 79, 80, 81, 75, 76, 77, 71, 72, 73].map((scan, digit) =>
+  ({ scan, code: `Numpad${digit}`, keysym: 0xffb0 + digit }));
 
 export function consoleKeySender(connection, spice) {
   return (key, down) => {
@@ -78,16 +93,31 @@ export async function typeConsoleText(sequence, sendKey, active, progress = () =
   for (let i = 0; i < sequence.length; i++) {
     check();
     const key = sequence[i];
-    try {
-      if (key.shift) sendKey(shift, true);
-      sendKey(key, true);
-      sendKey(key, false);
-    } finally {
-      if (key.shift) sendKey(shift, false);
+    if (key.numeric) {
+      try {
+        sendKey(alt, true);
+        for (const digit of key.numeric) {
+          sendKey(numpad[Number(digit)], true);
+          sendKey(numpad[Number(digit)], false);
+        }
+      } finally {
+        sendKey(alt, false);
+      }
+    } else {
+      try {
+        if (key.shift) sendKey(shift, true);
+        sendKey(key, true);
+        sendKey(key, false);
+      } finally {
+        if (key.shift) sendKey(shift, false);
+      }
     }
-    progress(i + 1, sequence.length);
-    // Yield between characters so guests can keep up and Cancel can interrupt.
-    await pause(10);
+    // Small bursts avoid slow character-by-character animation while bounding
+    // guest keyboard queues and allowing cancellation/reconnect checks.
+    if ((i + 1) % 16 === 0 || i === sequence.length - 1) {
+      progress(i + 1, sequence.length);
+      await pause(10);
+    }
   }
 }
 
@@ -100,6 +130,21 @@ export function bindConsolePaste(getSession) {
   const send = document.getElementById("paste-send");
   const read = document.getElementById("paste-read");
   const close = document.getElementById("paste-close");
+  const destinationKey = `console-paste-destination:${new URLSearchParams(location.search).get("vm")}`;
+  try {
+    const saved = localStorage.getItem(destinationKey);
+    if (["linux", "us", "uk"].includes(saved)) layout.value = saved;
+  } catch { /* Storage may be disabled by the browser. */ }
+  const destinationChanged = () => {
+    document.getElementById("paste-destination-help").textContent = layout.value === "linux"
+      ? "For the full-screen Linux login or shell console. Preserves quotes and punctuation regardless of US/UK keyboard layout, Caps Lock or Num Lock. For a terminal app on a desktop, choose its keyboard layout instead."
+      : "For desktops, terminal apps and installers. Match the VM's keyboard layout and turn Caps Lock off. A wrong layout changes quotes and punctuation.";
+  };
+  destinationChanged();
+  layout.addEventListener("change", () => {
+    destinationChanged();
+    try { localStorage.setItem(destinationKey, layout.value); } catch { /* Optional preference only. */ }
+  });
   let sending = false, cancelled = false, readGeneration = 0;
   const multiline = () => /[\r\n]/.test(text.value);
   const changed = () => {

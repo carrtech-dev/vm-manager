@@ -29,9 +29,10 @@
         <button type="button" id="paste-read">Read local clipboard</button>
         <label for="paste-text">Text to send (up to 4,096 characters)</label>
         <textarea id="paste-text" rows="8" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
-        <label for="paste-layout">Guest keyboard layout</label>
-        <select id="paste-layout"><option value="us">English (US)</option><option value="uk">English (UK)</option></select>
-        <p>Match the VM's keyboard layout and turn Caps Lock off. Supports English text and punctuation. Tabs send Tab; line breaks send Enter.</p>
+        <label for="paste-layout">Paste destination</label>
+        <select id="paste-layout"><option value="linux">Linux text console · any keyboard layout</option><option value="us">Desktop / installer · English (US)</option><option value="uk">Desktop / installer · English (UK)</option></select>
+        <p id="paste-destination-help"></p>
+        <p>Supports English text and punctuation. Tabs send Tab; line breaks send Enter. No extra Enter is added.</p>
         <label id="paste-lines" hidden><input type="checkbox" id="paste-confirm" /> I understand that line breaks may run commands.</label>
         <p id="paste-status" role="status" aria-live="polite"></p>
         <div class="paste-actions"><button type="button" id="paste-close">Close</button><button type="button" id="paste-send">Send text</button></div>

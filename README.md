@@ -25,11 +25,17 @@ Change the password through **Account** after signing in; the initial credential
 
 To paste from your computer, focus the destination field or terminal in the VM,
 choose **Paste text** in the console toolbar, and paste into the text box (or use
-**Read local clipboard** where the browser permits it). Choose the VM's English
-US/UK keyboard layout with Caps Lock off, then **Send text**. Cmd+V, Ctrl+V and
+**Read local clipboard** where the browser permits it). For a full-screen Linux
+login/shell console, leave **Linux text console** selected: it preserves ASCII
+quotes, punctuation and case independently of the keyboard layout and lock keys.
+For desktop apps (including terminal apps) and installers, select the VM's English
+US/UK keyboard layout with Caps Lock off. The destination choice is remembered
+per VM in this browser. Click **Send text**. Cmd+V, Ctrl+V and
 Ctrl+Shift+V while the display is focused also open the paste dialog. This types
-up to 4,096 characters through SPICE/VNC without a guest agent, including during
-OS installation. Unsupported characters are rejected before any text is sent.
+up to 4,096 characters in short bursts through SPICE/VNC without a guest agent,
+including during OS installation. Linux text consoles use decimal Alt+numpad
+entry; desktop/installer mode uses physical keys. Unsupported characters are
+rejected before any text is sent.
 Line breaks require confirmation because they send Enter and may run commands;
 no extra Enter is added. **Stop sending** interrupts a transfer; review any
 partially typed text in the VM before retrying. Reconnection stops the transfer

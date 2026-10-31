@@ -34,8 +34,8 @@ test("VNC typing releases shortcut modifiers, brackets Shift, and adds no Enter"
     [0xffe1, "ShiftLeft", true], [65, "KeyA", true], [65, "KeyA", false], [0xffe1, "ShiftLeft", false],
     [0xffe1, "ShiftLeft", true], [33, "Digit1", true], [33, "Digit1", false], [0xffe1, "ShiftLeft", false],
   ]);
-  assert.deepEqual(progress, [[1, 3], [2, 3], [3, 3]]);
-  assert.deepEqual(delays, [10, 10, 10]);
+  assert.deepEqual(progress, [[3, 3]]);
+  assert.deepEqual(delays, [10]);
 });
 
 test("SPICE sends make/break scan codes on the input channel including extended modifier releases", async () => {
@@ -57,10 +57,45 @@ test("SPICE sends make/break scan codes on the input channel including extended 
 test("cancellation and reconnection stop without replaying text to another connection", async () => {
   let active = true;
   const sent = [];
-  await assert.rejects(typeConsoleText(pasteKeys("abc"), (key, down) => { if (down) sent.push(key.code); },
+  await assert.rejects(typeConsoleText(pasteKeys("a".repeat(32)), (key, down) => { if (down) sent.push(key.code); },
     () => active, undefined, async () => { active = false; }), /Sending stopped/);
-  assert.deepEqual(sent, ["KeyA"]);
+  assert.deepEqual(sent, Array(16).fill("KeyA"));
   await assert.rejects(typeConsoleText(pasteKeys("a"), () => assert.fail("must not send"), () => false), /Sending stopped/);
+});
+
+const installerCommand = `sudo sh -c 'set -eu; d=$(mktemp -d /run/incus-agent.XXXXXX); trap "cd /; umount $d; rmdir $d" EXIT; mount -t 9p -o ro config "$d" || mount -o ro /dev/disk/by-id/scsi-0QEMU_QEMU_CD-ROM_incus_agent "$d"; cd "$d"; ./install.sh; cd /; umount "$d"; rmdir "$d"; trap - EXIT; systemctl start incus-agent'`;
+
+test("Linux text console mode preserves the reported installer command without layout-sensitive keys", async () => {
+  const events = [], delays = [];
+  const sequence = pasteKeys(installerCommand, "linux");
+  assert.equal(sequence.map(key => String.fromCodePoint(Number(key.numeric))).join(""), installerCommand);
+  await typeConsoleText(sequence, (key, down) => events.push([key, down]), () => true,
+    undefined, async ms => delays.push(ms));
+  let digits = "", decoded = "", alt = false;
+  for (const [key, down] of events.slice(8)) {
+    if (key.code === "AltLeft") {
+      if (down) { alt = true; digits = ""; }
+      else { decoded += String.fromCodePoint(Number(digits)); alt = false; }
+    } else {
+      assert.equal(alt, true);
+      assert.match(key.code, /^Numpad[0-9]$/);
+      if (down) digits += key.code.slice(-1);
+    }
+  }
+  assert.equal(decoded, installerCommand);
+  assert.equal(delays.length, Math.ceil(installerCommand.length / 16));
+  assert.deepEqual(pasteKeys("\r\n\t", "linux"), [{numeric:"10"}, {numeric:"9"}]);
+  for (const text of ["oké", "ok\x1b", "ok\0", "ok🙂"])
+    assert.throws(() => pasteKeys(text, "linux"), /ASCII/);
+});
+
+test("numeric entry releases Alt when a transmission fails", async () => {
+  const events = [];
+  await assert.rejects(typeConsoleText(pasteKeys("a", "linux"), (key, down) => {
+    events.push([key.code, down]);
+    if (key.code === "Numpad9" && down) throw new Error("Disconnected");
+  }, () => true), /Disconnected/);
+  assert.deepEqual(events.at(-1), ["AltLeft", false]);
 });
 
 test("a failed key transmission releases Shift", async () => {
