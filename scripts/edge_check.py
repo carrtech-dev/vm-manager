@@ -100,14 +100,18 @@ def main():
                 'cluster_id':args.cluster_id,'namespace':'kube-system','service':'traefik','service_port':80})
             route_id = next(r['id'] for r in api('/devops/load-balancer')['settings']['routes'] if r['hostname'] == hostname)
             tls = ssl.create_default_context(cafile=str(cert))
-            def ingress_ready():
+            def ingress_ready(manager=False):
                 with socket.create_connection((address,443),timeout=10) as connection:
                     with tls.wrap_socket(connection,server_hostname=hostname) as secure:
-                        secure.sendall(('GET / HTTP/1.1\r\nHost: '+hostname+'\r\nConnection: close\r\n\r\n').encode())
+                        secure.sendall(('GET ' + ('/health' if manager else '/') + ' HTTP/1.1\r\nHost: '+hostname+'\r\nConnection: close\r\n\r\n').encode())
                         result=http.client.HTTPResponse(secure); result.begin()
-                        return result.status == 200 and b'Welcome to nginx' in result.read()
+                        body = result.read()
+                        return result.status == 200 and (json.loads(body).get('service') == 'vm-manager' if manager else b'Welcome to nginx' in body)
             wait(ingress_ready, 'HTTPS Ingress route did not serve the test container')
             print('PASS: manually supplied certificate, SNI on shared 443, Traefik Ingress and container response verified')
+            queued('/devops/load-balancer/routes', body={'id':route_id,'hostname':hostname,'mode':'manual','backend':'vm-manager'})
+            wait(lambda: ingress_ready(manager=True), 'Direct HTTPS VM Manager route failed')
+            print('PASS: direct HTTPS VM Manager route uses the verified existing app origin')
         config = api('/devops/load-balancer')
         assert 'private_key' not in json.dumps(config)
         print('PASS: load balancer inventory omits private keys and credentials')

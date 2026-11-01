@@ -34,6 +34,7 @@ class Route(BaseModel):
     id: str = Field(pattern=r'^[a-z0-9-]{1,64}$')
     hostname: str = Field(min_length=1, max_length=253, pattern=r'^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$')
     mode: str = Field(pattern=r'^(manual|letsencrypt|cloudflare|manager)$')
+    backend: str = Field(default='http', pattern=r'^(http|vm-manager)$')
     upstreams: list[str] = Field(min_length=1, max_length=32)
     certificate: str = Field(default='', max_length=65536, repr=False)
     private_key: str = Field(default='', max_length=65536, repr=False)
@@ -144,9 +145,9 @@ def caddyfile(config):
                 raise HypervisorError('An email address is required for Let’s Encrypt')
             lines += [' tls {', '  issuer acme {', '   dir https://acme-v02.api.letsencrypt.org/directory',
                       '   email ' + route.email, '   disable_http_challenge', '  }', ' }']
-        upstreams = ['https://' + u if route.id.startswith('manager') else 'http://' + u for u in route.upstreams]
+        upstreams = ['https://' + u if (route.id.startswith('manager') or route.backend == 'vm-manager') else 'http://' + u for u in route.upstreams]
         lines += [' reverse_proxy ' + ' '.join(upstreams) + ' {', '  lb_policy round_robin']
-        if route.id.startswith('manager'):
+        if (route.id.startswith('manager') or route.backend == 'vm-manager'):
             lines += ['  header_up Host {http.request.host}', '  transport http {', '   tls',
                       '   tls_trust_pool file /edge/manager.crt', '  }']
         else:

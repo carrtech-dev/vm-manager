@@ -208,3 +208,17 @@ def test_kubernetes_default_ip_mode_does_not_cause_repeated_status_writes(env):
     env.requests.clear()
     env.manager.reconcile()
     assert not [r for r in env.requests if r[2]['action'] == 'edge-status']
+
+
+def test_direct_vm_manager_routes_use_a_fixed_verified_https_origin(env):
+    launch(env)
+    route = edge.Route(hostname='manager.example.test', mode='letsencrypt', backend='vm-manager', email='admin@example.test')
+    env.manager.route(ADMIN, route); env.jobs[-1]()
+    body = [c[1]['body'] for c in env.calls if c[0] == 'edge_apply'][-1]
+    added = body['routes'][-1]
+    assert added['upstreams'] == ['192.168.8.235:8443']
+    caddy = edge_runtime.caddyfile(edge_runtime.Configuration.model_validate(body))
+    assert 'reverse_proxy https://192.168.8.235:8443' in caddy
+    assert 'tls_trust_pool file /edge/manager.crt' in caddy
+    with pytest.raises(ValidationError):
+        edge.Route(hostname='manager.example.test',mode='manual',backend='vm-manager',upstreams=['10.0.0.1:443'])

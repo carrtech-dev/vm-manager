@@ -968,6 +968,10 @@ available per hostname:
   application-routing decisions. Cloudflare's tunnel configuration has one
   transport origin, without per-application routing rules.
 
+Choose **VM Manager** as the backend to publish the app on another hostname with
+Let’s Encrypt or a supplied certificate, independently of Cloudflare. This uses
+the fixed existing HTTPS origin with certificate verification.
+
 Routes can balance across IPv4:port HTTP upstreams or a Kubernetes HTTP Service
 with NodePorts. To publish cluster Ingress rules, target **kube-system/traefik,
 port 80**, and use the same hostname as the Ingress. The edge terminates HTTPS;

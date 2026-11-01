@@ -30,7 +30,9 @@ class Route(edge_runtime.Route):
     def valid_target(self):
         if bool(self.cluster_id) != bool(self.service):
             raise ValueError('Choose both a cluster and Service')
-        if not self.cluster_id and not self.upstreams:
+        if self.backend == 'vm-manager' and (self.cluster_id or self.upstreams):
+            raise ValueError('VM Manager uses its protected built-in upstream')
+        if self.backend != 'vm-manager' and not self.cluster_id and not self.upstreams:
             raise ValueError('Supply upstream IPv4:port targets or a Kubernetes Service')
         if self.mode == 'manager' or self.id.startswith('manager'):
             raise ValueError('The built-in VM Manager route is protected')
@@ -251,6 +253,8 @@ class Manager:
             routes = []
             for route in settings['routes']:
                 body = {k: v for k, v in route.items() if k in edge_runtime.Route.model_fields}
+                if route.get('backend') == 'vm-manager':
+                    body['upstreams'] = [settings['address'] + ':8443']
                 if route.get('cluster_id'):
                     inv = snapshots.get(route['cluster_id'], {})
                     service = next((s for s in inv.get('services', []) if s['namespace'] == route['namespace'] and s['name'] == route['service']), None)
