@@ -992,6 +992,15 @@ restore `/var/lib/vm-manager-edge/tunnel-origin.json` to
 `/opt/carrtech/vm-manager/tunnel/config.yml` preserving its owner/mode, then restart
 `vm-manager-tunnel-1`. The LAN 8443 endpoint remains available throughout.
 
+For direct internet access, create an `A` record pointing at the public IPv4
+address that reaches this host, and forward TCP 443 if it is behind a router.
+A wildcard such as `*.apps.example.com` can be set once for future application
+hostnames; VM Manager still needs a matching hostname route and certificate
+method. DNS points at the load balancer, never at individual pods. Direct DNS
+records are managed with the user's DNS provider. Cloudflare hostname routes
+can instead have their CNAME records created automatically through the connection
+below.
+
 For automatic tunnel/DNS management, use **Cloudflare connection** and supply
 an API **token**, account ID and zone ID. Scope it to Account Cloudflare Tunnel
 Edit and Zone DNS Edit/Zone Read. The app reuses the established tunnel, or
@@ -1047,7 +1056,7 @@ listeners to node IPs/NodePorts, and publishes the edge host's IPv4 address in
 VM Manager REST API and the Kubernetes API via the existing owned guest channel;
 no cluster-admin kubeconfig or new bearer secret is copied into the manager.
 Automatic discovery and reconciliation run every 15 seconds; first publication
-can take additional passes while the runtime starts and K3s finishes handover.
+can take additional passes while the shared runtime starts.
 Changes and deletion from ordinary kubectl clients are picked up automatically. A cluster connection requires the current
 release on its owning manager, including linked hosts.
 
