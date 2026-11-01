@@ -286,7 +286,7 @@ def test_management_rejects_unsafe_or_unconfirmed_targets(changes):
         kubernetes.Operation.model_validate({'action':'delete','name':'pod','uid':'abc','confirm_name':'pod'} | changes)
 
 
-def guest_operation(operation, pod=None):
+def guest_operation(operation, pod=None, workloads=None):
     """Execute the real guest dispatcher branch with a fake kubectl transport."""
     import subprocess
     from contextlib import redirect_stdout
@@ -303,7 +303,7 @@ def guest_operation(operation, pod=None):
         elif 'pods' in args:
             output = {'items':[pod]}
         elif any(a.startswith('deployments,services,ingresses,namespaces') for a in args):
-            output = {'items': []}
+            output = {'items': workloads or []}
         elif 'get' in args or 'patch' in args:
             output = pod
         else:
@@ -526,3 +526,18 @@ def test_status_waits_for_the_previous_provider_cleanup():
     operation = kubernetes.Operation(action='edge-status',statuses=[{'name':'web','namespace':'default','uid':'abc','address':'192.0.2.10'}])
     result,calls = guest_operation(operation,obj)
     assert 'cleanup' in result['error'] and len(calls) == 1
+
+
+def test_admission_infrastructure_is_protected_and_a_missing_service_triggers_repair():
+    admission = {'kind':'Service','metadata':{'name':'vmm-edge-admission','namespace':'kube-system','uid':'abc',
+        'labels':{'app.kubernetes.io/managed-by':'vm-manager','vmm.carrtech.dev/component':'admission'}},
+        'spec':{'type':'ClusterIP','ports':[]}}
+    webhook = {'kind':'MutatingWebhookConfiguration','metadata':{'name':'vmm-edge-admission',
+        'annotations':{'vmm.carrtech.dev/admission-version':'current'}}}
+    result,_ = guest_operation(kubernetes.Operation(),workloads=[admission,webhook])
+    assert not result['services'][0]['managed'] and result['admission_version'] == 'current'
+    result,_ = guest_operation(kubernetes.Operation(),workloads=[webhook])
+    assert result['admission_version'] == ''
+    remove = kubernetes.Operation(action='remove',resource='service',name='vmm-edge-admission',namespace='kube-system',uid='abc',confirm_name='vmm-edge-admission')
+    result,calls = guest_operation(remove,admission)
+    assert 'Internal admission resources' in result['error'] and len(calls) == 1

@@ -76,10 +76,11 @@ GUEST = r'''
 def workload_inventory():
     items = json.loads(kube(['get', 'deployments,services,ingresses,namespaces,mutatingwebhookconfigurations', '--all-namespaces', '-o', 'json']))['items']
     out = {'deployments': [], 'services': [], 'ingresses': [], 'namespaces': [], 'admission_version': ''}
+    admission_service = False
     for obj in items:
         m, s, status = obj['metadata'], obj.get('spec', {}), obj.get('status', {})
         base = {k: m.get(k, '') for k in ('name', 'namespace', 'uid')}
-        base['managed'] = m.get('labels', {}).get('app.kubernetes.io/managed-by') == 'vm-manager'
+        base['managed'] = m.get('labels', {}).get('app.kubernetes.io/managed-by') == 'vm-manager' and m.get('labels', {}).get('vmm.carrtech.dev/component') != 'admission'
         kind = obj['kind']
         if kind == 'MutatingWebhookConfiguration' and m['name'] == 'vmm-edge-admission':
             out['admission_version'] = m.get('annotations', {}).get('vmm.carrtech.dev/admission-version', '')
@@ -91,6 +92,8 @@ def workload_inventory():
                 images=[c['image'] for c in containers], available=status.get('availableReplicas', 0))
             out['deployments'].append(base)
         elif kind == 'Service':
+            if m['name'] == 'vmm-edge-admission' and m.get('namespace') == 'kube-system':
+                admission_service = True
             base.update(type=s.get('type', 'ClusterIP'), cluster_ip=s.get('clusterIP', ''),
                 ports=s.get('ports', []), selector=s.get('selector', {}), lb_class=s.get('loadBalancerClass', ''),
                 external=status.get('loadBalancer', {}).get('ingress', []),
@@ -102,6 +105,8 @@ def workload_inventory():
         elif kind == 'Ingress':
             base.update(rules=s.get('rules', []), tls=s.get('tls', []), ingress_class=s.get('ingressClassName', ''))
             out['ingresses'].append(base)
+    if not admission_service:
+        out['admission_version'] = ''
     return out
 
 def workload_mutation():
@@ -112,6 +117,8 @@ def workload_mutation():
     obj = get(resource, r['name'], r['namespace'])
     if obj['metadata']['uid'] != r['uid']:
         raise ValueError('Resource changed since selection. Refresh and try again.')
+    if obj['metadata'].get('labels', {}).get('vmm.carrtech.dev/component') == 'admission':
+        raise ValueError('Internal admission resources are managed automatically and cannot be edited or removed as workloads')
     if obj['metadata'].get('labels', {}).get('app.kubernetes.io/managed-by') != 'vm-manager':
         raise ValueError('Only resources created through VM Manager can be edited or removed here; use kubectl for other resources.')
     paths = {'deployment': '/apis/apps/v1', 'service': '/api/v1', 'ingress': '/apis/networking.k8s.io/v1'}
