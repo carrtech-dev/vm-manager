@@ -74,12 +74,29 @@ def initialize(store):
 
 
 def catalog(store):
+    def summary(row):
+        return dict(row, result={k: v for k, v in json.loads(row['result']).items() if k not in ('output', 'packages')})
+
     with store.db() as db:
+        # Per-VM status must survive the recent-history limit, including long
+        # running transactions while other VMs accumulate newer runs.
+        latest = db.execute('''
+            SELECT r.*,b.created,b.username,b.schedule_id FROM patch_runs r
+            JOIN patch_batches b ON b.id=r.batch_id
+            WHERE r.id IN (
+                SELECT id FROM (
+                    SELECT r.id,ROW_NUMBER() OVER (
+                        PARTITION BY r.vm_id ORDER BY b.created DESC,r.rowid DESC
+                    ) AS position
+                    FROM patch_runs r JOIN patch_batches b ON b.id=r.batch_id
+                ) WHERE position=1
+            )''')
         return {
+            'latest_runs': {r['vm_id']: summary(r) for r in latest},
             'guests': {r['vm_id']: dict(json.loads(r['result']), checked=r['checked']) for r in db.execute('SELECT * FROM patch_guests')},
             'schedules': [dict(json.loads(r['settings']), id=r['id'], next_run=r['next_run'], last_message=r['last_message'])
                           for r in db.execute('SELECT * FROM patch_schedules ORDER BY id')],
-            'runs': [dict(r, result={k: v for k, v in json.loads(r['result']).items() if k not in ('output', 'packages')}) for r in db.execute(
+            'runs': [summary(r) for r in db.execute(
                 'SELECT r.*,b.created,b.username,b.schedule_id FROM patch_runs r JOIN patch_batches b ON b.id=r.batch_id ORDER BY b.created DESC,r.rowid LIMIT 300')],
         }
 

@@ -42,6 +42,33 @@ def rows(env):
         return [dict(r) for r in db.execute('SELECT * FROM patch_runs ORDER BY rowid')]
 
 
+def test_catalog_preserves_latest_per_vm_beyond_recent_history(env):
+    env.manager.create(patching.Request(vm_ids=['incus:one', 'libvirt:two']), 'operator')
+    first, active = rows(env)
+    env.manager.finish(first['id'], 'completed', {'changed_count': 2})
+    env.manager.create(patching.Request(vm_ids=['incus:one']), 'operator')
+    newest = rows(env)[-1]
+    env.manager.finish(newest['id'], 'failed', {
+        'message': 'Repository unavailable', 'changed_count': 0,
+        'output': 'large private output', 'packages': ['curl']})
+    with env.store.db() as db:
+        # Tied timestamps still select the most recently inserted run.
+        db.execute('UPDATE patch_batches SET created=1')
+        db.execute("INSERT INTO patch_batches VALUES('busy','{}','scheduler',2,NULL,NULL)")
+        db.executemany("INSERT INTO patch_runs(id,batch_id,vm_id,status) VALUES(?,'busy','incus:busy','completed')",
+                       [(f'busy-{i}',) for i in range(301)])
+    data = patching.catalog(env.store)
+    assert len(data['runs']) == 300
+    assert all(r['vm_id'] == 'incus:busy' for r in data['runs'])
+    latest = data['latest_runs']
+    assert latest['incus:one']['id'] == newest['id']
+    assert latest['incus:one']['status'] == 'failed'
+    assert latest['incus:one']['result'] == {'message': 'Repository unavailable', 'changed_count': 0}
+    assert latest['libvirt:two']['id'] == active['id']
+    assert latest['libvirt:two']['status'] == 'pending'
+    assert latest['incus:busy']['id'] == 'busy-300'
+
+
 def test_batch_fifo_concurrency_stop_and_atomic_duplicate_guard(env):
     spec = patching.Request(vm_ids=['incus:one', 'libvirt:two'], concurrency=1)
     env.manager.create(spec, 'operator')

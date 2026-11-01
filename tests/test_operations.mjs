@@ -15,6 +15,7 @@ function ui(role = "operator") {
     schedules: [{id: "s", name: "Weekend <patch>", vm_ids: ["incus:linux"], enabled: true, frequency: "weekly", weekday: 6, time: "02:00", timezone: "Europe/London", window_minutes: 120, reboot: "never"}],
     runs: [{id: "r", vm_id: "incus:linux", status: "completed", created: 1, username: "operator", result: {message: "Updated <2>", changed_count: 2, packages: ["curl"], output: "<script>alert(1)</script>", reboot_required: true}}],
   }}};
+  state.inventory.patching.latest_runs = {"incus:linux": state.inventory.patching.runs[0]};
   let dialog;
   const requests = [];
   const context = createContext({...core, state, Intl, can: () => role !== "viewer",
@@ -37,6 +38,43 @@ test("operations shows readiness, schedules and per-VM results with escaped meta
   assert.match(html, /Reboot|Required/);
   assert.match(html, /Linux agent unavailable/);
   assert.doesNotMatch(ui("viewer").renderOperations(), /data-action="patch-(?:now|schedule|check|delete-schedule)"/);
+});
+
+const linuxTable = page => page.renderOperations().split("<h3>Linux patching</h3>")[1].split("</section>")[0];
+
+test("VM patch status keeps the latest completed result after history rolls off", () => {
+  const page = ui("viewer");
+  const run = page.state.inventory.patching.latest_runs["incus:linux"];
+  run.result.rebooted = true;
+  page.state.inventory.patching.runs = [];
+  const html = linuxTable(page);
+  assert.match(html, /Completed/);
+  assert.match(html, /Started /);
+  assert.match(html, /Updated &lt;2&gt;/);
+  assert.match(html, /2 packages updated/);
+  assert.match(html, /Reboot verified/);
+  assert.match(html, /data-action="patch-details" data-id="r"/);
+  assert.match(html, /No patch runs/);
+  assert.doesNotMatch(html, /<script>/);
+});
+
+test("VM patch status follows queued, active and unsuccessful outcomes", () => {
+  const page = ui();
+  const run = page.state.inventory.patching.latest_runs["incus:linux"];
+  for (const [status, label] of Object.entries({pending: "Queued", dispatched: "Starting", running: "Running", reconnecting: "Reconnecting", failed: "Failed", interrupted: "Interrupted", skipped: "Skipped"})) {
+    run.status = status;
+    run.result = {message: "Repository <unavailable>"};
+    const html = linuxTable(page);
+    assert.match(html, new RegExp(label));
+    assert.match(html, /Repository &lt;unavailable&gt;/);
+    assert.match(html, /Reboot requirement unknown/);
+  }
+  run.status = "completed";
+  run.result = {changed_count: 0, reboot_required: false};
+  assert.match(linuxTable(page), /0 packages updated/);
+  assert.match(linuxTable(page), /Reboot not required/);
+  run.result.reboot_required = true;
+  assert.match(linuxTable(page), /Reboot required/);
 });
 
 test("patch now requires checked Linux and submits exact batch policies", async () => {

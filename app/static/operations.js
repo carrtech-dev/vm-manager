@@ -10,6 +10,17 @@ const visible = () => (state.inventory?.vms || []).filter(v => matchesOrganizati
 const vmName = id => state.inventory.vms.find(v => v.id === id)?.name || id;
 const weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
+function patchStatus(run) {
+  if (!run) return "No patch runs";
+  const labels = {pending: "Queued", dispatched: "Starting", running: "Running", reconnecting: "Reconnecting", completed: "Completed", failed: "Failed", interrupted: "Interrupted", skipped: "Skipped"};
+  const result = run.result;
+  const reboot = result.rebooted ? "Reboot verified" : result.reboot_required === true ? "Reboot required" : result.reboot_required === false ? "Reboot not required" : "Reboot requirement unknown";
+  return `${esc(labels[run.status] || run.status)}<small>Started ${when(run.created)}</small>` +
+    (result.message ? `<small>${esc(result.message)}</small>` : "") +
+    (result.changed_count != null ? `<small>${esc(result.changed_count)} packages updated</small>` : "") +
+    `<small>${reboot}</small>${button("Details", "details", run.id)}`;
+}
+
 export function clearOperationSelection() { selected.clear(); }
 
 export function selectOperation(event) {
@@ -25,15 +36,14 @@ export function selectOperation(event) {
 }
 
 export function renderOperations() {
-  const { guests, schedules, runs } = data();
+  const { guests, schedules, runs, latest_runs = {} } = data();
   const vms = visible();
-  const active = new Set(runs.filter(r => ["pending", "dispatched", "running", "reconnecting"].includes(r.status)).map(r => r.vm_id));
   const actions = can() ? button("Check selected", "check") + button("Patch selected now", "now", "", "primary") + button("Create schedule", "schedule") : "";
   return `<div class="page-title"><div><h1>Operations</h1><p>Linux patching · immediate updates and scheduled maintenance</p></div><div class="actions">${actions}</div></div>` +
     `<div class="hint">Select VMs and use Check selected to verify Linux, the guest agent, Python 3 and systemd. Supported guests: Debian 12+, Ubuntu 22.04+, Rocky Linux, AlmaLinux and RHEL 8+. Patching installs available package updates from each guest’s configured repositories. Updates may restart services. Stopped or unavailable VMs are skipped; expired maintenance windows are skipped. Windows guests cannot be patched.</div>` +
     panel("Linux patching", table([can() ? '<input type="checkbox" id="patch-select-all" aria-label="Select all visible VMs for Linux checks">' : "", "VM", "Power", "Linux readiness", "Last checked", "Patch status"], vms.map(v => {
       const ready = guests[v.id];
-      return `<tr><td>${can() ? `<input type="checkbox" class="patch-vm-select" value="${esc(v.id)}" aria-label="Select ${esc(v.name)}" ${selected.has(v.id) ? "checked" : ""}>` : ""}</td><td><a href="#vm/${encodeURIComponent(v.id)}/summary">${esc(v.name)}</a><small>${esc(v.provider)}</small></td><td>${esc(v.status)}</td><td>${ready ? (ready.ready ? esc(ready.os) + " · Ready" : esc(ready.message || "Unavailable")) : "Not checked"}</td><td>${ready ? when(ready.checked) : "—"}</td><td>${active.has(v.id) ? "Active patch operation" : "—"}</td></tr>`;
+      return `<tr><td>${can() ? `<input type="checkbox" class="patch-vm-select" value="${esc(v.id)}" aria-label="Select ${esc(v.name)}" ${selected.has(v.id) ? "checked" : ""}>` : ""}</td><td><a href="#vm/${encodeURIComponent(v.id)}/summary">${esc(v.name)}</a><small>${esc(v.provider)}</small></td><td>${esc(v.status)}</td><td>${ready ? (ready.ready ? esc(ready.os) + " · Ready" : esc(ready.message || "Unavailable")) : "Not checked"}</td><td>${ready ? when(ready.checked) : "—"}</td><td>${patchStatus(latest_runs[v.id])}</td></tr>`;
     }))) +
     panel("Patch schedules", table(["Name", "VMs", "When", "Window", "Reboot", "Next run", "Last outcome", "Actions"], schedules.map(s =>
       `<tr><td>${esc(s.name)}<small>${s.enabled ? "Enabled" : "Disabled"}</small></td><td>${s.vm_ids.map(id => esc(vmName(id))).join(", ")}</td><td>${s.frequency === "weekly" ? weekdays[s.weekday] : "Daily"} ${esc(s.time)}<small>${esc(s.timezone)}</small></td><td>${s.window_minutes} min</td><td>${s.reboot === "never" ? "Report required" : "When required"}</td><td>${s.next_run ? when(s.next_run) : "—"}</td><td>${esc(s.last_message || "—")}</td><td><div class="actions">${can() ? button("Edit", "schedule", s.id) + button("Delete", "delete-schedule", s.id) : "Read only"}</div></td></tr>`))) +
