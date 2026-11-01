@@ -246,6 +246,7 @@ class Manager:
             excluded = set(settings.get('excluded_clusters', []))
             connected = set(settings['clusters']) | {i for i, state in records.items() if state == 'ready'}
             settings['clusters'] = sorted(connected - excluded)
+            settings['withdrawals'] = [i for i in settings.get('withdrawals', []) if i not in settings['clusters']]
             inventories, errors = {}, []
             ids = set(settings['clusters']) | set(settings.get('withdrawals', [])) | {r['cluster_id'] for r in settings['routes'] if r.get('cluster_id')}
             for identity in sorted(ids):
@@ -257,7 +258,7 @@ class Manager:
                     inventory = self.inventory(identity)
                     if identity in settings['clusters'] and inventory.get('admission_version') != kube_admission.VERSION:
                         self.bootstrap_record(record, CONTROLLER)
-                    elif identity in settings.get('withdrawals', []) and inventory.get('admission_version'):
+                    elif identity not in settings['clusters'] and identity in settings.get('withdrawals', []) and inventory.get('admission_version'):
                         self.bootstrap_record(record, CONTROLLER, enabled=False)
                     inventory['addresses'] = [n['address'] for n in record['nodes'] if n.get('address')]
                     inventories[identity] = inventory

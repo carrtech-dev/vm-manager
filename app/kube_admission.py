@@ -32,13 +32,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass  # Never record admission request bodies or client headers.
     def do_GET(self):
-        self.send_response(200 if self.path == '/healthz' else 404)
+        self.send_response(200 if self.path.partition('?')[0] == '/healthz' else 404)
         self.end_headers()
         self.wfile.write(b'ok')
     def do_POST(self):
         try:
             length = int(self.headers.get('Content-Length', '0'))
-            if self.path != '/mutate' or not 0 < length <= 1048576:
+            if self.path.partition('?')[0] != '/mutate' or not 0 < length <= 1048576:
                 self.send_error(400); return
             result = admission_response(json.loads(self.rfile.read(length)))
             payload = json.dumps(result).encode()

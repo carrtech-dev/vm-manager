@@ -38,3 +38,24 @@ def test_guest_dispatcher_contains_only_the_fixed_server_and_certificates_stay_i
     assert 'service.kubernetes.io/load-balancer-cleanup' in kubernetes.GUEST
     assert 'Group=vmm-edge-admission' in kube_admission.BOOTSTRAP
     assert "return {'ready':True, 'version':admission_version}" in kube_admission.BOOTSTRAP
+
+
+def test_webhook_accepts_the_apiserver_timeout_query_string():
+    import http.client
+    import threading
+    namespace = {'__name__':'test'}
+    exec(kube_admission.SERVER,namespace)
+    server = namespace['ThreadingHTTPServer'](('127.0.0.1',0),namespace['Handler'])
+    worker = threading.Thread(target=server.serve_forever,daemon=True); worker.start()
+    try:
+        body = json.dumps({'request':{'uid':'wire-request','operation':'CREATE','resource':{'group':'','resource':'services'},
+            'namespace':'apps','object':{'spec':{'type':'LoadBalancer'}}}})
+        connection = http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=5)
+        connection.request('POST','/mutate?timeout=5s',body,{'Content-Type':'application/json'})
+        result = connection.getresponse()
+        assert result.status == 200
+        payload = json.loads(result.read())
+        assert payload['response']['uid'] == 'wire-request' and payload['response']['patchType'] == 'JSONPatch'
+        connection.close()
+    finally:
+        server.shutdown(); server.server_close(); worker.join(timeout=5)

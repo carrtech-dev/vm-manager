@@ -326,3 +326,13 @@ def test_admission_is_prepared_on_every_master_before_publication(env):
     env.manager.bootstrap_record(record,ADMIN)
     assert [r[0] for r in env.requests] == ['', 'd'*32]
     assert [r[2]['admission_publish'] for r in env.requests] == [False,True]
+
+
+def test_automatic_enrollment_clears_stale_withdrawals_without_disabling_admission(env):
+    env.inventory['services'] = []
+    settings,status = env.manager.read()
+    settings['withdrawals'] = [IDENTITY]
+    env.manager.save(settings,status)
+    env.manager.reconcile()
+    assert env.manager.read()[0]['withdrawals'] == []
+    assert not any(r[2]['action'] == 'edge-bootstrap' and not r[2]['admission_enabled'] for r in env.requests)
