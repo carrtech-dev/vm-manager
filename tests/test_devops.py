@@ -301,7 +301,7 @@ def guest_operation(operation, pod=None):
             output = {'items':[pod]}
         elif 'deployments,services,ingresses,namespaces' in args:
             output = {'items': []}
-        elif 'get' in args:
+        elif 'get' in args or 'patch' in args:
             output = pod
         else:
             output = {}
@@ -498,7 +498,7 @@ def test_workload_guest_create_does_not_overwrite_and_remove_requires_current_ui
         workload=Workload(selector='web', service_type='LoadBalancer', port=8080, target_port=80))
     # Production injects a generated manifest only after request validation.
     generated = manifest('service', 'web', 'default', operation.workload)
-    assert generated['spec']['loadBalancerClass'] == CLASS
+    assert 'loadBalancerClass' not in generated['spec']
     assert generated['spec']['ports'][0]['targetPort'] == 80
     for changes in ({'action':'remove','uid':'old','confirm_name':'wrong'}, {'action':'update','uid':'abc'}):
         with pytest.raises(ValidationError): kubernetes.Operation.model_validate(operation.model_dump() | changes)
@@ -513,3 +513,28 @@ def test_workload_guest_create_does_not_overwrite_and_remove_requires_current_ui
     resource['metadata']['labels'] = {}
     result,calls = guest_operation(remove, resource)
     assert 'Only resources' in result['error'] and len(calls) == 1
+
+
+def test_automatic_claim_uses_uid_and_version_preconditions_and_respects_ownership():
+    operation = kubernetes.Operation(action='edge-claim', resource='service', statuses=[{'name':'web','namespace':'default','uid':'abc'}])
+    obj = {'metadata':{'name':'web','namespace':'default','uid':'abc','resourceVersion':'17'}, 'spec':{'type':'LoadBalancer'}}
+    # The fake transport returns this object after the patch as well as for get.
+    result,calls = guest_operation(operation,obj)
+    assert result['claimed'] == [{'uid':'abc','cleanup_pending':False}]
+    patch = json.loads(calls[-1][0][calls[-1][0].index('-p') + 1])
+    assert patch == [{'op':'test','path':'/metadata/uid','value':'abc'},
+                     {'op':'test','path':'/metadata/resourceVersion','value':'17'},
+                     {'op':'add','path':'/spec/loadBalancerClass','value':'vmm.carrtech.dev/edge'}]
+    for changed in (dict(obj,metadata=obj['metadata'] | {'uid':'new'}),
+                    dict(obj,spec={'type':'ClusterIP'}),
+                    dict(obj,spec={'type':'LoadBalancer','loadBalancerClass':'other/provider'}),
+                    dict(obj,metadata=obj['metadata'] | {'annotations':{'vmm.carrtech.dev/load-balancer':'disabled'}})):
+        result,calls = guest_operation(operation,changed)
+        assert result.get('error') and len(calls) == 1
+    system = operation.model_copy(update={'statuses':[kubernetes.kube_workloads.ServiceStatus(name='web',namespace='kube-system',uid='abc')]})
+    assert 'disabled' in guest_operation(system,obj)[0]['error']
+    obj['metadata']['finalizers'] = ['service.kubernetes.io/load-balancer-cleanup']
+    obj['spec']['loadBalancerClass'] = 'vmm.carrtech.dev/edge'
+    status = kubernetes.Operation(action='edge-status', statuses=[{'name':'web','namespace':'default','uid':'abc','address':'192.0.2.10'}])
+    result,calls = guest_operation(status,obj)
+    assert 'cleanup' in result['error'] and len(calls) == 1

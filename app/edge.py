@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from . import devops, edge_runtime, features, kubernetes, storage
 from .hypervisor import HypervisorError
-from .kube_workloads import CLASS, DNS
+from .kube_workloads import CLASS, DNS, SYSTEM_NAMESPACES
 
 CONTROLLER = {'username': 'load-balancer-controller', 'role': 'administrator'}
 
@@ -54,7 +54,7 @@ class Binding(BaseModel):
 def initialize(store):
     with store.db() as db:
         db.execute('CREATE TABLE IF NOT EXISTS devops_edge(id INTEGER PRIMARY KEY CHECK(id=1), settings TEXT NOT NULL, status TEXT NOT NULL)')
-        db.execute("INSERT OR IGNORE INTO devops_edge VALUES(1,?,?)", (json.dumps({'enabled': False, 'routes': [], 'clusters': [], 'cloudflare': {}}), json.dumps({'state': 'not-deployed', 'message': 'Load balancer has not been launched', 'services': []})))
+        db.execute("INSERT OR IGNORE INTO devops_edge VALUES(1,?,?)", (json.dumps({'enabled': False, 'routes': [], 'clusters': [], 'cloudflare': {}, 'excluded_clusters': []}), json.dumps({'state': 'not-deployed', 'message': 'Load balancer has not been launched', 'services': []})))
 
 
 class Manager:
@@ -75,7 +75,8 @@ class Manager:
 
     def catalog(self):
         settings, status = self.read()
-        public = {k: settings.get(k) for k in ('enabled', 'address', 'clusters')}
+        public = {k: settings.get(k) for k in ('enabled', 'address', 'clusters', 'excluded_clusters')}
+        public['automatic'] = True
         public['routes'] = [{k: v for k, v in r.items() if k not in ('certificate', 'private_key')} | {'has_certificate': bool(r.get('certificate'))} for r in settings['routes']]
         cf = settings.get('cloudflare', {})
         public['cloudflare'] = {k: cf.get(k, '') for k in ('account_id', 'zone_id', 'tunnel_id', 'zone_name', 'local')}
@@ -134,12 +135,16 @@ class Manager:
                 raise HTTPException(409, 'Cluster must be Ready')
             ids = set(settings['clusters'])
             withdrawals = set(settings.get('withdrawals', []))
+            excluded = set(settings.get('excluded_clusters', []))
             if enabled:
+                excluded.discard(identity)
                 ids.add(identity)
                 withdrawals.discard(identity)
             else:
+                excluded.add(identity)
                 ids.discard(identity)
                 withdrawals.add(identity)
+            settings['excluded_clusters'] = sorted(excluded)
             settings['withdrawals'] = sorted(withdrawals)
             settings['clusters'] = sorted(ids)
         return self.queue(user, change)
@@ -218,21 +223,24 @@ class Manager:
         return kubernetes.manage(self.manager, self.store, identity, CONTROLLER,
                                  kubernetes.Operation(action='edge-inventory'))
 
+    @staticmethod
+    def automatic_service(service):
+        return (service.get('type') == 'LoadBalancer' and not service.get('lb_class')
+                and service.get('namespace') not in SYSTEM_NAMESPACES
+                and service.get('automatic_lb', True) and not service.get('deleting'))
+
     def reconcile(self, force=False):
         settings, status = self.read()
-        if not settings['enabled'] or not features.catalog()['devops']['enabled']:
+        if not features.catalog()['devops']['enabled']:
             return
         try:
-            if not settings.get('initialized'):
-                info = storage.broker('edge_info')['existing_tunnel']
-                address = settings['address']
-                settings['routes'].insert(0, dict(id='manager-lan', hostname=address, mode='manager', upstreams=[address + ':8443']))
-                for i, hostname in enumerate(info.get('hostnames', [])):
-                    settings['routes'].append(dict(id='manager-tunnel-' + str(i), hostname=hostname, mode='cloudflare', upstreams=[address + ':8443']))
-                if info:
-                    settings['cloudflare'].update(tunnel_id=info['id'], account_id=info['account_id'], local=True)
-                settings['initialized'] = True
-                self.save(settings, status)
+            # Discover existing and newly ready clusters on every pass. An explicit
+            # opt-out survives polling and manager restarts.
+            with self.store.db() as db:
+                records = {r['id']: r['status'] for r in db.execute('SELECT id,status FROM devops_clusters')}
+            excluded = set(settings.get('excluded_clusters', []))
+            connected = set(settings['clusters']) | {i for i, state in records.items() if state == 'ready'}
+            settings['clusters'] = sorted(connected - excluded)
             inventories, errors = {}, []
             ids = set(settings['clusters']) | set(settings.get('withdrawals', [])) | {r['cluster_id'] for r in settings['routes'] if r.get('cluster_id')}
             for identity in sorted(ids):
@@ -246,6 +254,28 @@ class Manager:
                     inventories[identity] = inventory
                 except Exception:
                     errors.append('Cluster ' + identity[:8] + ' is unavailable; its last routes are retained')
+            demand = any(s.get('type') == 'LoadBalancer' and not s.get('deleting')
+                         and (s.get('lb_class') == CLASS or self.automatic_service(s))
+                         for identity in settings['clusters'] for s in inventories.get(identity, {}).get('services', []))
+            if not settings['enabled'] and demand:
+                settings['enabled'] = True
+                settings.setdefault('address', str(ipaddress.IPv4Address(os.environ.get('VM_MANAGER_HOST', '192.168.8.235'))))
+                self.store.audit(CONTROLLER['username'], 'devops.edge.automatic-launch', 'load-balancer')
+            self.save(settings, status)
+            if not settings['enabled']:
+                status.update(state='standby', message='Automatic integration is enabled; the load balancer starts when an application Service needs it')
+                self.save(settings, status)
+                return
+            if not settings.get('initialized'):
+                info = storage.broker('edge_info')['existing_tunnel']
+                address = settings['address']
+                settings['routes'].insert(0, dict(id='manager-lan', hostname=address, mode='manager', upstreams=[address + ':8443']))
+                for i, hostname in enumerate(info.get('hostnames', [])):
+                    settings['routes'].append(dict(id='manager-tunnel-' + str(i), hostname=hostname, mode='cloudflare', upstreams=[address + ':8443']))
+                if info:
+                    settings['cloudflare'].update(tunnel_id=info['id'], account_id=info['account_id'], local=True)
+                settings['initialized'] = True
+                self.save(settings, status)
             snapshots = settings.setdefault('snapshots', {})
             for identity, data in inventories.items(): snapshots[identity] = data
             snapshots = {key: val for key, val in snapshots.items() if key in ids}
@@ -267,17 +297,25 @@ class Manager:
                 routes.append(body)
             listeners, services, allocations = [], [], {}
             used = {80, 443, 8443, 18080, 20191}
+            # Retain existing port ownership when new Services/clusters appear.
+            live = {(identity, s['uid']): s for identity, inv in snapshots.items() for s in inv.get('services', [])
+                    if s.get('type') == 'LoadBalancer' and s.get('lb_class') == CLASS and not s.get('deleting')}
+            owners = {port: (s['cluster_id'], s['uid']) for s in status.get('services', []) if s.get('state') == 'configured'
+                      and (s['cluster_id'], s['uid']) in live
+                      for port in s['ports'] if any(p['port'] == port for p in live[(s['cluster_id'], s['uid'])]['ports'])}
             for identity in sorted(settings['clusters']):
                 inv = snapshots.get(identity, {})
                 for service in sorted(inv.get('services', []), key=lambda s: (s['namespace'], s['name'])):
                     if service['type'] != 'LoadBalancer' or service.get('lb_class') != CLASS or service.get('deleting'): continue
                     ports = service['ports']
                     message = ''
-                    if service.get('external_traffic_policy') != 'Cluster':
+                    if service.get('cleanup_pending'):
+                        message = 'Waiting for the previous load balancer controller to finish cleanup'
+                    elif service.get('external_traffic_policy') != 'Cluster':
                         message = 'externalTrafficPolicy must be Cluster'
                     elif not ports or any(p.get('protocol', 'TCP') != 'TCP' or not p.get('nodePort') or p['port'] < 1024 for p in ports):
                         message = 'TCP NodePorts and external ports 1024–65535 are required; publish HTTP/HTTPS using a hostname route'
-                    elif any(p['port'] in used for p in ports):
+                    elif any(p['port'] in used or (p['port'] in owners and owners[p['port']] != (identity, service['uid'])) for p in ports):
                         message = 'Listener port is reserved or allocated to another Service'
                     elif not inv.get('addresses'):
                         message = 'No node address is available'
@@ -285,7 +323,8 @@ class Manager:
                              'ports': [p['port'] for p in ports], 'state': 'pending' if message else 'configured', 'message': message,
                              'address': '' if message else settings['address']}
                     services.append(entry)
-                    allocations.setdefault(identity, []).append({k: entry[k] for k in ('name', 'namespace', 'uid', 'address')})
+                    if not service.get('cleanup_pending'):
+                        allocations.setdefault(identity, []).append({k: entry[k] for k in ('name', 'namespace', 'uid', 'address')})
                     if message:
                         errors.append(service['namespace'] + '/' + service['name'] + ': ' + message)
                         continue
@@ -312,6 +351,24 @@ class Manager:
                 if not runtime['running'] or (listeners and not runtime['components']['tcp']):
                     raise HypervisorError('Load balancer containers did not become ready')
                 self.applied_hash = digest
+            # A classless application Service is adopted with UID and version
+            # preconditions. K3s cleans up its former listener after the class
+            # changes; status writes wait for that controller's finalizer.
+            for identity in settings['clusters']:
+                for service in inventories.get(identity, {}).get('services', []):
+                    if not self.automatic_service(service):
+                        continue
+                    try:
+                        result = kubernetes.manage(self.manager, self.store, identity, CONTROLLER,
+                            kubernetes.Operation(action='edge-claim', resource='service', statuses=[{k: service[k] for k in ('name', 'namespace', 'uid')}]))
+                        claimed = next(c for c in result['claimed'] if c['uid'] == service['uid'])
+                        service.update(lb_class=CLASS, cleanup_pending=claimed['cleanup_pending'])
+                        services.append({'cluster_id':identity, 'name':service['name'], 'namespace':service['namespace'],
+                            'uid':service['uid'], 'ports':[p['port'] for p in service['ports']], 'state':'pending', 'address':'',
+                            'message':'Automatic setup is in progress; waiting for controller handover and listener provisioning'})
+                        self.store.audit(CONTROLLER['username'], 'devops.service.automatic-load-balancer', identity, service['namespace'] + '/' + service['name'])
+                    except Exception:
+                        errors.append('Could not claim Service ' + service['namespace'] + '/' + service['name'] + '; retrying automatically')
             status['runtime'] = runtime if 'runtime' in locals() else health
             # Publish Kubernetes status only after the data plane accepted the configuration.
             for identity, entries in allocations.items():
@@ -327,7 +384,10 @@ class Manager:
                         continue
                 if identity in settings.get('withdrawals', []):
                     settings['withdrawals'].remove(identity)
-            status.update(state='degraded' if errors else 'ready', message='; '.join(errors) if errors else 'Load balancer is running', services=services, updated=time.time())
+            provisioning = any(s['state'] == 'pending' for s in services)
+            status.update(state='degraded' if errors else 'provisioning' if provisioning else 'ready',
+                message='; '.join(errors) if errors else 'Load balancer is running; new Service setup is in progress' if provisioning else 'Load balancer is running',
+                services=services, updated=time.time())
             self.save(settings, status)
         except Exception as exc:
             status.update(state='failed', message=str(exc)[:500], updated=time.time())

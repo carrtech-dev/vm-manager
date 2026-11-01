@@ -10,7 +10,7 @@ NAME = r'^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$'
 
 
 class Operation(BaseModel):
-    action: Literal['inventory', 'describe', 'delete', 'restart', 'exec-check', 'create', 'update', 'remove', 'edge-inventory', 'edge-status'] = 'inventory'
+    action: Literal['inventory', 'describe', 'delete', 'restart', 'exec-check', 'create', 'update', 'remove', 'edge-inventory', 'edge-status', 'edge-claim'] = 'inventory'
     resource: Literal['node', 'pod', 'deployment', 'service', 'ingress'] = 'pod'
     namespace: str = Field(default='default', min_length=1, max_length=63, pattern=r'^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$')
     name: str = Field(default='', max_length=253, pattern=r'^$|' + NAME)
@@ -36,7 +36,7 @@ class Operation(BaseModel):
                 kube_workloads.manifest(self.resource, self.name, self.namespace, self.workload)
             if self.action == 'update' and self.resource != 'deployment':
                 raise ValueError('Only Deployment updates are supported')
-        if self.action not in ('inventory', 'edge-inventory', 'edge-status') and not self.name:
+        if self.action not in ('inventory', 'edge-inventory', 'edge-status', 'edge-claim') and not self.name:
             raise ValueError('Select a resource')
         if self.action in ('delete', 'restart', 'exec-check'):
             if self.resource != 'pod' or not self.uid:
@@ -78,6 +78,8 @@ def restartable(p):
 try:
     if r['action'] == 'edge-inventory':
         result = workload_inventory()
+    elif r['action'] == 'edge-claim':
+        result = edge_claim()
     elif r['action'] == 'edge-status':
         result = edge_status()
     elif r['action'] in ('create', 'update', 'remove'):

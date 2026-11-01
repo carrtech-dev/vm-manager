@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Opt-in acceptance: disposable workloads on an explicitly selected Ready cluster.
 
-Requires root on the manager host and --launch to start an undeployed edge.
-Retains the running edge and original cluster binding; removes only this run's
-uniquely named resources/account. Never resets an existing user's password.
+Requires root on the manager host. Creating the test Service may automatically
+start the shared edge. Does not call Launch or Connect by default; retains the
+edge and removes only this run's uniquely named resources/account. Never resets an existing user's password.
 """
 import argparse
 import http.client
@@ -27,7 +27,7 @@ def main():
     parser.add_argument('--url', required=True)
     parser.add_argument('--certificate', type=Path, required=True)
     parser.add_argument('--cluster-id', required=True)
-    parser.add_argument('--launch', action='store_true')
+    parser.add_argument('--launch', action='store_true', help='Optionally force launch for diagnostics; not required for automatic integration')
     parser.add_argument('--port', type=int, default=18088)
     args = parser.parse_args()
     suffix = secrets.token_hex(4)
@@ -40,8 +40,7 @@ def main():
         user_id = db.execute('INSERT INTO users(username,password,role,created) VALUES(?,?,?,?)',
                             (name, hash_password(password), 'administrator', time.time())).lastrowid
     client = httpx.Client(base_url=args.url.rstrip('/') + '/api', verify=context, trust_env=False, timeout=110)
-    created, route_id, was_bound = [], '', False
-    connected = False
+    created, route_id = [], ''
     def api(path, method='GET', body=None):
         response = client.request(method, path, json=body)
         if response.is_error:
@@ -71,25 +70,36 @@ def main():
         cluster = next(c for c in clusters if c['id'] == args.cluster_id)
         if cluster['status'] != 'ready': raise RuntimeError('Select a Ready cluster')
         edge = api('/devops/load-balancer')
-        if not edge['settings']['enabled']:
-            if not args.launch: raise RuntimeError('Launch the edge first or explicitly use --launch')
+        if args.cluster_id in (edge['settings'].get('excluded_clusters') or []):
+            raise RuntimeError('This cluster has an explicit integration opt-out; select another cluster or resume it first')
+        if args.launch:
             queued('/devops/load-balancer/launch')
-        edge = api('/devops/load-balancer')
-        was_bound = args.cluster_id in (edge['settings']['clusters'] or [])
-        queued('/devops/load-balancer/clusters/' + args.cluster_id, 'PUT', {'enabled':True})
-        connected = True
+        first = cluster['nodes'][0]
+        if first['host_id']:
+            raise RuntimeError('The automatic acceptance check requires a cluster with its first master on this host')
         manage('create', 'deployment', workload={'image':'nginx:stable-alpine', 'replicas':1})
         created.append('deployment')
         wait(lambda: next((r for r in resources()['deployments'] if r['name'] == name and r['ready'] == 1), None), 'Test Deployment did not become ready')
-        manage('create', 'service', workload={'selector':name,'service_type':'LoadBalancer','port':args.port,'target_port':80})
+        # Use an ordinary external kubectl request with no class, Launch or Connect.
+        command = ['incus','--force-local','--project','default','exec',first['name'],'--',
+                   '/usr/local/bin/k3s','kubectl','expose','deployment',name,'--namespace','default',
+                   '--type=LoadBalancer','--port='+str(args.port),'--target-port=80',
+                   '--labels=app.kubernetes.io/managed-by=vm-manager','-o','json']
+        exposed = json.loads(subprocess.check_output(command,text=True))
         created.append('service')
-        address = edge['settings']['address']
-        wait(lambda: next((r for r in resources()['services'] if r['name'] == name and any(entry.get('ip') == address for entry in r['external'])), None), 'Native Service address was not assigned')
+        assert not exposed['spec'].get('loadBalancerClass')
+        def assigned():
+            resource = next((r for r in resources()['services'] if r['name'] == name), None)
+            current = api('/devops/load-balancer')
+            address = current['settings'].get('address')
+            return resource if resource and resource.get('lb_class') == 'vmm.carrtech.dev/edge' and any(entry.get('ip') == address for entry in resource['external']) else None
+        wait(assigned, 'Automatic Service integration did not assign the edge address')
+        address = api('/devops/load-balancer')['settings']['address']
         # Use an ordinary HTTP request through HAProxy's TCP listener.
         with httpx.Client(trust_env=False, timeout=10) as probe:
             response = probe.get('http://' + address + ':' + str(args.port))
             assert response.status_code == 200 and 'Welcome to nginx' in response.text
-        print('PASS: Deployment image pulled; native LoadBalancer Service IP and TCP traffic verified')
+        print('PASS: plain kubectl LoadBalancer Service automatically connected, assigned an IP and served TCP traffic without Launch or Connect')
         manage('create', 'ingress', workload={'hostname':hostname,'selector':name,'port':args.port})
         created.append('ingress')
         with tempfile.TemporaryDirectory(prefix=name) as tmp:
@@ -133,9 +143,6 @@ def main():
                 key='ingresses' if kind=='ingress' else kind+'s'
                 resource=next((r for r in resources()[key] if r['name']==name),None)
                 if resource: manage('remove',kind,uid=resource['uid'],confirm_name=name)
-            except Exception as exc: errors.append(str(exc))
-        if connected and not was_bound:
-            try: queued('/devops/load-balancer/clusters/'+args.cluster_id,'PUT',{'enabled':False})
             except Exception as exc: errors.append(str(exc))
         client.close()
         with store.db() as db:

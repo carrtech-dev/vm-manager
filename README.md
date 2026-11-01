@@ -945,7 +945,9 @@ a Deployment retains related Services, Ingresses and storage.
 ### Managed load balancer
 
 Open **DevOps → Manage load balancer** (`/#devops/load-balancer`). An administrator
-can **Launch load balancer** with one click. The app manages digest-pinned Caddy
+can **Launch load balancer** explicitly for hostname routing, but Kubernetes needs
+no setup clicks: Ready DevOps clusters connect automatically, and the first
+application `LoadBalancer` Service launches the shared edge on demand. The app manages digest-pinned Caddy
 and HAProxy containers on this manager's host using the existing privileged
 local broker, without granting the web service access to the Docker socket.
 Docker must already be installed and running. Configuration changes are queued
@@ -1001,7 +1003,8 @@ is supported; the connected account cannot be changed under an existing tunnel.
 Cloudflare must have certificate coverage for the chosen hostname (deeper
 subdomains may require additional Cloudflare certificate coverage).
 
-**Connect cluster** enables the native Service controller. Create a Service with:
+The native Service controller automatically discovers Ready DevOps clusters.
+Create a plain Kubernetes Service through kubectl, Helm or the graphical form:
 
 ```yaml
 apiVersion: v1
@@ -1010,7 +1013,6 @@ metadata:
   name: web
 spec:
   type: LoadBalancer
-  loadBalancerClass: vmm.carrtech.dev/edge
   selector:
     app: web
   ports:
@@ -1019,15 +1021,23 @@ spec:
       protocol: TCP
 ```
 
-Services created in the graphical form select this class automatically. K3s's
-built-in ServiceLB remains responsible for its own classless Services. This
-controller discovers Services through their owning masters, configures HAProxy
+No `loadBalancerClass`, Launch or Connect step is required. After the shared
+edge accepts its configuration, the controller assigns
+`vmm.carrtech.dev/edge` to classless application Services using UID and resource
+version preconditions. Kubernetes permits an unset class to be assigned; an
+explicit class belonging to another provider is retained. K3s releases any
+previous ServiceLB listener; the edge waits for its cleanup finalizer before
+publishing a new address. Classless Services in `kube-system`, `kube-public` and
+`kube-node-lease` remain with K3s, preserving platform ingress and DNS.
+
+The controller discovers Services through their owning masters, configures HAProxy
 listeners to node IPs/NodePorts, and publishes the edge host's IPv4 address in
 `status.loadBalancer` only after successful application. It uses the authenticated
 VM Manager REST API and the Kubernetes API via the existing owned guest channel;
 no cluster-admin kubeconfig or new bearer secret is copied into the manager.
-Reconciliation runs every 15 seconds. Changes and deletion from ordinary kubectl
-clients are picked up automatically. A cluster connection requires the current
+Automatic discovery and reconciliation run every 15 seconds; first publication
+can take additional passes while the runtime starts and K3s finishes handover.
+Changes and deletion from ordinary kubectl clients are picked up automatically. A cluster connection requires the current
 release on its owning manager, including linked hosts.
 
 TCP external ports **1024–65535** are supported, with `externalTrafficPolicy:
@@ -1035,8 +1045,14 @@ Cluster` and allocated NodePorts. UDP, source-IP preservation, allocation of
 additional public/VIP addresses and `allocateLoadBalancerNodePorts: false` are
 not supported. Ports 80, 443, 8443, 18080 and 20191 are reserved; port conflicts
 remain pending with an explanation on the load balancer screen. Share web HTTPS
-through hostname routes. Cluster disconnect removes TCP listeners and clears
-the controller's Service addresses; hostname routes remain separately managed.
+through hostname routes. Administrators can **Pause automatic integration** for
+a cluster; this opt-out
+survives polling/restarts, removes TCP listeners and clears the controller’s
+Service addresses. Resume restores automatic integration. Individual classless
+Services can opt out using the annotation
+`vmm.carrtech.dev/load-balancer: disabled` before they are claimed. An assigned
+Kubernetes load-balancer class is immutable: moving an already claimed Service
+to another provider requires recreating it. Hostname routes remain separately managed.
 A temporarily unreachable cluster retains its last successful routes and reports
 a degraded state; confirmed resource deletion withdraws its listeners.
 
@@ -1053,9 +1069,14 @@ backup alongside the SQLite backup. Keep both when recovering an edge installati
 `scripts/edge_check.py` is an opt-in live check on the manager host, requiring
 `--state`, `--url`, `--certificate` and an explicitly selected `--cluster-id`.
 Use a Ready cluster with room for one disposable nginx pod and a reachable Traefik
-NodePort. Add `--launch` only when starting the managed edge and switching the
-established VM Manager tunnel is intended. It creates a temporary administrator
+NodePort. Creating the test Service may start the managed edge and switch the
+established VM Manager tunnel automatically; use only when this is intended.
+The default check never calls Launch or Connect. It uses a plain, classless
+`kubectl expose --type=LoadBalancer` request on a first master local to the
+manager host, then verifies automatic discovery and adoption. It creates a
+temporary administrator
 and uniquely named Deployment, Service, Ingress and manual certificate route,
 verifies native TCP traffic and trusted HTTPS/SNI through the Ingress, and removes
-its resources/account. It restores the cluster's prior controller binding and
-retains the launched edge. `--port` selects a free TCP listener (default 18088).
+its resources/account. It retains the automatically connected cluster and
+running edge,
+without changing any integration opt-outs. `--port` selects a free TCP listener (default 18088).

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 DNS = r'^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$'
 CLASS = 'vmm.carrtech.dev/edge'
+SYSTEM_NAMESPACES = ('kube-system', 'kube-public', 'kube-node-lease')
 MANAGED = 'app.kubernetes.io/managed-by'
 
 
@@ -60,8 +61,6 @@ def manifest(resource, name, namespace, spec):
             raise ValueError('Deployment / app selector is required')
         service = {'type': spec.service_type, 'selector': {'app': spec.selector},
                    'ports': [{'name': 'tcp', 'port': spec.port, 'targetPort': spec.target_port, 'protocol': 'TCP'}]}
-        if spec.service_type == 'LoadBalancer':
-            service['loadBalancerClass'] = CLASS
         return {'apiVersion': 'v1', 'kind': 'Service', 'metadata': metadata, 'spec': service}
     if not spec.hostname or not spec.selector:
         raise ValueError('Hostname and backend Service are required')
@@ -94,7 +93,9 @@ def workload_inventory():
                 ports=s.get('ports', []), selector=s.get('selector', {}), lb_class=s.get('loadBalancerClass', ''),
                 external=status.get('loadBalancer', {}).get('ingress', []),
                 external_traffic_policy=s.get('externalTrafficPolicy', 'Cluster'),
-                deleting=bool(m.get('deletionTimestamp')))
+                deleting=bool(m.get('deletionTimestamp')),
+                cleanup_pending='service.kubernetes.io/load-balancer-cleanup' in m.get('finalizers', []),
+                automatic_lb=m.get('annotations', {}).get('vmm.carrtech.dev/load-balancer') != 'disabled')
             out['services'].append(base)
         elif kind == 'Ingress':
             base.update(rules=s.get('rules', []), tls=s.get('tls', []), ingress_class=s.get('ingressClassName', ''))
@@ -127,11 +128,32 @@ def workload_mutation():
     kube(['patch', resource, r['name'], '--namespace', r['namespace'], '--type=json', '-p', json.dumps(patch)])
     return {'message':'Deployment update requested. Kubernetes manages the rollout.'}
 
+def edge_claim():
+    claimed = []
+    for entry in r['statuses']:
+        obj = get('service', entry['name'], entry['namespace'])
+        m, spec = obj['metadata'], obj.get('spec', {})
+        if m['uid'] != entry['uid'] or m.get('deletionTimestamp'):
+            raise ValueError('Service changed since discovery; refresh before claiming it')
+        if spec.get('type') != 'LoadBalancer' or spec.get('loadBalancerClass') not in (None, '', 'vmm.carrtech.dev/edge'):
+            raise ValueError('Service is assigned to another controller or is not a LoadBalancer')
+        if entry['namespace'] in ('kube-system', 'kube-public', 'kube-node-lease') or m.get('annotations', {}).get('vmm.carrtech.dev/load-balancer') == 'disabled':
+            raise ValueError('Automatic management is disabled for this Service')
+        if not spec.get('loadBalancerClass'):
+            patch = [{'op':'test','path':'/metadata/uid','value':entry['uid']},
+                     {'op':'test','path':'/metadata/resourceVersion','value':m['resourceVersion']},
+                     {'op':'add','path':'/spec/loadBalancerClass','value':'vmm.carrtech.dev/edge'}]
+            obj = json.loads(kube(['patch', 'service', entry['name'], '-n', entry['namespace'], '--type=json', '-p', json.dumps(patch), '-o', 'json']))
+        claimed.append({'uid': entry['uid'], 'cleanup_pending': 'service.kubernetes.io/load-balancer-cleanup' in obj['metadata'].get('finalizers', [])})
+    return {'claimed': claimed}
+
 def edge_status():
     for entry in r['statuses']:
         obj = get('service', entry['name'], entry['namespace'])
         if obj['metadata']['uid'] != entry['uid'] or obj.get('spec', {}).get('loadBalancerClass') != 'vmm.carrtech.dev/edge':
             raise ValueError('Service changed or uses another load-balancer controller')
+        if 'service.kubernetes.io/load-balancer-cleanup' in obj['metadata'].get('finalizers', []):
+            raise ValueError('Waiting for the previous load balancer controller to finish cleanup')
         status = {'loadBalancer': {'ingress': [{'ip': entry['address']} ] if entry['address'] else []}}
         patch = [{'op':'test', 'path':'/metadata/uid', 'value':entry['uid']},
                  {'op':'add', 'path':'/status/loadBalancer', 'value':status['loadBalancer']}]

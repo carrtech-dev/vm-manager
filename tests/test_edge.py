@@ -33,6 +33,13 @@ def env(tmp_path, monkeypatch):
     def rpc(host, path, user, body=None):
         requests.append((host, path, body))
         if body['action'] == 'edge-inventory': return json.loads(json.dumps(inventory))
+        if body['action'] == 'edge-claim':
+            claimed = []
+            for entry in body['statuses']:
+                target = next(s for s in inventory['services'] if s['uid'] == entry['uid'])
+                target['lb_class'] = kube_workloads.CLASS
+                claimed.append({'uid':entry['uid'], 'cleanup_pending':target.get('cleanup_pending',False)})
+            return {'claimed':claimed}
         return {}
     def submit(user, action, resource, fn, resources):
         jobs.append(fn)
@@ -92,6 +99,7 @@ def test_launch_reuses_one_tunnel_and_native_service_addresses_follow_apply(env)
 def test_failed_data_plane_never_advertises_service_ip(env, monkeypatch):
     launch(env)
     env.manager.bind(ADMIN, IDENTITY, True)
+    env.requests.clear()
     def failed(action, **kwargs): raise HypervisorError('Listener port occupied')
     monkeypatch.setattr(edge.storage, 'broker', failed)
     with pytest.raises(HypervisorError): env.jobs[-1]()
@@ -222,3 +230,88 @@ def test_direct_vm_manager_routes_use_a_fixed_verified_https_origin(env):
     assert 'tls_trust_pool file /edge/manager.crt' in caddy
     with pytest.raises(ValidationError):
         edge.Route(hostname='manager.example.test',mode='manual',backend='vm-manager',upstreams=['10.0.0.1:443'])
+
+
+def test_service_starts_load_balancer_and_connects_cluster_without_setup_calls(env):
+    env.inventory['services'] = [service() | {'lb_class':''}]
+    env.manager.tick()
+    settings, status = env.manager.read()
+    assert settings['enabled'] and settings['clusters'] == [IDENTITY]
+    assert any(c[0] == 'edge_apply' for c in env.calls)
+    assert any(r[2]['action'] == 'edge-claim' for r in env.requests)
+    assert env.jobs == []  # No Launch or Connect API/task was required.
+    env.manager.reconcile()
+    assert env.manager.catalog()['status']['services'][0]['address'] == '192.168.8.235'
+    assert any(r[2]['action'] == 'edge-status' for r in env.requests)
+
+
+def test_empty_cluster_is_connected_but_runtime_starts_only_on_demand(env):
+    env.inventory['services'] = []
+    env.manager.reconcile()
+    settings,status = env.manager.read()
+    assert settings['clusters'] == [IDENTITY] and not settings['enabled']
+    assert status['state'] == 'standby' and env.calls == []
+    env.inventory['services'] = [service()]
+    env.manager.reconcile()
+    assert env.manager.read()[0]['enabled']
+
+
+def test_new_ready_clusters_are_discovered_and_pause_survives_restart(env):
+    env.inventory['services'] = []
+    env.manager.reconcile()
+    with env.store.db() as db:
+        db.execute('UPDATE devops_clusters SET status=?', ('deploying',))
+    settings,status = env.manager.read(); settings['clusters'] = []; env.manager.save(settings,status)
+    env.manager.reconcile()
+    assert env.manager.read()[0]['clusters'] == []
+    with env.store.db() as db:
+        db.execute('UPDATE devops_clusters SET status=?', ('ready',))
+    env.manager.reconcile()
+    assert env.manager.read()[0]['clusters'] == [IDENTITY]
+    env.manager.bind(ADMIN, IDENTITY, False); env.jobs[-1]()
+    another = edge.Manager(env.store, env.manager.manager, env.manager.submit)
+    another.reconcile()
+    assert another.read()[0]['clusters'] == []
+    env.inventory['services'] = [service() | {'lb_class':''}]
+    another.reconcile()
+    assert not another.read()[0]['enabled']
+    env.manager.bind(ADMIN, IDENTITY, True); env.jobs[-1]()
+    assert env.manager.read()[0]['enabled']
+
+
+def test_system_foreign_and_opted_out_services_are_not_claimed_or_autostarted(env):
+    env.inventory['services'] = [service('system') | {'namespace':'kube-system','lb_class':''},
+        service('foreign',uid='foreign') | {'lb_class':'someone-else/controller'},
+        service('opt-out',uid='optout') | {'lb_class':'','automatic_lb':False}]
+    env.manager.reconcile()
+    assert not env.manager.read()[0]['enabled']
+    assert env.calls == []
+    assert not any(r[2]['action'] == 'edge-claim' for r in env.requests)
+
+
+def test_claiming_waits_for_a_working_runtime_and_status_waits_for_provider_cleanup(env, monkeypatch):
+    env.inventory['services'] = [service() | {'lb_class':'','cleanup_pending':True}]
+    original = edge.storage.broker
+    monkeypatch.setattr(edge.storage,'broker',lambda action,**kw: original(action,**kw) if action=='edge_info' else (_ for _ in ()).throw(HypervisorError('Port occupied')))
+    with pytest.raises(HypervisorError): env.manager.reconcile()
+    assert not any(r[2]['action'] == 'edge-claim' for r in env.requests)
+    monkeypatch.setattr(edge.storage,'broker',original)
+    env.manager.reconcile(); env.requests.clear()
+    env.manager.reconcile()
+    assert not any(r[2]['action'] == 'edge-status' for r in env.requests)
+    assert 'cleanup' in env.manager.catalog()['status']['services'][0]['message']
+    env.inventory['services'][0]['cleanup_pending'] = False
+    env.manager.reconcile()
+    assert any(r[2]['action'] == 'edge-status' for r in env.requests)
+
+
+def test_new_service_cannot_steal_an_existing_listener(env):
+    env.inventory['services'] = [service('zzz-existing', uid='old')]
+    env.manager.reconcile()
+    env.inventory['services'].append(service('aaa-new', uid='new'))
+    env.manager.reconcile()
+    results = {s['uid']:s for s in env.manager.catalog()['status']['services']}
+    assert results['old']['state'] == 'configured'
+    assert results['new']['state'] == 'pending'
+    configured = [c[1]['body'] for c in env.calls if c[0] == 'edge_apply'][-1]['listeners']
+    assert len(configured) == 1 and configured[0]['id'].endswith('-old')

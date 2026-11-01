@@ -37,3 +37,19 @@ test('workload forms and tables cover deployments, Services and Ingress with per
   assert.doesNotMatch(workloadTables(data),/data-kube-action="(?:deployment-update|service-remove)"/);
   assert.doesNotMatch(clusterScreen({id:'a',name:'test',version:'v1'}),/deployment-create/);
 });
+
+
+test('automatic integration is the default and only optional pause controls are shown', () => {
+  state.user = {role:'administrator'};
+  state.devops = {clusters:[{id:'cluster',name:'Ready cluster',status:'ready'}]};
+  const data = {settings:{enabled:false,clusters:[],excluded_clusters:[],routes:[],cloudflare:{}},status:{state:'standby',message:'Automatic',services:[]}};
+  let html = edgeContent(data);
+  assert.match(html,/Clusters connect automatically/);
+  assert.match(html,/Automatic integration enabled/);
+  assert.match(html,/Pause automatic integration/);
+  assert.doesNotMatch(html,/>Connect cluster</);
+  assert.match(workloadForm('service'),/No connection step is required/);
+  data.settings.excluded_clusters = ['cluster'];
+  html = edgeContent(data);
+  assert.match(html,/Resume automatic integration/);
+});
