@@ -128,11 +128,13 @@ def certificate_id(route):
 
 
 def caddyfile(config):
-    lines = ['{', ' admin 127.0.0.1:20191', ' auto_https disable_redirects', '}']
+    lines = ['{', ' admin 127.0.0.1:20191', ' auto_https disable_redirects', ' servers {', '  trusted_proxies static 127.0.0.1/32', ' }', '}']
     for route in config.routes:
         tunnel = route.mode == 'cloudflare'
         site = 'http://' + route.hostname + ':18080' if tunnel else 'https://' + route.hostname
         lines += [site + ' {', ' bind ' + ('127.0.0.1' if tunnel else config.address)]
+        if tunnel:
+            lines += [' @visitor_http header X-Forwarded-Proto http', ' redir @visitor_http https://{host}{uri} 308']
         if route.mode == 'manager':
             lines += [' tls /edge/manager.crt /edge/manager.key']
         elif route.mode == 'manual':
@@ -213,7 +215,7 @@ def migrate_tunnel():
     if not hosts:
         raise HypervisorError('Existing tunnel has no hostnames to verify')
     for host in hosts:
-        req = urllib.request.Request('http://127.0.0.1:18080/health', headers={'Host': host})
+        req = urllib.request.Request('http://127.0.0.1:18080/health', headers={'Host': host, 'X-Forwarded-Proto': 'https'})
         with urllib.request.urlopen(req, timeout=8) as response:
             if json.load(response).get('service') != 'vm-manager':
                 raise HypervisorError('VM Manager proxy health verification failed; tunnel retained')
@@ -226,7 +228,7 @@ def migrate_tunnel():
         for host in hosts:
             for attempt in range(8):
                 try:
-                    with urllib.request.urlopen('https://' + host + '/health', timeout=5) as response:
+                    with urllib.request.urlopen(urllib.request.Request('https://' + host + '/health', headers={'User-Agent':'CarrTech-VM-Manager-Deploy/1.0'}), timeout=5) as response:
                         if json.load(response).get('service') == 'vm-manager':
                             break
                 except Exception:

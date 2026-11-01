@@ -192,6 +192,7 @@ def test_proxy_config_is_bounded_uses_single_host_routing_and_tls_challenges():
         listeners=[{'id':'service','port':12345,'upstreams':['10.0.0.3:31001']}])
     caddy = edge_runtime.caddyfile(config)
     assert 'auto_https disable_redirects' in caddy and 'disable_http_challenge' in caddy
+    assert 'trusted_proxies static 127.0.0.1/32' in caddy
     assert 'https://app.example.test' in caddy and 'http://other.example.test:18080' in caddy
     assert 'bind 127.0.0.1' in caddy and 'respond 404' in caddy
     assert 'bind 192.0.2.10:12345' in edge_runtime.haproxyfile(config)
