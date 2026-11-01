@@ -55,6 +55,9 @@ def addresses():
         if interface.get('ifname', '').startswith(('lo', 'docker', 'veth', 'br-', 'virbr', 'incusbr')):
             continue
         for item in interface.get('addr_info', []):
+            # iproute can emit empty objects for addresses excluded by scope.
+            if not item.get('local'):
+                continue
             address = ipaddress.ip_address(item['local'])
             if not address.is_loopback and not address.is_link_local and not address.is_unspecified:
                 if str(address) not in found:

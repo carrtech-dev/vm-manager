@@ -86,7 +86,7 @@ def test_discover_actual_lan_addresses_ipv6_urls_and_certificate_names(access, m
     interfaces = [
         {'ifname': 'docker0', 'addr_info': [{'local': '172.17.0.1'}]},
         {'ifname': 'eth1', 'addr_info': [{'local': '10.2.0.4'}]},
-        {'ifname': 'eth0', 'addr_info': [{'local': '192.168.8.10'}, {'local': 'fd00::10'}, {'local': 'fe80::1'}]},
+        {'ifname': 'eth0', 'addr_info': [{'local': '192.168.8.10'}, {'local': 'fd00::10'}, {}, {'local': 'fe80::1'}]},
     ]
     monkeypatch.setattr(access.shutil, 'which', lambda name: name == 'ip')
     monkeypatch.setattr(access, 'command', lambda *args, **kwargs: SimpleNamespace(
