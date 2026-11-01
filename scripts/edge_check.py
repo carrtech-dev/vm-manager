@@ -96,9 +96,14 @@ def main():
         wait(assigned, 'Automatic Service integration did not assign the edge address')
         address = api('/devops/load-balancer')['settings']['address']
         # Use an ordinary HTTP request through HAProxy's TCP listener.
-        with httpx.Client(trust_env=False, timeout=10) as probe:
-            response = probe.get('http://' + address + ':' + str(args.port))
-            assert response.status_code == 200 and 'Welcome to nginx' in response.text
+        with httpx.Client(trust_env=False, timeout=3) as probe:
+            def traffic_ready():
+                try:
+                    response = probe.get('http://' + address + ':' + str(args.port))
+                    return response.status_code == 200 and 'Welcome to nginx' in response.text
+                except httpx.HTTPError:
+                    return False
+            wait(traffic_ready, 'Native load-balancer address was assigned but its data path never became healthy', timeout=60)
         print('PASS: plain kubectl LoadBalancer Service automatically connected, assigned an IP and served TCP traffic without Launch or Connect')
         manage('create', 'ingress', workload={'hostname':hostname,'selector':name,'port':args.port})
         created.append('ingress')

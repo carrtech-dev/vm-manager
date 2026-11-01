@@ -167,7 +167,7 @@ def haproxyfile(config):
             raise HypervisorError('Listener port is reserved or already in use')
         used.add(listener.port)
         lines += ['listen ' + listener.id + '-' + str(listener.port), ' bind ' + config.address + ':' + str(listener.port), ' balance roundrobin']
-        lines += [' server n' + str(i) + ' ' + u + ' check' for i, u in enumerate(listener.upstreams)]
+        lines += [' server n' + str(i) + ' ' + u + ' check init-state down inter 1s' for i, u in enumerate(listener.upstreams)]
     return '\n'.join(lines) + '\n'
 
 
@@ -183,6 +183,15 @@ def ensure(name, image, command, mounts):
     for source, target, readonly in mounts:
         args += ['-v', str(source) + ':' + target + (':ro' if readonly else '')]
     run(args + [image] + command)
+
+
+def sync_tcp():
+    previous = container('vmm-edge-tcp')
+    ensure('vmm-edge-tcp', HAPROXY, ['haproxy', '-W', '-db', '-f', '/edge/haproxy.cfg'], [(ROOT, '/edge', True)])
+    # A newly started master reads the new file itself. Reloading during its
+    # initial worker startup can fail socket transfer and leave a dead listener.
+    if previous and previous['State']['Running']:
+        run(['docker', 'kill', '--signal', 'USR2', 'vmm-edge-tcp'])
 
 
 def available(address, port):
@@ -297,10 +306,9 @@ def apply(body):
             run(['docker', 'exec', 'vmm-edge-https', 'caddy', 'reload', '--config', '/edge/Caddyfile', '--adapter', 'caddyfile', '--address', '127.0.0.1:20191'])
             private(tcp_active, tcp)
             if config.listeners:
-                existed = container('vmm-edge-tcp')
-                ensure('vmm-edge-tcp', HAPROXY, ['haproxy', '-W', '-db', '-f', '/edge/haproxy.cfg'], [(ROOT, '/edge', True)])
-                if existed:
-                    run(['docker', 'kill', '--signal', 'USR2', 'vmm-edge-tcp'])
+                running_tcp = container('vmm-edge-tcp')
+                if prior_tcp != tcp or not running_tcp or not running_tcp['State']['Running']:
+                    sync_tcp()
             elif container('vmm-edge-tcp'):
                 run(['docker', 'stop', 'vmm-edge-tcp'])
             if config.tunnel_token:
@@ -330,8 +338,10 @@ def apply(body):
                 private(tcp_active, prior_tcp)
                 if container('vmm-edge-tcp'):
                     if previous and previous.get('listeners'):
-                        run(['docker', 'start', 'vmm-edge-tcp'], check=False)
-                        run(['docker', 'kill', '--signal', 'USR2', 'vmm-edge-tcp'], check=False)
+                        try:
+                            sync_tcp()
+                        except HypervisorError:
+                            pass  # Still restore HTTPS if TCP recovery itself fails.
                     else:
                         run(['docker', 'stop', 'vmm-edge-tcp'], check=False)
             elif container('vmm-edge-tcp'):

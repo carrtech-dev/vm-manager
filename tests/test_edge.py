@@ -336,3 +336,16 @@ def test_automatic_enrollment_clears_stale_withdrawals_without_disabling_admissi
     env.manager.reconcile()
     assert env.manager.read()[0]['withdrawals'] == []
     assert not any(r[2]['action'] == 'edge-bootstrap' and not r[2]['admission_enabled'] for r in env.requests)
+
+
+@pytest.mark.parametrize('previous,reloads', [(None,0),({'State':{'Running':False}},0),({'State':{'Running':True}},1)])
+def test_tcp_proxy_startup_does_not_reload_a_new_worker(monkeypatch,previous,reloads):
+    calls=[]
+    monkeypatch.setattr(edge_runtime,'container',lambda name:previous)
+    monkeypatch.setattr(edge_runtime,'ensure',lambda *args:calls.append(('ensure',args)))
+    monkeypatch.setattr(edge_runtime,'run',lambda args:calls.append(('signal',args)))
+    edge_runtime.sync_tcp()
+    assert len([c for c in calls if c[0]=='ensure'])==1
+    assert len([c for c in calls if c[0]=='signal'])==reloads
+    config=edge_runtime.Configuration(address='192.0.2.10',routes=[],listeners=[{'id':'test','port':18088,'upstreams':['10.0.0.1:31000']}])
+    assert 'check init-state down inter 1s' in edge_runtime.haproxyfile(config)
