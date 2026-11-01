@@ -74,14 +74,16 @@ def manifest(resource, name, namespace, spec):
 # Passed in the validated Operation, generated server-side; never arbitrary YAML.
 GUEST = r'''
 def workload_inventory():
-    items = json.loads(kube(['get', 'deployments,services,ingresses,namespaces', '--all-namespaces', '-o', 'json']))['items']
-    out = {'deployments': [], 'services': [], 'ingresses': [], 'namespaces': []}
+    items = json.loads(kube(['get', 'deployments,services,ingresses,namespaces,mutatingwebhookconfigurations', '--all-namespaces', '-o', 'json']))['items']
+    out = {'deployments': [], 'services': [], 'ingresses': [], 'namespaces': [], 'admission_version': ''}
     for obj in items:
         m, s, status = obj['metadata'], obj.get('spec', {}), obj.get('status', {})
         base = {k: m.get(k, '') for k in ('name', 'namespace', 'uid')}
         base['managed'] = m.get('labels', {}).get('app.kubernetes.io/managed-by') == 'vm-manager'
         kind = obj['kind']
-        if kind == 'Namespace':
+        if kind == 'MutatingWebhookConfiguration' and m['name'] == 'vmm-edge-admission':
+            out['admission_version'] = m.get('annotations', {}).get('vmm.carrtech.dev/admission-version', '')
+        elif kind == 'Namespace':
             out['namespaces'].append(m['name'])
         elif kind == 'Deployment':
             containers = s.get('template', {}).get('spec', {}).get('containers', [])
@@ -127,25 +129,6 @@ def workload_mutation():
              {'op':'replace','path':'/spec/template/spec/containers/0/image','value':r['workload']['image']}]
     kube(['patch', resource, r['name'], '--namespace', r['namespace'], '--type=json', '-p', json.dumps(patch)])
     return {'message':'Deployment update requested. Kubernetes manages the rollout.'}
-
-def edge_claim():
-    claimed = []
-    for entry in r['statuses']:
-        obj = get('service', entry['name'], entry['namespace'])
-        m, spec = obj['metadata'], obj.get('spec', {})
-        if m['uid'] != entry['uid'] or m.get('deletionTimestamp'):
-            raise ValueError('Service changed since discovery; refresh before claiming it')
-        if spec.get('type') != 'LoadBalancer' or spec.get('loadBalancerClass') not in (None, '', 'vmm.carrtech.dev/edge'):
-            raise ValueError('Service is assigned to another controller or is not a LoadBalancer')
-        if entry['namespace'] in ('kube-system', 'kube-public', 'kube-node-lease') or m.get('annotations', {}).get('vmm.carrtech.dev/load-balancer') == 'disabled':
-            raise ValueError('Automatic management is disabled for this Service')
-        if not spec.get('loadBalancerClass'):
-            patch = [{'op':'test','path':'/metadata/uid','value':entry['uid']},
-                     {'op':'test','path':'/metadata/resourceVersion','value':m['resourceVersion']},
-                     {'op':'add','path':'/spec/loadBalancerClass','value':'vmm.carrtech.dev/edge'}]
-            obj = json.loads(kube(['patch', 'service', entry['name'], '-n', entry['namespace'], '--type=json', '-p', json.dumps(patch), '-o', 'json']))
-        claimed.append({'uid': entry['uid'], 'cleanup_pending': 'service.kubernetes.io/load-balancer-cleanup' in obj['metadata'].get('finalizers', [])})
-    return {'claimed': claimed}
 
 def edge_status():
     for entry in r['statuses']:

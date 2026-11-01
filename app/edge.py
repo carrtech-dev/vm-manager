@@ -11,7 +11,7 @@ import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, model_validator
 
-from . import devops, edge_runtime, features, kubernetes, storage
+from . import devops, edge_runtime, features, kubernetes, storage, kube_admission
 from .hypervisor import HypervisorError
 from .kube_workloads import CLASS, DNS, SYSTEM_NAMESPACES
 
@@ -223,11 +223,16 @@ class Manager:
         return kubernetes.manage(self.manager, self.store, identity, CONTROLLER,
                                  kubernetes.Operation(action='edge-inventory'))
 
-    @staticmethod
-    def automatic_service(service):
-        return (service.get('type') == 'LoadBalancer' and not service.get('lb_class')
-                and service.get('namespace') not in SYSTEM_NAMESPACES
-                and service.get('automatic_lb', True) and not service.get('deleting'))
+    def bootstrap_record(self, record, user, enabled=None):
+        if enabled is None:
+            enabled = record['id'] not in self.read()[0].get('excluded_clusters', [])
+        masters = [n for n in record['nodes'] if n.get('role', 'master') == 'master']
+        if not enabled: masters = masters[:1]
+        for index, node in enumerate(masters):
+            result = self.manager.rpc(node['host_id'], node['id'] + '/manage', user,
+                kubernetes.Operation(action='edge-bootstrap', resource='service', admission_publish=index == len(masters) - 1, admission_enabled=enabled).model_dump())
+            if not result.get('ready') or result.get('version') != kube_admission.VERSION:
+                raise HypervisorError('Cluster load-balancer admission is not ready')
 
     def reconcile(self, force=False):
         settings, status = self.read()
@@ -250,12 +255,16 @@ class Manager:
                         inventories[identity] = {'services': [], 'addresses': []}
                         continue
                     inventory = self.inventory(identity)
+                    if identity in settings['clusters'] and inventory.get('admission_version') != kube_admission.VERSION:
+                        self.bootstrap_record(record, CONTROLLER)
+                    elif identity in settings.get('withdrawals', []) and inventory.get('admission_version'):
+                        self.bootstrap_record(record, CONTROLLER, enabled=False)
                     inventory['addresses'] = [n['address'] for n in record['nodes'] if n.get('address')]
                     inventories[identity] = inventory
                 except Exception:
                     errors.append('Cluster ' + identity[:8] + ' is unavailable; its last routes are retained')
             demand = any(s.get('type') == 'LoadBalancer' and not s.get('deleting')
-                         and (s.get('lb_class') == CLASS or self.automatic_service(s))
+                         and s.get('lb_class') == CLASS
                          for identity in settings['clusters'] for s in inventories.get(identity, {}).get('services', []))
             if not settings['enabled'] and demand:
                 settings['enabled'] = True
@@ -263,7 +272,7 @@ class Manager:
                 self.store.audit(CONTROLLER['username'], 'devops.edge.automatic-launch', 'load-balancer')
             self.save(settings, status)
             if not settings['enabled']:
-                status.update(state='standby', message='Automatic integration is enabled; the load balancer starts when an application Service needs it')
+                status.update(state='degraded' if errors else 'standby', message='; '.join(errors) if errors else 'Automatic integration is enabled; the load balancer starts when an application Service needs it')
                 self.save(settings, status)
                 return
             if not settings.get('initialized'):
@@ -351,24 +360,6 @@ class Manager:
                 if not runtime['running'] or (listeners and not runtime['components']['tcp']):
                     raise HypervisorError('Load balancer containers did not become ready')
                 self.applied_hash = digest
-            # A classless application Service is adopted with UID and version
-            # preconditions. K3s cleans up its former listener after the class
-            # changes; status writes wait for that controller's finalizer.
-            for identity in settings['clusters']:
-                for service in inventories.get(identity, {}).get('services', []):
-                    if not self.automatic_service(service):
-                        continue
-                    try:
-                        result = kubernetes.manage(self.manager, self.store, identity, CONTROLLER,
-                            kubernetes.Operation(action='edge-claim', resource='service', statuses=[{k: service[k] for k in ('name', 'namespace', 'uid')}]))
-                        claimed = next(c for c in result['claimed'] if c['uid'] == service['uid'])
-                        service.update(lb_class=CLASS, cleanup_pending=claimed['cleanup_pending'])
-                        services.append({'cluster_id':identity, 'name':service['name'], 'namespace':service['namespace'],
-                            'uid':service['uid'], 'ports':[p['port'] for p in service['ports']], 'state':'pending', 'address':'',
-                            'message':'Automatic setup is in progress; waiting for controller handover and listener provisioning'})
-                        self.store.audit(CONTROLLER['username'], 'devops.service.automatic-load-balancer', identity, service['namespace'] + '/' + service['name'])
-                    except Exception:
-                        errors.append('Could not claim Service ' + service['namespace'] + '/' + service['name'] + '; retrying automatically')
             status['runtime'] = runtime if 'runtime' in locals() else health
             # Publish Kubernetes status only after the data plane accepted the configuration.
             for identity, entries in allocations.items():

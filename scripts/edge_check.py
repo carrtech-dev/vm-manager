@@ -87,7 +87,7 @@ def main():
                    '--labels=app.kubernetes.io/managed-by=vm-manager','-o','json']
         exposed = json.loads(subprocess.check_output(command,text=True))
         created.append('service')
-        assert not exposed['spec'].get('loadBalancerClass')
+        assert exposed['spec'].get('loadBalancerClass') == 'vmm.carrtech.dev/edge', 'Admission must supply the class at creation'
         def assigned():
             resource = next((r for r in resources()['services'] if r['name'] == name), None)
             current = api('/devops/load-balancer')

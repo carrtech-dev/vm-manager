@@ -1,7 +1,7 @@
 """Narrow Kubernetes operations, routed through an owned K3s master."""
 from typing import Literal
 
-from . import kube_workloads
+from . import kube_workloads, kube_admission
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, model_validator
@@ -10,7 +10,7 @@ NAME = r'^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$'
 
 
 class Operation(BaseModel):
-    action: Literal['inventory', 'describe', 'delete', 'restart', 'exec-check', 'create', 'update', 'remove', 'edge-inventory', 'edge-status', 'edge-claim'] = 'inventory'
+    action: Literal['inventory', 'describe', 'delete', 'restart', 'exec-check', 'create', 'update', 'remove', 'edge-inventory', 'edge-status', 'edge-bootstrap'] = 'inventory'
     resource: Literal['node', 'pod', 'deployment', 'service', 'ingress'] = 'pod'
     namespace: str = Field(default='default', min_length=1, max_length=63, pattern=r'^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$')
     name: str = Field(default='', max_length=253, pattern=r'^$|' + NAME)
@@ -19,6 +19,8 @@ class Operation(BaseModel):
     shell: Literal['/bin/sh', '/bin/bash'] = '/bin/sh'
     confirm_name: str = ''
     workload: kube_workloads.Workload | None = None
+    admission_publish: bool = True
+    admission_enabled: bool = True
     statuses: list[kube_workloads.ServiceStatus] = Field(default_factory=list, max_length=200)
 
     @model_validator(mode='after')
@@ -36,7 +38,7 @@ class Operation(BaseModel):
                 kube_workloads.manifest(self.resource, self.name, self.namespace, self.workload)
             if self.action == 'update' and self.resource != 'deployment':
                 raise ValueError('Only Deployment updates are supported')
-        if self.action not in ('inventory', 'edge-inventory', 'edge-status', 'edge-claim') and not self.name:
+        if self.action not in ('inventory', 'edge-inventory', 'edge-status', 'edge-bootstrap') and not self.name:
             raise ValueError('Select a resource')
         if self.action in ('delete', 'restart', 'exec-check'):
             if self.resource != 'pod' or not self.uid:
@@ -78,8 +80,8 @@ def restartable(p):
 try:
     if r['action'] == 'edge-inventory':
         result = workload_inventory()
-    elif r['action'] == 'edge-claim':
-        result = edge_claim()
+    elif r['action'] == 'edge-bootstrap':
+        result = edge_bootstrap()
     elif r['action'] == 'edge-status':
         result = edge_status()
     elif r['action'] in ('create', 'update', 'remove'):
@@ -135,4 +137,4 @@ except (ValueError, subprocess.TimeoutExpired) as exc:
     print(json.dumps({'error': str(exc)}))
 '''
 
-GUEST = GUEST.replace('try:\n    if r[', kube_workloads.GUEST + '\ntry:\n    if r[')
+GUEST = GUEST.replace('try:\n    if r[', kube_workloads.GUEST + '\n' + kube_admission.GUEST + '\ntry:\n    if r[')

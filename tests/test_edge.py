@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app import devops, edge, edge_runtime, kube_workloads, kubernetes, main
+from app import devops, edge, edge_runtime, kube_workloads, kubernetes, main, kube_admission
 from app.hypervisor import HypervisorError
 from app.security import Store, hash_password
 
@@ -29,17 +29,11 @@ def env(tmp_path, monkeypatch):
         for role in ('administrator', 'operator', 'viewer'):
             db.execute('INSERT INTO users(username,password,role,created) VALUES(?,?,?,0)', (role, hash_password('password-test'), role))
     calls, requests, jobs = [], [], []
-    inventory = {'services':[service()], 'deployments':[], 'ingresses':[], 'namespaces':['default']}
+    inventory = {'services':[service()], 'deployments':[], 'ingresses':[], 'namespaces':['default'], 'admission_version':kube_admission.VERSION}
     def rpc(host, path, user, body=None):
         requests.append((host, path, body))
         if body['action'] == 'edge-inventory': return json.loads(json.dumps(inventory))
-        if body['action'] == 'edge-claim':
-            claimed = []
-            for entry in body['statuses']:
-                target = next(s for s in inventory['services'] if s['uid'] == entry['uid'])
-                target['lb_class'] = kube_workloads.CLASS
-                claimed.append({'uid':entry['uid'], 'cleanup_pending':target.get('cleanup_pending',False)})
-            return {'claimed':claimed}
+        if body['action'] == 'edge-bootstrap': return {'ready':True,'version':kube_admission.VERSION}
         return {}
     def submit(user, action, resource, fn, resources):
         jobs.append(fn)
@@ -233,12 +227,12 @@ def test_direct_vm_manager_routes_use_a_fixed_verified_https_origin(env):
 
 
 def test_service_starts_load_balancer_and_connects_cluster_without_setup_calls(env):
-    env.inventory['services'] = [service() | {'lb_class':''}]
+    env.inventory['services'] = [service()]
     env.manager.tick()
     settings, status = env.manager.read()
     assert settings['enabled'] and settings['clusters'] == [IDENTITY]
     assert any(c[0] == 'edge_apply' for c in env.calls)
-    assert any(r[2]['action'] == 'edge-claim' for r in env.requests)
+    assert not any(r[2]['action'] in ('edge-bootstrap','edge-claim') for r in env.requests)
     assert env.jobs == []  # No Launch or Connect API/task was required.
     env.manager.reconcile()
     assert env.manager.catalog()['status']['services'][0]['address'] == '192.168.8.235'
@@ -272,7 +266,7 @@ def test_new_ready_clusters_are_discovered_and_pause_survives_restart(env):
     another = edge.Manager(env.store, env.manager.manager, env.manager.submit)
     another.reconcile()
     assert another.read()[0]['clusters'] == []
-    env.inventory['services'] = [service() | {'lb_class':''}]
+    env.inventory['services'] = [service()]
     another.reconcile()
     assert not another.read()[0]['enabled']
     env.manager.bind(ADMIN, IDENTITY, True); env.jobs[-1]()
@@ -289,8 +283,8 @@ def test_system_foreign_and_opted_out_services_are_not_claimed_or_autostarted(en
     assert not any(r[2]['action'] == 'edge-claim' for r in env.requests)
 
 
-def test_claiming_waits_for_a_working_runtime_and_status_waits_for_provider_cleanup(env, monkeypatch):
-    env.inventory['services'] = [service() | {'lb_class':'','cleanup_pending':True}]
+def test_status_waits_for_a_working_runtime_and_previous_provider_cleanup(env, monkeypatch):
+    env.inventory['services'] = [service() | {'cleanup_pending':True}]
     original = edge.storage.broker
     monkeypatch.setattr(edge.storage,'broker',lambda action,**kw: original(action,**kw) if action=='edge_info' else (_ for _ in ()).throw(HypervisorError('Port occupied')))
     with pytest.raises(HypervisorError): env.manager.reconcile()
@@ -315,3 +309,20 @@ def test_new_service_cannot_steal_an_existing_listener(env):
     assert results['new']['state'] == 'pending'
     configured = [c[1]['body'] for c in env.calls if c[0] == 'edge_apply'][-1]['listeners']
     assert len(configured) == 1 and configured[0]['id'].endswith('-old')
+
+
+def test_missing_admission_is_installed_automatically_even_before_runtime_launch(env):
+    env.inventory['services'] = []
+    env.inventory['admission_version'] = ''
+    env.manager.reconcile()
+    calls = [r for r in env.requests if r[2]['action'] == 'edge-bootstrap']
+    assert len(calls) == 1 and calls[0][2]['admission_publish']
+    assert not env.manager.read()[0]['enabled'] and env.calls == []
+
+
+def test_admission_is_prepared_on_every_master_before_publication(env):
+    record = devops.row(env.store,'devops_clusters',IDENTITY)
+    record['nodes'] = [{'id':'b'*32,'host_id':'','role':'master'}, {'id':'c'*32,'host_id':'d'*32,'role':'master'}, {'id':'e'*32,'host_id':'','role':'worker'}]
+    env.manager.bootstrap_record(record,ADMIN)
+    assert [r[0] for r in env.requests] == ['', 'd'*32]
+    assert [r[2]['admission_publish'] for r in env.requests] == [False,True]

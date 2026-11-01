@@ -1021,14 +1021,25 @@ spec:
       protocol: TCP
 ```
 
-No `loadBalancerClass`, Launch or Connect step is required. After the shared
-edge accepts its configuration, the controller assigns
-`vmm.carrtech.dev/edge` to classless application Services using UID and resource
-version preconditions. Kubernetes permits an unset class to be assigned; an
-explicit class belonging to another provider is retained. K3s releases any
-previous ServiceLB listener; the edge waits for its cleanup finalizer before
-publishing a new address. Classless Services in `kube-system`, `kube-public` and
-`kube-node-lease` remain with K3s, preserving platform ingress and DNS.
+No `loadBalancerClass`, Launch or Connect step is required. VM Manager installs a
+cluster-local admission service automatically on the control-plane VMs before a
+new cluster is marked Ready, and upgrades existing Ready clusters automatically.
+A narrowly scoped admission webhook supplies `vmm.carrtech.dev/edge` while new
+application LoadBalancer Services are created. Explicit classes belonging to
+other providers, opt-outs, ClusterIP/NodePort Services and platform namespaces
+`kube-system`, `kube-public` and `kube-node-lease` are excluded. Existing classless
+Services retain their previous provider because Kubernetes forbids changing an
+existing LoadBalancer Service's class. Recreate one when intentionally moving it
+to the shared edge; existing resources are never deleted automatically.
+
+The admission service uses a dedicated unprivileged guest account, an internal
+TLS certificate stored in a private Kubernetes Secret and guest files, and a
+Service/EndpointSlice targeting the control-plane VMs on TCP **19443**. Keep this
+port reachable between control-plane nodes on the cluster's trusted network.
+No new image pull or external credentials are needed. Admission is restricted to
+new classless application LoadBalancer Services, so ordinary service creation
+continues if admission is unavailable; affected LoadBalancer creation fails
+explicitly instead of silently using the wrong provider.
 
 The controller discovers Services through their owning masters, configures HAProxy
 listeners to node IPs/NodePorts, and publishes the edge host's IPv4 address in

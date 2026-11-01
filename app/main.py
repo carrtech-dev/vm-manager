@@ -224,7 +224,8 @@ def task(user, action, resource, fn, resources=None):
 patch_manager = patching.Manager(store, lambda *args, **kwargs: task(*args, **kwargs))
 devops_agent = devops.Agent(store, incus, lambda *args, **kwargs: task(*args, **kwargs),
                             remove=lambda vm_name, actor: remove_devops_vm(vm_name, actor))
-devops_manager = devops.Manager(store, devops_agent, cluster, lambda *args, **kwargs: task(*args, **kwargs))
+devops_manager = devops.Manager(store, devops_agent, cluster, lambda *args, **kwargs: task(*args, **kwargs),
+                                prepare_ready=lambda record, user: edge_manager.bootstrap_record(record, user))
 edge_manager = edge.Manager(store, devops_manager, lambda *args, **kwargs: task(*args, **kwargs))
 
 

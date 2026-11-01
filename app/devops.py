@@ -430,8 +430,9 @@ class Agent:
 
 
 class Manager:
-    def __init__(self, store, agent, cluster, submit):
+    def __init__(self, store, agent, cluster, submit, prepare_ready=None):
         self.store, self.agent, self.cluster, self.submit = store, agent, cluster, submit
+        self.prepare_ready = prepare_ready
         self.lock = threading.RLock()
 
     def rpc(self, host_id, path, user, body=None):
@@ -535,6 +536,8 @@ class Manager:
                     self.update(identity, 'deploying', f'{len(expected & ready)}/{len(expected)} Kubernetes nodes Ready', nodes)
                     return expected <= ready
                 wait_for(healthy, 'Not every requested Kubernetes node became Ready; check cross-host routing and node services', interval=10)
+                if self.prepare_ready:
+                    self.prepare_ready(row(self.store, 'devops_clusters', identity), user)
                 self.update(identity, 'ready', 'All requested Kubernetes nodes are Ready', nodes)
                 return 'K3s cluster ready'
             except Exception as exc:
