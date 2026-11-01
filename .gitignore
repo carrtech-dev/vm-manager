@@ -12,3 +12,6 @@ test-results/
 design/claude-result.json
 .playwright*/
 output/playwright/
+
+# Distribution artifacts (public packages are published to R2, not Git)
+dist/

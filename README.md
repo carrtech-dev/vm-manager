@@ -1100,3 +1100,8 @@ verifies native TCP traffic and trusted HTTPS/SNI through the Ingress, and remov
 its resources/account. It retains the automatically connected cluster and
 running edge,
 without changing any integration opt-outs. `--port` selects a free TCP listener (default 18088).
+
+## Linux distribution packages
+
+Reusable DEB/RPM build, signed APT/DNF repository and R2 publishing tooling is
+documented in [docs/distribution.md](docs/distribution.md).

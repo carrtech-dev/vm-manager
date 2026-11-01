@@ -2888,9 +2888,12 @@ ASSET_VERSION = hashlib.sha256(b"".join(
 # in browser/CDN caches after a deployment.
 app.mount("/assets/" + ASSET_VERSION, StaticFiles(directory=STATIC), name="assets")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
-if Path("/usr/share/spice-html5").exists():
+spice_directory = Path(__file__).parent / "static" / "vendor" / "spice"
+if not spice_directory.exists():
+    spice_directory = Path("/usr/share/spice-html5")
+if spice_directory.exists():
     app.mount(
-        "/vendor/spice", StaticFiles(directory="/usr/share/spice-html5"), name="spice"
+        "/vendor/spice", StaticFiles(directory=spice_directory), name="spice"
     )
 
 

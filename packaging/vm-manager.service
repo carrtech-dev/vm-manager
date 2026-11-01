@@ -1,0 +1,28 @@
+[Unit]
+Description=CarrTech VM Manager
+After=network-online.target incus.service libvirtd.service vm-manager-storage.service
+Wants=network-online.target vm-manager-storage.service
+
+[Service]
+User=vm-manager
+Group=vm-manager
+WorkingDirectory=/usr/lib/vm-manager
+Environment=VM_MANAGER_DATA=/var/lib/vm-manager
+Environment=TMPDIR=/var/lib/vm-manager/tmp
+EnvironmentFile=/etc/vm-manager/vm-manager.conf
+ExecStart=/var/lib/vm-manager-runtime/venv/bin/python /usr/libexec/vm-manager-serve.py
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vm-manager /var/lib/vm-manager-storage/mounts
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

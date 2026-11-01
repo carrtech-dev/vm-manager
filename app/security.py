@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import os
 import secrets
 import sqlite3
 import time
@@ -136,7 +137,11 @@ class Store:
                 ("admin", hash_password(password), "administrator", time.time()),
             )
             path = directory / "initial-admin.txt"
-            path.write_text(
-                f"Username: admin\nPassword: {password}\nChange this password in Account after signing in.\n"
-            )
-            path.chmod(0o600)
+            # Create privately from the first byte; refuse symlinks/stale files.
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w") as stream:
+                stream.write(
+                    f"Username: admin\nPassword: {password}\nChange this password in Account after signing in.\n"
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
