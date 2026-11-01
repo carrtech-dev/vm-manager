@@ -1,0 +1,4 @@
+[VMManager]
+title=VM Manager
+description=VM Manager secure web interface
+ports=8443/tcp

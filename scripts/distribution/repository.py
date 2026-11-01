@@ -10,6 +10,7 @@ import gzip
 import hashlib
 import html
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -95,20 +96,26 @@ def main():
             entries.append(hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + str(path.relative_to(repo)))
     sums.write_text('\n'.join(entries) + '\n')
     sign(args.signing_key, sums, sums.with_name('SHA256SUMS.asc'))
-    package_paths = sorted(p for p in repo.rglob('*') if p.suffix in ('.deb', '.rpm'))
+    def version(path):
+        match = re.search(r'(\d+)\.(\d+)\.(\d+)', path.name)
+        return tuple(map(int, match.groups())) if match else (0, 0, 0)
+    package_paths = sorted((p for p in repo.rglob('*') if p.suffix in ('.deb', '.rpm')), key=version, reverse=True)
+    latest = '.'.join(map(str, version(package_paths[0])))
     links = ''.join('<li><a href="' + html.escape(p.relative_to(repo).as_posix(), quote=True)
                     + '">' + html.escape(p.name) + '</a></li>' for p in package_paths)
     (repo / 'index.html').write_text('<!doctype html><html lang="en"><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<title>VM Manager downloads</title><style>body{font:17px system-ui;max-width:850px;'
         'margin:60px auto;padding:0 24px;line-height:1.6}code{background:#eee;padding:3px}</style>'
-        '<h1>VM Manager downloads</h1><p>Debian 13 amd64 and Rocky/AlmaLinux 10 x86_64.</p>'
+        '<h1>VM Manager downloads</h1><p>Latest release: <strong>' + latest + '</strong>.</p><p>Debian 13 amd64 and Rocky/AlmaLinux 10 x86_64.</p>'
         '<ul>' + links + '</ul><p><a href="vm-manager.asc">Signing public key</a> · '
         '<a href="SHA256SUMS">SHA-256 checksums</a> · <a href="SHA256SUMS.asc">Checksum signature</a></p>'
         '<p>Signing fingerprint: <code>' + html.escape(args.signing_key) + '</code></p>'
         '<p>Verify this fingerprint independently in the GitHub installation guide before trusting it.</p>'
         '<p><a href="https://github.com/carrtech-dev/vm-manager/blob/main/docs/distribution.md">'
         'Installation, credentials and update instructions</a></p>'
+        '<p>The installer prints browser URLs and opens HTTPS in active firewalld/UFW. '
+        'Show access details with <code>sudo vm-manager status</code>.</p>'
         '<p>After installation, use <code>apt update &amp;&amp; apt upgrade</code> or '
         '<code>dnf update</code>. Read initial credentials with '
         '<code>sudo cat /var/lib/vm-manager/initial-admin.txt</code>.</p></html>')

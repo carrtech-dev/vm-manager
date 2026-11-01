@@ -3,6 +3,7 @@
 import asyncio
 import errno
 import hashlib
+import httpx
 import ipaddress
 import json
 import logging
@@ -1757,6 +1758,24 @@ def monitor_vm(vm):
     history.write(vm['id'], samples)
 
 
+monitor_backend_errors = {}
+
+
+def monitor_backend_failed(label, error):
+    if not isinstance(error, (HypervisorError, httpx.TransportError, OSError)):
+        logging.exception('%s monitoring failed', label)
+        return
+    state = (type(error).__name__, str(error))
+    if monitor_backend_errors.get(label) != state:
+        logging.warning('%s unavailable: %s. Configure and start this hypervisor to monitor its resources.', label, error)
+        monitor_backend_errors[label] = state
+
+
+def monitor_backend_recovered(label):
+    if monitor_backend_errors.pop(label, None) is not None:
+        logging.info('%s monitoring connection restored', label)
+
+
 def monitor_tick():
     from concurrent.futures import ThreadPoolExecutor
     memory = psutil.virtual_memory()
@@ -1776,17 +1795,19 @@ def monitor_tick():
         samples.append(dict(metric='disk', label='Disk space', value=None, source='Storage pools unavailable'))
     history.write('host', samples)
     vms = []
-    for driver in (monitor_incus, monitor_libvirt):
+    for label, driver in (('Incus inventory', monitor_incus), ('libvirt inventory', monitor_libvirt)):
         try:
             vms.extend(driver.vms())
-        except Exception:
-            logging.exception('Monitoring inventory unavailable')
+            monitor_backend_recovered(label)
+        except Exception as error:
+            monitor_backend_failed(label, error)
     try:
         media = {(iso.get('pool'), iso['name']) for iso in monitor_incus.isos()}
         for vm in vms:
             vm['iso_sources'] = media
-    except Exception:
-        logging.exception('Monitoring installation media inventory unavailable')
+        monitor_backend_recovered('Incus installation media')
+    except Exception as error:
+        monitor_backend_failed('Incus installation media', error)
     with ThreadPoolExecutor(max_workers=8, thread_name_prefix='monitoring') as workers:
         list(workers.map(monitor_vm, vms))
 

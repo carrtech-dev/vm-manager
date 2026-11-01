@@ -21,8 +21,14 @@ RUNTIME = Path('/var/lib/vm-manager-runtime')
 CONFIG = Path('/etc/vm-manager')
 
 
-def run(*args):
-    subprocess.run(args, check=True)
+def run(*args, **kwargs):
+    subprocess.run(args, check=True, **kwargs)
+
+
+def access():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import vm_manager_access
+    return vm_manager_access
 
 
 def systemd():
@@ -64,6 +70,8 @@ def configure():
     if os.geteuid() != 0:
         raise SystemExit('Run as root')
     os.umask(0o077)
+    network = access()
+    values = network.settings()
     if Path('/opt/carrtech/vm-manager/current').exists():
         raise SystemExit('Refusing to replace a source installation')
     try:
@@ -119,7 +127,8 @@ def configure():
     if not (tls / 'server.key').exists() and not (tls / 'server.crt').exists():
         run('openssl', 'req', '-x509', '-newkey', 'rsa:3072', '-nodes', '-days', '825',
             '-keyout', str(tls / 'server.key'), '-out', str(tls / 'server.crt'),
-            '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1')
+            '-subj', '/CN=localhost', '-addext', 'subjectAltName=' + network.certificate_names(),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if not (tls / 'server.key').exists() or not (tls / 'server.crt').exists():
         raise SystemExit('Incomplete TLS key/certificate pair; repair /etc/vm-manager/tls')
     for path in tls.iterdir():
@@ -131,6 +140,7 @@ def configure():
     if systemd():
         run('systemctl', 'daemon-reload')
         run('systemctl', 'enable', 'vm-manager-storage.service', 'vm-manager.service')
+        print(network.configure_firewall(values))
         run('systemctl', 'restart', 'vm-manager-storage.service', 'vm-manager.service')
         context = ssl._create_unverified_context()  # Local generated certificate only.
         for attempt in range(30):
@@ -153,7 +163,7 @@ def configure():
             time.sleep(1)
         else:
             raise SystemExit('VM Manager health check failed. Inspect journalctl -u vm-manager; backups and previous venv retained.')
-    print('VM Manager configured. Initial credentials: sudo cat /var/lib/vm-manager/initial-admin.txt')
+    network.show_status(values, verify=systemd())
 
 
 if __name__ == '__main__':
@@ -161,5 +171,10 @@ if __name__ == '__main__':
         pre_upgrade()
     elif sys.argv[1:] == ['configure']:
         configure()
+    elif sys.argv[1:] == ['remove']:
+        access().remove_firewall()
+    elif sys.argv[1:] in ([], ['status']):
+        network = access()
+        raise SystemExit(0 if network.show_status(network.settings()) else 1)
     else:
-        raise SystemExit('Usage: maintain.py {pre-upgrade|configure}')
+        raise SystemExit('Usage: vm-manager status (package lifecycle: pre-upgrade|configure|remove)')

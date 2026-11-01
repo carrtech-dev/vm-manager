@@ -2,8 +2,9 @@
 
 The initial supported targets are **Debian 13 amd64** (DEB, Python 3.13) and
 **Rocky/AlmaLinux 10 x86_64** (RPM, Python 3.12). Other distributions/architectures
-are not yet validated. Incus and libvirt must already be installed/configured on
-the host; the package never initializes a hypervisor or changes physical networks.
+are not yet validated. The web interface works immediately after installation.
+Install/configure Incus and/or libvirt when you want to manage VMs on this host;
+the package never initializes a hypervisor or changes physical networks.
 RPM hosts need EPEL's `rclone` for external S3 storage, and an appropriate Incus
 repository if Incus is not already installed. Enable the host's normal OS repos.
 
@@ -48,11 +49,37 @@ sudo apt install vm-manager
 Remove that manually created `.list` after installation because the package owns
 `vm-manager.sources` with the same repository.
 
-Open `https://HOST:8443`. The generated certificate is self-signed for localhost;
-replace `/etc/vm-manager/tls/server.{key,crt}` with a trusted host certificate
-(and root:vm-manager 0640 permissions) for normal remote use. Set the bind address
-in `/etc/vm-manager/vm-manager.conf`, then restart `vm-manager`. The package does
-not open a firewall port; permit TCP 8443 on the intended management network.
+After installation, open one of the **browser URLs printed by the installer**,
+for example `https://192.168.8.10:8443`. Show the current URLs and local health with:
+
+```sh
+sudo vm-manager status
+```
+
+The service starts automatically and listens on the host's network interfaces.
+The installer permits HTTPS port 8443 in an active firewalld or UFW firewall,
+including persistent rules, without enabling/resetting either firewall or reloading
+firewalld. Existing firewalld rich rules for port 8443 are preserved. Only rules
+added by this package are removed on uninstall; existing administrator rules remain.
+On a host connected to your LAN, no separate firewall command is required.
+
+The generated certificate includes the host name and current interface addresses.
+It is self-signed, so trust it in your browser or replace
+`/etc/vm-manager/tls/server.{key,crt}` with a trusted host certificate (root:vm-manager
+0640). Existing certificates are preserved on upgrade.
+
+Local settings in `/etc/vm-manager/vm-manager.conf` are preserved. Set
+`VM_MANAGER_MANAGE_FIREWALL=no` to manage firewall policy yourself; reconfigure
+the package to remove only its previously added rules. Optionally select specific
+firewalld zones with `VM_MANAGER_FIREWALL_ZONES="public internal"`. By default,
+active zones are used except intentionally blocked `drop`/`block` zones.
+
+For VMs behind NAT or a cloud security group, the upstream VM/router/cloud platform
+also needs to make the port reachable. A guest package cannot change that upstream
+network. Use the platform's published LAN address, or attach the VM to a LAN/routed
+network. For example, publish a LAN host port 9443 to guest port 8443. Set
+`VM_MANAGER_PUBLIC_URL=https://LAN_HOST:9443` in the guest configuration to print
+that published address first in the installer and status output.
 
 Retrieve the random initial administrator credentials locally as root:
 
@@ -188,3 +215,6 @@ disposable supported host. Its `prepare` phase verifies HTTPS login and changes
 the temporary admin password, `verify-upgrade` verifies preservation after an
 APT/DNF upgrade, and `verify-removed` verifies uninstall retention. It deliberately
 requires `/root/vmm-distribution-disposable` and must never run on production data.
+
+Version 1.0.2 adds automatic host firewall access, install-time browser URLs,
+`vm-manager status`, and concise monitoring notices when a hypervisor is unavailable.

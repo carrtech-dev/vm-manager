@@ -87,3 +87,32 @@ def test_libvirt_maps_host_targets_without_assuming_guest_disk_order():
     assert vm_disks(vm, driver)[0]['value'] == 20
     fs['disk'].append({'dev':'/dev/sdc'})
     assert vm_disks(vm, driver)[0]['value'] is None
+
+
+def test_missing_hypervisors_log_once_keep_host_history_and_report_recovery(monkeypatch, caplog):
+    import app.main as main
+    import httpx
+    def absent():
+        raise httpx.ConnectError('[Errno 2] No such file or directory')
+    monkeypatch.setattr(main, 'monitor_backend_errors', {})
+    monkeypatch.setattr(main.monitor_incus, 'vms', absent)
+    monkeypatch.setattr(main.monitor_incus, 'isos', absent)
+    monkeypatch.setattr(main.monitor_incus, 'pools', absent)
+    monkeypatch.setattr(main.monitor_libvirt, 'vms', lambda: [])
+    written = []
+    monkeypatch.setattr(main.history, 'write', lambda resource, samples: written.append((resource, samples)))
+    with caplog.at_level('INFO'):
+        main.monitor_tick()
+        main.monitor_tick()
+        warnings = [r for r in caplog.records if r.levelname == 'WARNING']
+        assert len(warnings) == 2
+        assert all(r.exc_info is None for r in warnings)
+        assert len(written) == 2 and all(resource == 'host' for resource, _ in written)
+        assert all(any(s['metric'] == 'cpu' for s in samples) for _, samples in written)
+        monkeypatch.setattr(main.monitor_incus, 'vms', lambda: [])
+        monkeypatch.setattr(main.monitor_incus, 'isos', lambda: [])
+        main.monitor_tick()
+        assert sum('connection restored' in r.message for r in caplog.records) == 2
+        monkeypatch.setattr(main.monitor_incus, 'vms', absent)
+        main.monitor_tick()
+        assert len([r for r in caplog.records if r.levelname == 'WARNING']) == 3
