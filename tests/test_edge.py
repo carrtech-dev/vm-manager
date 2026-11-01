@@ -199,3 +199,12 @@ def test_proxy_config_is_bounded_uses_single_host_routing_and_tls_challenges():
     config.listeners[0].port = 8443
     with pytest.raises(HypervisorError, match='reserved'): edge_runtime.haproxyfile(config)
     with pytest.raises(ValidationError): edge_runtime.Configuration.model_validate({'address':'192.0.2.10','routes':[], 'command':'rm -rf /'})
+
+
+def test_kubernetes_default_ip_mode_does_not_cause_repeated_status_writes(env):
+    launch(env)
+    env.manager.bind(ADMIN, IDENTITY, True); env.jobs[-1]()
+    env.inventory['services'][0]['external'] = [{'ip':'192.168.8.235','ipMode':'VIP'}]
+    env.requests.clear()
+    env.manager.reconcile()
+    assert not [r for r in env.requests if r[2]['action'] == 'edge-status']

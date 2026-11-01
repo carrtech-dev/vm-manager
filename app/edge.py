@@ -312,7 +312,7 @@ class Manager:
             # Publish Kubernetes status only after the data plane accepted the configuration.
             for identity, entries in allocations.items():
                 if identity not in inventories: continue
-                previous = {s['uid']: s.get('external', []) for s in inventories[identity]['services']}
+                previous = {s['uid']: [{k: v for k, v in a.items() if k in ('ip', 'hostname')} for a in s.get('external', [])] for s in inventories[identity]['services']}
                 changes = [s for s in entries if previous.get(s['uid']) != ([{'ip': s['address']}] if s['address'] else [])]
                 if changes:
                     try:

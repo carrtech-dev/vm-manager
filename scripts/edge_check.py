@@ -84,7 +84,7 @@ def main():
         manage('create', 'service', workload={'selector':name,'service_type':'LoadBalancer','port':args.port,'target_port':80})
         created.append('service')
         address = edge['settings']['address']
-        wait(lambda: next((r for r in resources()['services'] if r['name'] == name and {'ip':address} in r['external']), None), 'Native Service address was not assigned')
+        wait(lambda: next((r for r in resources()['services'] if r['name'] == name and any(entry.get('ip') == address for entry in r['external'])), None), 'Native Service address was not assigned')
         # Use an ordinary HTTP request through HAProxy's TCP listener.
         with httpx.Client(trust_env=False, timeout=10) as probe:
             response = probe.get('http://' + address + ':' + str(args.port))
