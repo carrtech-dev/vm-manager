@@ -29,6 +29,7 @@ import { monitoringPanel, refreshMonitoring } from "./monitoring.js";
 import { hostPicker, renderCluster, clusterAction, switchHost, renderClusterTree, toggleClusterHost } from "./cluster-ui.js";
 import { renderOperations, operationAction, selectOperation, clearOperationSelection } from "./operations.js";
 import { renderDevops, devopsAction } from "./devops.js";
+import { mountClusterScreen } from "./kubernetes.js";
 const pageNames = {
   cluster: "Cluster",
   overview: "Overview",
@@ -73,6 +74,12 @@ const seenTasks = new Map();
 let vmMetrics = null, metricsBusy = false;
 let vmSnapshots = null, snapshotsLoading = null;
 let renderedVMStatus = null;
+let disposeClusterScreen = () => {}, renderedClusterId = "";
+function stopClusterScreen() {
+  disposeClusterScreen();
+  disposeClusterScreen = () => {};
+  renderedClusterId = "";
+}
 const badge = (text, style = text) =>
   `<span class="badge ${esc(style)}"><span aria-hidden="true">●</span>${esc(text)}</span>`;
 const btn = (
@@ -288,6 +295,9 @@ function organizeResource(kind, resource) {
 }
 function navigate(repaint = true) {
   const parts = location.hash.slice(1).split("/");
+  const clusterId = parts[0] === "devops" ? parts[1] || "" : "";
+  if (clusterId !== state.devopsCluster || parts[0] !== "devops") stopClusterScreen();
+  state.devopsCluster = clusterId;
   state.page = parts[0] || "overview";
   if (state.page === "vm") {
     state.vm = decodeURIComponent(parts[1] || "");
@@ -299,6 +309,7 @@ function navigate(repaint = true) {
   }
 }
 function renderLogin(message = "") {
+  stopClusterScreen();
   $("#app").innerHTML =
     `<main class="login-screen"><form class="login-card" id="login-form"><div class="login-brand">▣ CARRTECH</div><span class="product">VM MANAGER</span><h1>Sign in to your infrastructure</h1><p class="host-address">VM Manager · Host administration</p>${field("Username", "username", "", { placeholder: "Your username" })}${field("Password", "password", "", { type: "password", placeholder: "Your password" })}<div class="form-error" role="alert" ${message ? "" : "hidden"}>${esc(message)}</div><button class="button primary" type="submit">Sign in</button><p class="login-foot">Local accounts · Session protected</p></form></main>`;
   $("input[name=username]").autocomplete = "username";
@@ -337,8 +348,13 @@ function render() {
       '<div class="initial-loading">Loading host resources…</div>';
     return;
   }
+  const managedCluster = state.page === "devops" && state.devops?.clusters?.find(c => c.id === state.devopsCluster);
+  // Preserve filters, pending confirmations and live terminals across app polling.
+  if (renderedClusterId && renderedClusterId === managedCluster?.id && managedCluster.status === "ready" &&
+      state.inventory.features?.devops?.enabled !== false && state.user.features?.devops?.enabled !== false) return;
+  stopClusterScreen();
   const treeScroll = $("#resource-tree")?.scrollTop || 0;
-  const viewKey = [state.page, state.vm, state.tab].join("/");
+  const viewKey = [state.page, state.vm, state.tab, state.devopsCluster].join("/");
   const contentScroll =
     renderedPath === viewKey ? $("#main-content")?.scrollTop || 0 : 0;
   renderedPath = viewKey;
@@ -357,6 +373,11 @@ function render() {
         "",
       )}</nav><div class="nav-heading">RESOURCE TREE</div><div class="resource-tree" id="resource-tree">${renderTree()}</div><div class="host-online"><strong>● HOST CONNECTED</strong><small>${copyAddresses(inv.host.address)}</small></div></aside><section class="workspace"><header class="topbar"><button class="icon-button mobile-menu" data-action="toggle-sidebar" aria-label="Toggle navigation">☰</button><div class="breadcrumb"><a href="#overview">Datacenter</a><span>/</span><span>${copyValue(inv.host.name)}</span><span>/</span><strong>${state.page === "vm" && vm ? copyValue(vm.name) : esc(pageNames[state.page] || "Overview")}</strong></div>${state.page === "devops" ? "" : hostPicker()}${can() && !["cluster", "users", "account", "devops"].includes(state.page) ? btn("+ Create VM", "create-vm", "", "primary") : ""}<button class="icon-button" data-action="help" aria-label="Help">?</button><button class="account-button" data-action="account" aria-label="Your account"><span class="avatar">${esc(state.user.username.slice(0, 2).toUpperCase())}</span><span class="account-name">${esc(state.user.username)}</span><span class="role-label">${esc(state.user.role)}</span></button></header><main class="content" id="main-content">${inv.warnings.length ? `<div class="error-banner"><strong>Some host information is unavailable.</strong><br>${inv.warnings.map(esc).join("<br>")}</div>` : ""}${["cluster", "users", "account", "devops"].includes(state.page) ? "" : renderOrganizationFilters()}${renderPage()}</main><section class="task-dock" aria-label="Recent tasks" id="task-dock">${renderDock()}</section></section></div>`;
   bindPage();
+  const clusterRoot = $("#kubernetes-screen");
+  if (clusterRoot && managedCluster) {
+    disposeClusterScreen = mountClusterScreen(clusterRoot, managedCluster);
+    renderedClusterId = managedCluster.id;
+  }
   refreshMonitoring();
   if ($("#resource-tree")) $("#resource-tree").scrollTop = treeScroll;
   if ($("#main-content")) $("#main-content").scrollTop = contentScroll;

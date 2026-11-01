@@ -848,12 +848,17 @@ networks. Bridge node addresses receive Incus DHCP reservations; shared-LAN
 addresses need reservations in your LAN DHCP server. Keep these addresses stable.
 
 The DevOps page shows deployment milestones, per-node results and task output.
-Once Ready, choose **Manage cluster** for live node and pod tables, all-namespace
+Once Ready, choose **Manage cluster** to open its dedicated management page
+(`/#devops/<cluster-id>`) with live node and pod tables, all-namespace
 or individual-namespace filtering, search and **Describe** details. The view
 refreshes every 15 seconds while the resource list is visible; refresh failures
 are explicit and retain the last successful results. Node readiness, roles,
 addresses and Kubernetes versions are shown alongside pod phase/waiting reason,
 container readiness, restarts, scheduling node, IP and controlling workload.
+The page supports direct links, reload and browser Back/Forward. Descriptions,
+confirmations and pod terminals stay within the page. Background manager polling
+preserves filters and terminal connections; leaving the page closes its terminal
+and stops its resource refreshes. **DevOps clusters** returns to the cluster list.
 
 Viewers can list and describe resources. Operators/administrators can **Delete**
 pods, **Restart** controller-managed pods and open a **Terminal** in a selected
