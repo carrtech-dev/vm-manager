@@ -46,7 +46,7 @@ export function resourceURL(host, fragment = 'overview') {
 
 export function renderClusterTree() {
   const currentHost = selectedHost();
-  const localPage = ['cluster', 'users', 'account'].includes(state.page);
+  const localPage = ['cluster', 'users', 'account', 'devops'].includes(state.page);
   const inventoryHost = localPage ? '' : currentHost;
   const fallback = state.inventory ? [{id: inventoryHost, name: state.inventory.host.name,
     host: state.inventory.host, vms: state.inventory.vms, status: 'online'}] : [];

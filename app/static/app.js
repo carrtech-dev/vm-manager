@@ -28,6 +28,7 @@ import { renderEmbeddedConsole, switchEmbeddedConsole, toggleConsoleFullscreen, 
 import { monitoringPanel, refreshMonitoring } from "./monitoring.js";
 import { hostPicker, renderCluster, clusterAction, switchHost, renderClusterTree, toggleClusterHost } from "./cluster-ui.js";
 import { renderOperations, operationAction, selectOperation, clearOperationSelection } from "./operations.js";
+import { renderDevops, devopsAction } from "./devops.js";
 const pageNames = {
   cluster: "Cluster",
   overview: "Overview",
@@ -40,6 +41,7 @@ const pageNames = {
   backups: "Backups",
   templates: "Templates",
   operations: "Operations",
+  devops: "DevOps",
   users: "Access control",
   tasks: "Task history",
   audit: "Audit trail",
@@ -57,6 +59,7 @@ const navItems = [
   ["backups", "↺", "Backups"],
   ["templates", "▧", "Templates"],
   ["operations", "⚙", "Operations"],
+  ["devops", "⬡", "DevOps"],
   ["users", "♧", "Access control"],
 ];
 let busy = false,
@@ -351,7 +354,7 @@ function render() {
       )
       .join(
         "",
-      )}</nav><div class="nav-heading">RESOURCE TREE</div><div class="resource-tree" id="resource-tree">${renderTree()}</div><div class="host-online"><strong>● HOST CONNECTED</strong><small>${copyAddresses(inv.host.address)}</small></div></aside><section class="workspace"><header class="topbar"><button class="icon-button mobile-menu" data-action="toggle-sidebar" aria-label="Toggle navigation">☰</button><div class="breadcrumb"><a href="#overview">Datacenter</a><span>/</span><span>${copyValue(inv.host.name)}</span><span>/</span><strong>${state.page === "vm" && vm ? copyValue(vm.name) : esc(pageNames[state.page] || "Overview")}</strong></div>${hostPicker()}${can() && !["cluster", "users", "account"].includes(state.page) ? btn("+ Create VM", "create-vm", "", "primary") : ""}<button class="icon-button" data-action="help" aria-label="Help">?</button><button class="account-button" data-action="account" aria-label="Your account"><span class="avatar">${esc(state.user.username.slice(0, 2).toUpperCase())}</span><span class="account-name">${esc(state.user.username)}</span><span class="role-label">${esc(state.user.role)}</span></button></header><main class="content" id="main-content">${inv.warnings.length ? `<div class="error-banner"><strong>Some host information is unavailable.</strong><br>${inv.warnings.map(esc).join("<br>")}</div>` : ""}${["cluster", "users", "account"].includes(state.page) ? "" : renderOrganizationFilters()}${renderPage()}</main><section class="task-dock" aria-label="Recent tasks" id="task-dock">${renderDock()}</section></section></div>`;
+      )}</nav><div class="nav-heading">RESOURCE TREE</div><div class="resource-tree" id="resource-tree">${renderTree()}</div><div class="host-online"><strong>● HOST CONNECTED</strong><small>${copyAddresses(inv.host.address)}</small></div></aside><section class="workspace"><header class="topbar"><button class="icon-button mobile-menu" data-action="toggle-sidebar" aria-label="Toggle navigation">☰</button><div class="breadcrumb"><a href="#overview">Datacenter</a><span>/</span><span>${copyValue(inv.host.name)}</span><span>/</span><strong>${state.page === "vm" && vm ? copyValue(vm.name) : esc(pageNames[state.page] || "Overview")}</strong></div>${state.page === "devops" ? "" : hostPicker()}${can() && !["cluster", "users", "account", "devops"].includes(state.page) ? btn("+ Create VM", "create-vm", "", "primary") : ""}<button class="icon-button" data-action="help" aria-label="Help">?</button><button class="account-button" data-action="account" aria-label="Your account"><span class="avatar">${esc(state.user.username.slice(0, 2).toUpperCase())}</span><span class="account-name">${esc(state.user.username)}</span><span class="role-label">${esc(state.user.role)}</span></button></header><main class="content" id="main-content">${inv.warnings.length ? `<div class="error-banner"><strong>Some host information is unavailable.</strong><br>${inv.warnings.map(esc).join("<br>")}</div>` : ""}${["cluster", "users", "account", "devops"].includes(state.page) ? "" : renderOrganizationFilters()}${renderPage()}</main><section class="task-dock" aria-label="Recent tasks" id="task-dock">${renderDock()}</section></section></div>`;
   bindPage();
   refreshMonitoring();
   if ($("#resource-tree")) $("#resource-tree").scrollTop = treeScroll;
@@ -406,6 +409,8 @@ function renderPage() {
       return renderBackups();
     case "templates":
       return renderTemplates();
+    case "devops":
+      return renderDevops();
     case "operations":
       return renderOperations();
     case "users":
@@ -1736,13 +1741,14 @@ async function refresh(force = false) {
   const page = state.page;
   try {
     state.clusterHosts = await api("/cluster/hosts");
-    const inventory = await api("/inventory", "GET", null, {local: ["cluster", "users", "account"].includes(page)});
+    const inventory = await api("/inventory", "GET", null, {local: ["cluster", "users", "account", "devops"].includes(page)});
     if (page !== state.page) return;
     state.inventory = inventory;
     if (state.page === "cluster") {
       await refreshClusterTree();
       if (can("admin")) state.clusterKeys = await api("/cluster/keys");
     }
+    if (page === "devops") state.devops = await api("/devops/clusters");
     normalizeOrganizationFilters();
     updateResourceTree();
     if (state.page === "vm" && state.tab === "snapshots") await refreshSnapshots(state.vm, false);
@@ -1807,6 +1813,7 @@ async function refreshTasks() {
 }
 async function action(name, id) {
   if (name.startsWith("cluster-")) return clusterAction(name, id, refresh);
+  if (name.startsWith("devops-")) return devopsAction(name, id, refresh);
   if (name.startsWith("patch-")) return operationAction(name, id, refresh);
   const v = currentVM(id.split("|")[0]);
   switch (name) {

@@ -21,7 +21,7 @@ from .security import ROLES, token_hash
 PROTOCOL = 1
 ROOTS = {'inventory', 'vms', 'networks', 'isos', 'storage', 'collections',
          'organization', 'monitoring', 'operations', 'tasks', 'audit', 'backups', 'templates',
-         'console', 'terminal'}
+         'console', 'terminal', 'devops'}
 
 
 def allowed_path(path):
@@ -288,7 +288,7 @@ def install(app, cluster, session, require, inventory):
         workers = []
         close_code = 4403
         try:
-            if path.split('/')[0] not in ('console', 'terminal'):
+            if path.split('/')[0] not in ('console', 'terminal') and not re.fullmatch(r'devops/agent/[0-9a-f]{32}/terminal', path):
                 raise HTTPException(403, 'Only console and terminal streams are supported')
             user = authorize(ws, path)
             expected = ('https' if ws.url.scheme == 'wss' else 'http') + '://' + ws.headers.get('host', '')

@@ -791,3 +791,98 @@ provide live migration, shared disks, automatic scheduling or automatic failover
 A managed VM can host a second manager for testing, provided nested KVM is
 available to run its own VMs. Its availability then depends on its parent host;
 use independent physical hosts for independent failure domains.
+
+## DevOps: Kubernetes clusters
+
+Open **DevOps → Deploy Kubernetes cluster**. Enter a DNS-style cluster name,
+choose **1, 3 or 5 masters** and **0–20 workers**, then select the VM Manager host,
+vCPU count, memory, system disk, storage pool and network for **each VM**. Masters
+require at least 2 vCPUs and 2 GiB RAM; workers require at least 1 vCPU and 1 GiB.
+The form totals the requested resources before submission. Distribute HA masters
+across independent physical hosts and use fast disks for etcd. Multiple VMs on
+one physical host do not provide host failure tolerance.
+
+Choose **Use existing networks** or **Create a network**. Creating a network
+shows its settings form:
+
+- **Private bridge**: network name, IPv4 gateway/subnet, DHCP and outbound NAT.
+  Automatic provisioning requires DHCP. This option supports a single host.
+- **Shared LAN**: network name and the parent interface on each chosen host.
+  This creates managed Incus macvlan networks on those interfaces. The interfaces
+  must already connect to the same LAN (or networks with working mutual routing),
+  with DHCP and internet access. It does not create a tunnel, VLAN, router or
+  cross-host overlay. Macvlan guests cannot directly reach their own parent host;
+  the built-in terminal uses the Incus agent and remains available.
+
+Existing managed Incus bridges and macvlan networks are supported. A trust link
+between managers provides orchestration, not connectivity between guests.
+Across hosts, private NAT networks are insufficient without routing configured
+outside this feature. Nodes must reach masters on TCP 6443; etcd masters need
+TCP 2379–2380; nodes need TCP 10250 and UDP 8472 for kubelet and Flannel VXLAN.
+Keep these ports on trusted networks, especially UDP 8472. Every joining node is
+checked for TCP connectivity to the first master. Completion requires every
+requested Kubernetes node to report **Ready**. Check pod connectivity and your
+application's ingress/storage requirements before running workloads.
+
+The service provisions Ubuntu 24.04 cloud-image **virtual machines** through
+Incus, waits for cloud-init and the guest agent, and installs the pinned
+[K3s v1.35.9+k3s1 release](https://github.com/k3s-io/k3s/releases/tag/v1.35.9%2Bk3s1).
+The amd64/arm64 binaries are verified against pinned SHA-256 checksums. Guests
+need outbound HTTPS for the Ubuntu image, Ubuntu packages, GitHub release assets
+and container registries. No host-level Kubernetes installation is performed.
+K3s runs as a systemd service with embedded etcd, Flannel, CoreDNS, Traefik,
+ServiceLB and local-path storage defaults. Masters can also run workloads.
+Pod and service CIDRs are configurable and must not overlap each other or host
+networks. Bridge node addresses receive Incus DHCP reservations; shared-LAN
+addresses need reservations in your LAN DHCP server. Keep these addresses stable.
+
+The DevOps page shows deployment milestones, per-node results and task output.
+Once Ready, open **kubectl terminal** inside VM Manager. It uses the first
+master's kubeconfig from a dedicated guest account without sudo; it grants
+Kubernetes cluster administrator access. `kubectl get nodes` and
+`kubectl get pods -A` work immediately. It includes the existing terminal's paste,
+copy, download and full-screen controls. A lost connection never replays input.
+The terminal session and kubeconfig download require an operator/administrator,
+with session, CSRF, same-origin and ongoing permission checks. Credential reads
+and terminal opens are audited; credentials and terminal input/output are not
+written to task logs or inventory. The kubeconfig remains in the guest rather
+than the manager's deployment database.
+
+**Download kubeconfig** provides administrator credentials for external clients.
+Its API endpoint targets the first master's address, which must be reachable
+from your client. Multiple masters provide etcd/control-plane quorum; a highly
+available external API endpoint needs a separately configured load balancer and
+matching TLS SANs. The built-in terminal also depends on the first master.
+
+Failed/interrupted deployments retain their VMs and progress. Inspect the task
+and, for guest installation errors, `/var/lib/vmm-k3s/install.log` inside the VM,
+then choose **Retry deployment**. Retry checks ownership and reuses existing
+nodes; it refuses unrelated VMs with matching names. Restarts mark unfinished
+operations interrupted and never claim success. Do not manually delete or
+replace a master to repair a deployment; recovery of an existing etcd cluster
+requires its datastore recovery procedure. **Delete cluster VMs** requires the
+exact cluster name and permanently removes its owned VMs/disks/workloads;
+managed snapshots are removed, while independent backups and networks are retained.
+Active backups/patches, incomplete restores and attached external storage block
+deletion. Node configuration backups are taken before deletion. Failed deletion can be retried. Cluster upgrades, scaling,
+workload deployment, storage replication and Kubernetes datastore backups are
+not automated by this initial service.
+
+Every participating manager needs this DevOps release. Upgrade linked managers
+with the established `scripts/deploy.py --host ...` procedure before selecting
+them. Unreachable/older hosts are shown as unavailable in the deployment form.
+
+`scripts/devops_check.py` is an opt-in acceptance check that creates a uniquely
+named disposable three-master/one-worker cluster across two linked managers.
+Run with the coordinating manager's Python environment and `PYTHONPATH`,
+`--state /var/lib/vm-manager`, `--url https://<coordinator>:8443`,
+`--certificate /opt/carrtech/vm-manager/tls/server.crt`, `--peer-id <linked-host-id>`,
+and either `--local-network <name> --peer-network <name>` for existing mutually
+reachable networks, or `--local-parent <interface> --peer-parent <interface>`
+for a new shared LAN. `--local-pool`/`--peer-pool` select storage. The test uses a
+temporary operator, verifies all nodes, downloaded kubeconfig authentication,
+cross-host pod HTTP, service DNS and the proxied non-root kubectl terminal,
+then removes its VMs and account. It retains networks for inspection/reuse.
+Failures retain VMs for diagnosis by default; `--resume-id` retries a retained
+acceptance deployment and `--cleanup-on-failure` opts into deletion on failure.
+Use only hosts with sufficient free CPU, memory and guest-expanded disk space.

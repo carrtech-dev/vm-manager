@@ -49,6 +49,7 @@ from . import guest_agent
 from . import guest_terminal
 from . import backups
 from . import templates
+from . import devops
 from . import cluster as federation
 from . import patching
 from .power import PowerInterrupted, PowerRequests
@@ -66,6 +67,7 @@ store.bootstrap(DATA)
 cluster = federation.Cluster(store)
 backups.initialize(store)
 patching.initialize(store)
+devops.initialize(store)
 incus, libvirt = Incus(), Libvirt()
 history = monitoring.History(store)
 snapshots = Snapshots(store, incus, libvirt)
@@ -106,6 +108,7 @@ app = FastAPI(
     title="CarrTech VM Manager", docs_url=None, redoc_url=None, openapi_url=None, lifespan=backup_lifespan
 )
 executor = ResourceExecutor(max_workers=4, thread_name_prefix="hypervisor")
+devops_executor = ResourceExecutor(max_workers=1, thread_name_prefix="devops")
 stop_executor = ResourceExecutor(max_workers=4, thread_name_prefix="force-stop")
 power_requests = PowerRequests()
 DUMMY_PASSWORD_HASH = hash_password("dummy-password-for-timing-only")
@@ -204,11 +207,14 @@ def task(user, action, resource, fn, resources=None):
             resources = {"incus:" + resource}
         elif action.startswith(("vm.", "backup.")):
             resources = {resource}
-    (stop_executor if action == "vm.stop" else executor).submit(execute, resources=resources)
+    (stop_executor if action == "vm.stop" else devops_executor if action.startswith("devops.cluster.") else executor).submit(execute, resources=resources)
     return {"task_id": task_id}
 
 
 patch_manager = patching.Manager(store, lambda *args, **kwargs: task(*args, **kwargs))
+devops_agent = devops.Agent(store, incus, lambda *args, **kwargs: task(*args, **kwargs),
+                            remove=lambda vm_name, actor: remove_devops_vm(vm_name, actor))
+devops_manager = devops.Manager(store, devops_agent, cluster, lambda *args, **kwargs: task(*args, **kwargs))
 
 
 def session(request):
@@ -555,7 +561,7 @@ def get_inventory(user=Depends(require())):
     return dict(result, external_storage=external, external_storage_error=external_error,
                 storage_blocks=blocks, storage_defaults=storage.defaults(store),
                 storage_error=error, backup_plans=backups.plans(store), vm_backups=backups.catalog(store),
-                vm_templates=templates.catalog(store), patching=patching.catalog(store))
+                vm_templates=templates.catalog(store), patching=patching.catalog(store), devops=devops.catalog(store))
 
 
 @app.get('/api/storage/sources')
@@ -1004,6 +1010,36 @@ def remove_vm(vm_id, cleanup=False, preserve_backups=True, actor='system'):
         with backup_manager.lock:
             invalidate()
             deleting_vms.discard(vm_id)
+
+
+def remove_devops_vm(vm_name, actor):
+    """Use normal deletion protections and preserve independent backups."""
+    vm_id = 'incus:' + vm_name
+    with backup_manager.lock:
+        with store.db() as db:
+            if db.execute("SELECT 1 FROM vm_backups WHERE vm_id=? AND status IN ('queued','running')", (vm_id,)).fetchone():
+                raise HypervisorError('Wait for the active VM backup before deleting this node')
+            if db.execute("SELECT 1 FROM patch_runs WHERE vm_id=? AND status IN ('pending','dispatched','running','reconnecting')", (vm_id,)).fetchone():
+                raise HypervisorError('Wait for active patch operations before deleting this node')
+            if db.execute('SELECT 1 FROM external_vm_refs WHERE vm_id=?', (vm_id,)).fetchone():
+                raise HypervisorError('Detach external storage before deleting this node')
+        snapshots.guard_start(vm_id)
+        deleting_vms.add(vm_id)
+    try:
+        vm = incus.vm(vm_name)
+        with storage.lock:
+            directory = storage.directory(store, DATA, 'backup')
+            backup = directory / ('devops-' + uuid.uuid4().hex + '.json')
+            backup.write_text(json.dumps(vm, indent=2))
+            backup.chmod(0o600)
+            emit('Node configuration backup saved.\n')
+        if vm['status'].lower() != 'stopped':
+            incus.action(vm_name, 'stop')
+        return remove_vm_contents(vm_id, cleanup=True, preserve_backups=True, actor=actor)
+    finally:
+        with backup_manager.lock:
+            deleting_vms.discard(vm_id)
+            invalidate()
 
 
 def remove_vm_contents(vm_id, cleanup, preserve_backups, actor):
@@ -2567,6 +2603,110 @@ def delete_template(template_id: str, body: Confirm, user=Depends(require('opera
         return 'Template deleted; VMs created from it are retained.'
     return task(user, 'template.delete', row['name'], delete,
                 resources={'template:' + template_id})
+
+
+@app.get('/api/devops/options')
+def devops_options(user=Depends(require())):
+    return devops_manager.options(user)
+
+
+@app.get('/api/devops/clusters')
+def devops_clusters(user=Depends(require())):
+    return {'clusters': devops.catalog(store)}
+
+
+@app.post('/api/devops/clusters')
+def devops_create(body: devops.Request, user=Depends(require('operate'))):
+    return devops_manager.create(body, user)
+
+
+@app.post('/api/devops/clusters/{identity}/retry')
+def devops_retry(identity: str, user=Depends(require('operate'))):
+    return devops_manager.retry(identity, user)
+
+
+@app.delete('/api/devops/clusters/{identity}')
+def devops_delete(identity: str, body: dict, user=Depends(require('operate'))):
+    record = devops.row(store, 'devops_clusters', identity)
+    if body.get('confirm_name') != record['name']:
+        raise HTTPException(400, 'Cluster name does not match')
+    return devops_manager.retry(identity, user, delete=True)
+
+
+@app.post('/api/devops/clusters/{identity}/kubeconfig')
+def devops_kubeconfig(identity: str, user=Depends(require('operate'))):
+    record = devops.row(store, 'devops_clusters', identity)
+    if record['status'] != 'ready':
+        raise HypervisorError('Cluster must be Ready before downloading credentials')
+    first = record['nodes'][0]
+    result = devops_manager.rpc(first['host_id'], first['id'] + '/kubeconfig', user)
+    config = result['kubeconfig'].replace('https://127.0.0.1:6443', 'https://' + first['address'] + ':6443')
+    store.audit(user['username'], 'devops.kubeconfig.download', record['name'])
+    return {'kubeconfig': config, 'name': record['name']}
+
+
+@app.get('/api/devops/agent/options')
+def devops_agent_options(user=Depends(require())):
+    return devops_agent.options()
+
+
+@app.post('/api/devops/agent/validate')
+def devops_agent_validate(body: devops.NodeRequest, user=Depends(require('operate'))):
+    return devops_agent.validate(body)
+
+
+@app.post('/api/devops/agent/reserve')
+def devops_agent_reserve(body: devops.NodeRequest, user=Depends(require('operate'))):
+    return devops_agent.reserve(body)
+
+
+@app.get('/api/devops/agent/{identity}/record')
+def devops_agent_record(identity: str, user=Depends(require())):
+    return devops_agent.record(identity)
+
+
+@app.post('/api/devops/agent/{identity}/prepare')
+def devops_agent_prepare(identity: str, body: devops.Install, user=Depends(require('operate'))):
+    return devops_agent.prepare(identity, user, body)
+
+
+@app.post('/api/devops/agent/{identity}/delete')
+def devops_agent_delete(identity: str, user=Depends(require('operate'))):
+    return devops_agent.delete(identity, user)
+
+
+@app.get('/api/devops/agent/{identity}/{action}')
+def devops_agent_read(identity: str, action: str, user=Depends(require('operate'))):
+    if action not in ('token', 'status', 'kubeconfig'):
+        raise HTTPException(404, 'Unknown node action')
+    result = devops_agent.guest(identity, action)
+    if action in ('token', 'kubeconfig'):
+        store.audit(user['username'], 'devops.credential.read', identity, action)
+    return result
+
+
+@app.websocket('/api/devops/agent/{identity}/terminal')
+async def devops_terminal(ws: WebSocket, identity: str):
+    try:
+        def authorize():
+            current = session(ws)
+            if 'operate' not in ROLES.get(current['role'], set()):
+                raise HTTPException(403, 'Cluster terminal requires an operator')
+            record = devops.row(store, 'devops_nodes', identity)
+            if record['spec']['role'] != 'master' or record['status'] != 'installed':
+                raise HTTPException(409, 'Master installation is not complete')
+            return current
+        user = authorize()
+        expected = ('https' if ws.url.scheme == 'wss' else 'http') + '://' + ws.headers.get('host', '')
+        if not user.get('peer') and (ws.headers.get('origin', '') != expected or
+                not secrets.compare_digest(ws.query_params.get('csrf', ''), user['csrf'])):
+            raise HTTPException(403, 'Invalid terminal session')
+        _, spec, _ = devops_agent.owned(identity)
+        await guest_terminal.bridge(ws, incus, spec.name, authorize,
+            lambda: store.audit(user['username'], 'devops.terminal.open', spec.name),
+            CONSOLE_AUTH_INTERVAL, mode='kubernetes')
+    except (HTTPException, HypervisorError):
+        await ws.close(code=4403)
 
 
 @app.get('/api/operations/patching')

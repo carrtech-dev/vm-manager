@@ -82,13 +82,17 @@ async def bridge(ws, incus, vm_name, authorize, audit, auth_interval=20, mode="l
                     'vmm-terminal-' + uuid.uuid4().hex + '.service']
                    if mode == 'login' else
                    ['/bin/sh', '-c', 'if [ -x /bin/bash ]; then exec /bin/bash -l; else exec /bin/sh -l; fi'])
+        if mode == 'kubernetes':
+            command = ['/usr/bin/setpriv', '--reuid=vmm-kube', '--regid=vmm-kube', '--init-groups',
+                       '/usr/bin/env', 'HOME=/home/vmm-kube', 'KUBECONFIG=/home/vmm-kube/.kube/config',
+                       'K3S_CONFIG_FILE=/dev/null', 'PS1=kubectl> ', '/bin/bash', '--noprofile', '--norc', '-i']
         operation = await asyncio.to_thread(incus.request, 'POST',
             '/1.0/instances/' + quote(vm_name) + '/exec', {
                 'command': command,
                 'interactive': True, 'wait-for-websocket': True,
                 'record-output': False, 'width': 100, 'height': 30,
                 'environment': ({'TERM': 'xterm-256color', 'HOME': '/root', 'USER': 'root'}
-                                if mode == 'root' else {'TERM': 'xterm-256color'}),
+                                if mode in ('root', 'kubernetes') else {'TERM': 'xterm-256color'}),
                 'user': 0, 'group': 0, 'cwd': '/root' if mode == 'root' else '/',
             }, False)
         url = urlsplit(operation['operation'])
