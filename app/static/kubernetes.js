@@ -17,6 +17,7 @@ export async function manageCluster(cluster) {
   const dialog = modal("Kubernetes · " + cluster.name,
     `<div class="kube-toolbar"><div id="kube-namespaces"></div><label class="field"><span>Search nodes and pods</span><input id="kube-search" type="search" placeholder="Name, namespace, node or status"></label>${control("Refresh", "refresh")}</div><p id="kube-status" role="status">Loading cluster resources…</p><p id="kube-error" class="warning" role="alert" hidden></p><div id="kube-resources"></div><div id="kube-detail" hidden></div>`,
     async () => {}, {wide:true, submit:"Close"});
+  dialog.classList.add("kubernetes-dialog");
   const endpoint = `/devops/clusters/${cluster.id}`;
   const detail = $("#kube-detail", dialog);
   function stop() { controller.abort(); detail.innerHTML = ""; clearInterval(timer); }
