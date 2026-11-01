@@ -87,7 +87,8 @@ def main():
             existing = next(c for c in api('/devops/clusters')['clusters'] if c['id'] == args.resume_id)
             if not existing['name'].startswith('vmm-k3s-check-'):
                 raise RuntimeError('Only disposable acceptance clusters can be resumed')
-            name, network = existing['name'], existing['spec']['new_network']['name']
+            name = existing['name']
+            network = (existing['spec'].get('new_network') or {}).get('name', 'existing networks')
             result = api('/devops/clusters/' + args.resume_id + '/retry', 'POST', {})
         else:
             result = api('/devops/clusters', 'POST', spec)
@@ -156,7 +157,8 @@ def main():
             if cluster_id and (succeeded or args.cleanup_on_failure):
                 api('/devops/clusters/' + cluster_id, 'DELETE', {'confirm_name':name})
                 wait_cluster('deleted')
-                print('Disposable cluster VMs deleted. Retained network: ' + network, flush=True)
+                retained = (args.local_network + ' / ' + args.peer_network) if args.local_network and args.peer_network else network
+                print('Disposable cluster VMs deleted. Retained networks: ' + retained, flush=True)
             elif cluster_id:
                 print('Retained failed disposable cluster for inspection: ' + name, flush=True)
         finally:

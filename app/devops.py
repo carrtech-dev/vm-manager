@@ -279,6 +279,8 @@ class Agent:
     def update(self, identity, status, message=''):
         with self.store.db() as db:
             db.execute('UPDATE devops_nodes SET status=?,message=? WHERE id=?', (status, message, identity))
+            if status in ('queued', 'deleting'):
+                db.execute("UPDATE devops_nodes SET task_id='' WHERE id=?", (identity,))
 
     def prepare(self, identity, user, install):
         with self.lock:
@@ -402,7 +404,14 @@ class Agent:
                     return 'Deleted owned K3s node'
                 except Exception as exc:
                     self.update(identity, 'failed', str(exc)[:1000]); raise
-            return self.submit(user, 'devops.node.delete', spec.name, work, resources={'incus:' + spec.name})
+            try:
+                result = self.submit(user, 'devops.node.delete', spec.name, work, resources={'incus:' + spec.name})
+                with self.store.db() as db:
+                    db.execute('UPDATE devops_nodes SET task_id=? WHERE id=?', (result['task_id'], identity))
+                return result
+            except Exception:
+                self.update(identity, 'failed', 'Could not queue node deletion')
+                raise
 
 
 class Manager:

@@ -290,3 +290,19 @@ def test_failed_task_preflight_releases_node_for_retry(env):
     assert env.agent.record(node.id)['status'] == 'failed'
     env.agent.prepare(node.id, USER, devops.Install(token='a'*64))
     assert len(env.jobs) == 3
+
+
+def test_delete_tracks_its_own_task_instead_of_the_completed_install(env):
+    identity = env.manager.create(request(), USER)['cluster_id']
+    node = devops.NodeRequest.model_validate(devops.row(env.store, 'devops_clusters', identity)['nodes'][0])
+    env.agent.reserve(node); env.agent.provision(node)
+    with env.store.db() as db:
+        db.execute("UPDATE devops_nodes SET status='installed',task_id='old-install'")
+        db.execute("INSERT INTO tasks VALUES('old-install','devops.node.prepare',?,'operator','completed',0,1,'Installed')", (node.name,))
+    result = env.agent.delete(node.id, USER)
+    with env.store.db() as db:
+        db.execute("INSERT INTO tasks VALUES(?,'devops.node.delete',?,'operator','running',2,NULL,'')", (result['task_id'], node.name))
+    record = env.agent.record(node.id)
+    assert record['status'] == 'deleting' and record['task_id'] == result['task_id']
+    env.jobs[-1].fn()
+    assert env.agent.record(node.id)['status'] == 'deleted'
