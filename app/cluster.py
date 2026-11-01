@@ -220,6 +220,9 @@ def install(app, cluster, session, require, inventory):
                 + list(await asyncio.gather(*(collect(h) for h in cluster.hosts(private=True))))}
 
     def authorize(request, path):
+        if path.split('/')[0] == 'devops':
+            from .features import require_devops
+            require_devops()
         user = session(request)
         if not allowed_path(path):
             raise HTTPException(403, 'This resource cannot be forwarded')
@@ -313,6 +316,7 @@ def install(app, cluster, session, require, inventory):
                         if message['type'] == 'websocket.disconnect':
                             return
                         current = session(ws)
+                        authorize(ws, path)
                         if current['role'] != user['role']:
                             return
                         await remote.send(message.get('bytes') if message.get('bytes') is not None else message['text'])
@@ -325,6 +329,7 @@ def install(app, cluster, session, require, inventory):
                     while True:
                         await asyncio.sleep(20)
                         current = session(ws)
+                        authorize(ws, path)
                         cluster.host(host_id)
                         if current['role'] != user['role']:
                             return

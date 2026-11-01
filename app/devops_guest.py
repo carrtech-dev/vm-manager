@@ -1,4 +1,7 @@
 """Guest-side K3s installer. Input and credentials never enter task output."""
+from textwrap import indent
+
+from .kubernetes import GUEST
 
 # Executed through the Incus agent as root only on DevOps-owned Ubuntu VMs.
 SCRIPT = r'''
@@ -42,6 +45,8 @@ elif action == 'connect':
         print('{"ready":true}')
     except OSError: print('{"ready":false}')
 '''
+
+SCRIPT += "\nelif action == 'manage':\n" + indent(GUEST, '    ')
 
 INSTALLER = r'''
 import hashlib, json, os, pathlib, platform, pwd, shutil, subprocess, urllib.request

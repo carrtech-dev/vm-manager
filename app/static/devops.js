@@ -1,14 +1,16 @@
 import {state, $, $$, esc, can, api, modal, field, select, check, confirmAction, toast, queue} from "./core.js";
+import {manageCluster} from "./kubernetes.js";
 
 const button = (label, action, id, disabled = false) => `<button type="button" class="button secondary" data-action="${action}" data-id="${esc(id)}" ${disabled ? "disabled" : ""}>${label}</button>`;
 const clusters = () => state.devops?.clusters || [];
 const active = status => ["queued", "deploying", "deleting"].includes(status);
 export function renderDevops() {
+  if (state.inventory?.features?.devops?.enabled === false || state.user?.features?.devops?.enabled === false) return `<div class="page-title"><div><h1>DevOps</h1><p>DevOps is not enabled on this manager.</p></div></div>`;
   return `<div class="page-title"><div><h1>DevOps</h1><p>Deploy software and services across linked VM Manager hosts.</p></div>${can() ? button("Deploy Kubernetes cluster", "devops-create", "") : ""}</div>
     <section class="panel"><div class="panel-header"><h3>Kubernetes · K3s</h3></div><p class="hint">Ubuntu VMs, a K3s control plane, worker nodes and a built-in kubectl terminal. Deployments are coordinated by this manager, with a host chosen for every VM.</p>
     ${clusters().length ? clusters().map(c => `<article class="devops-cluster"><div class="panel-header"><div><h3>${esc(c.name)}</h3><p>${esc(c.version)} · ${c.spec.masters.length} master(s) · ${c.spec.workers.length} worker(s)</p></div><span class="badge ${c.status === "ready" ? "running" : ""}">${esc(c.status)}</span></div>
       <p role="status">${esc(c.message)}</p><div class="table-wrap"><table><thead><tr><th>VM</th><th>Role</th><th>Host</th><th>Specification</th><th>IP address</th><th>Deployment</th></tr></thead><tbody>${c.nodes.map(n => `<tr><td>${esc(n.name)}</td><td>${esc(n.role)}</td><td>${esc(n.host_name || (n.host_id ? "Linked host" : "This host"))}</td><td>${n.cpu} vCPU · ${n.memory_gib} GiB RAM · ${n.disk_gib} GiB disk</td><td>${esc(n.address || "Pending")}</td><td>${esc(n.status)}</td></tr>`).join("")}</tbody></table></div>
-      <div class="actions">${c.task_id ? button("Task output", "task-detail", c.task_id) : ""}${can() && c.status === "ready" ? button("kubectl terminal", "devops-terminal", c.id) + button("Download kubeconfig", "devops-kubeconfig", c.id) : ""}${can() && ["failed", "interrupted"].includes(c.status) ? button("Retry deployment", "devops-retry", c.id) : ""}${can() && !active(c.status) && c.status !== "deleted" ? button("Delete cluster VMs", "devops-delete", c.id) : ""}</div></article>`).join("") : `<div class="empty"><strong>No Kubernetes clusters yet</strong>Request a cluster to provision its VMs and install K3s automatically.</div>`}</section>`;
+      <div class="actions">${c.task_id ? button("Task output", "task-detail", c.task_id) : ""}${c.status === "ready" ? button("Manage cluster", "devops-manage", c.id) : ""}${can() && c.status === "ready" ? button("kubectl terminal", "devops-terminal", c.id) + button("Download kubeconfig", "devops-kubeconfig", c.id) : ""}${can() && ["failed", "interrupted"].includes(c.status) ? button("Retry deployment", "devops-retry", c.id) : ""}${can() && !active(c.status) && c.status !== "deleted" ? button("Delete cluster VMs", "devops-delete", c.id) : ""}</div></article>`).join("") : `<div class="empty"><strong>No Kubernetes clusters yet</strong>Request a cluster to provision its VMs and install K3s automatically.</div>`}</section>`;
 }
 
 export function nodeFields(node, key, hosts) {
@@ -92,6 +94,11 @@ function dialogSignal(dialog) {
 }
 
 export async function devopsAction(action, id, refresh) {
+  if (action === "devops-manage") {
+    const cluster = clusters().find(c => c.id === id);
+    if (!cluster) throw new Error("Cluster not found");
+    return manageCluster(cluster);
+  }
   if (!can()) throw new Error("Your role does not permit this action");
   if (action === "devops-create") return clusterForm(refresh);
   const cluster = clusters().find(c => c.id === id);

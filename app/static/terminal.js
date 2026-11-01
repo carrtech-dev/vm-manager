@@ -9,6 +9,7 @@ const vm = params.get("vm");
 const kubeNode = params.get("kube_node");
 const nodeHost = params.get("node_host") || "";
 const kubernetes = Boolean(kubeNode);
+const pod = params.get("pod");
 bindConsoleNavigation({ linkId: "graphical-console", mode: "graphical" });
 const status = document.getElementById("console-status");
 const feedback = document.getElementById("terminal-feedback");
@@ -47,10 +48,10 @@ async function connect(mode = "login") {
     return;
   }
   if (kubernetes && (!/^[a-f0-9]{32}$/.test(kubeNode) || (nodeHost && !/^[a-f0-9]{32}$/.test(nodeHost)))) throw new Error("Invalid cluster terminal");
-  document.getElementById("terminal-title").textContent = kubernetes ? (params.get("cluster_name") || "Kubernetes") + " · kubectl" : vm.slice(6) + " · Terminal";
+  document.getElementById("terminal-title").textContent = kubernetes ? (params.get("cluster_name") || "Kubernetes") + (pod ? " · " + pod + " / " + params.get("container") : " · kubectl") : vm.slice(6) + " · Terminal";
   document.getElementById("graphical-console").hidden = kubernetes;
   if (!kubernetes) document.getElementById("graphical-console").href = hostURL("/console?vm=" + encodeURIComponent(vm));
-  if (kubernetes) document.getElementById("reconnect").textContent = "Reconnect kubectl";
+  if (kubernetes) document.getElementById("reconnect").textContent = pod ? "Reconnect pod" : "Reconnect kubectl";
   message("Connecting to guest terminal…");
   const response = await fetch("/api/me");
   if (!response.ok) throw new Error("Your session expired. Sign in to the manager, then reconnect.");
@@ -59,7 +60,9 @@ async function connect(mode = "login") {
   document.getElementById("terminal-root").hidden = kubernetes || user.role !== "administrator";
   if (mode === "root" && user.role !== "administrator") throw new Error("Root terminal access requires an administrator.");
   const path = kubernetes ? "/api" + (nodeHost ? "/cluster/hosts/" + nodeHost + "/proxy" : "") + "/devops/agent/" + kubeNode + "/terminal" : apiURL("/terminal/" + encodeURIComponent(vm));
-  const current = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${path}?csrf=${encodeURIComponent(user.csrf)}&mode=${mode}`);
+  const query = new URLSearchParams({csrf:user.csrf, mode});
+  if (kubernetes && pod) for (const key of ["pod", "namespace", "uid", "container", "shell"]) query.set(key, params.get(key) || "");
+  const current = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${path}?${query}`);
   socket = current;
   let loggedOut = false;
   current.binaryType = "arraybuffer";
@@ -75,7 +78,7 @@ async function connect(mode = "login") {
     const data = JSON.parse(event.data);
     if (data.type === "ready") {
       ready = true;
-      message(kubernetes ? "Connected · Kubernetes cluster administrator" : data.mode === "root" ? "Connected as root · Administrator session" : "VM login · Sign in with your VM account");
+      message(kubernetes ? (pod ? "Connected · " + pod + " / " + params.get("container") : "Connected · Kubernetes cluster administrator") : data.mode === "root" ? "Connected as root · Administrator session" : "VM login · Sign in with your VM account");
       resize();
       terminal.focus();
     } else if (data.type === "exit") {
@@ -94,7 +97,7 @@ async function connect(mode = "login") {
       connect().catch(error => message(error.message, true));
       return;
     }
-    if (!status.classList.contains("error")) message(kubernetes ? "Disconnected. Reconnect kubectl; output stays here." : "Disconnected. Reconnect to return to VM login; output stays here.", true);
+    if (!status.classList.contains("error")) message(kubernetes ? (pod ? "Pod shell closed. Reconnect to open another shell; output stays here." : "Disconnected. Reconnect kubectl; output stays here.") : "Disconnected. Reconnect to return to VM login; output stays here.", true);
   });
   current.addEventListener("error", () => {
     if (attempt !== generation) return;

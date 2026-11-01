@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app import devops, main
+from app import devops, main, kubernetes, features
 from app.hypervisor import HypervisorError, HypervisorNotFound
 from app.security import Store, hash_password
 
@@ -226,6 +226,165 @@ def test_readiness_requires_every_requested_node_and_does_not_claim_success(env,
     record = devops.row(env.store, 'devops_clusters', identity)
     assert record['status'] == 'failed'
     assert record['nodes'][0]['status'] == 'ready' and record['nodes'][1]['status'] == 'waiting'
+
+
+@pytest.fixture
+def ready_cluster(env):
+    identity = env.manager.create(request(), USER)['cluster_id']
+    node = devops.NodeRequest.model_validate(devops.row(env.store, 'devops_clusters', identity)['nodes'][0])
+    env.agent.reserve(node)
+    env.agent.provision(node)
+    with env.store.db() as db:
+        db.execute("UPDATE devops_clusters SET status='ready' WHERE id=?", (identity,))
+        db.execute("UPDATE devops_nodes SET status='installed' WHERE id=?", (node.id,))
+    return identity, node
+
+
+def test_management_read_write_roles_csrf_and_audit(env, ready_cluster, monkeypatch):
+    identity, node = ready_cluster
+    calls = []
+    monkeypatch.setattr(env.agent, 'guest', lambda *args, **kw: calls.append(kw) or {'nodes':[], 'pods':[], 'text':'description'})
+    endpoint = '/api/devops/clusters/' + identity
+    viewer = env.login('viewer')
+    assert env.client.get(endpoint + '/resources').status_code == 200
+    assert env.client.post(endpoint + '/manage', headers=viewer, json={'action':'describe','name':'node','resource':'node'}).status_code == 200
+    body = {'action':'delete','name':'pod','namespace':'default','uid':'old-uid','confirm_name':'pod'}
+    for path in (endpoint + '/manage', '/api/devops/agent/' + node.id + '/manage'):
+        assert env.client.post(path, headers=viewer, json=body).status_code == 403
+    operator = env.login()
+    assert env.client.post(endpoint + '/manage', json=body).status_code == 403
+    response = env.client.post(endpoint + '/manage', headers=operator, json=body)
+    assert response.status_code == 200, response.text
+    with env.store.db() as db:
+        assert db.execute("SELECT COUNT(*) FROM audit WHERE action='devops.pod.delete'").fetchone()[0] == 1
+    body['confirm_name'] = 'wrong'
+    assert env.client.post(endpoint + '/manage', headers=operator, json=body).status_code == 422
+    assert len(calls) == 3
+
+
+def test_management_routes_to_first_master_and_requires_ready(env, monkeypatch):
+    identity = env.manager.create(request(), USER)['cluster_id']
+    with pytest.raises(Exception, match='Ready'):
+        kubernetes.manage(env.manager, env.store, identity, USER, kubernetes.Operation())
+    record = devops.row(env.store, 'devops_clusters', identity)
+    record['nodes'][0]['host_id'] = HOST
+    with env.store.db() as db:
+        db.execute("UPDATE devops_clusters SET status='ready',nodes=? WHERE id=?", (json.dumps(record['nodes']), identity))
+    calls = []
+    monkeypatch.setattr(env.manager, 'rpc', lambda *args: calls.append(args) or {'nodes':[], 'pods':[]})
+    kubernetes.manage(env.manager, env.store, identity, USER, kubernetes.Operation())
+    assert calls[0][:2] == (HOST, record['nodes'][0]['id'] + '/manage')
+
+
+@pytest.mark.parametrize('changes', [{'name':'--all'}, {'name':'x;touch file'}, {'namespace':'../x'},
+    {'uid':'x/../../'}, {'container':'x;env'}, {'shell':'/bin/sh -c env'}, {'resource':'node'}, {'confirm_name':'wrong'}])
+def test_management_rejects_unsafe_or_unconfirmed_targets(changes):
+    with pytest.raises(ValidationError):
+        kubernetes.Operation.model_validate({'action':'delete','name':'pod','uid':'abc','confirm_name':'pod'} | changes)
+
+
+def guest_operation(operation, pod=None):
+    """Execute the real guest dispatcher branch with a fake kubectl transport."""
+    import subprocess
+    from contextlib import redirect_stdout
+    from io import StringIO
+    calls = []
+    pod = pod or {'metadata':{'name':'pod','namespace':'default','uid':'abc',
+        'ownerReferences':[{'controller':True,'kind':'ReplicaSet','name':'app'}]},
+        'spec':{'containers':[{'name':'web','env':[{'name':'SECRET','value':'do-not-return'}]}]},
+        'status':{'phase':'Running','containerStatuses':[{'name':'web','ready':True,'state':{'running':{}},'restartCount':2}]}}
+    def run(args, **kw):
+        calls.append((args, kw))
+        if 'nodes' in args:
+            output = {'items':[{'metadata':{'name':'master','uid':'node'},'status':{'conditions':[{'type':'Ready','status':'True'}]}}]}
+        elif 'pods' in args:
+            output = {'items':[pod]}
+        elif 'get' in args:
+            output = pod
+        else:
+            output = {}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(output), stderr='')
+    output = StringIO()
+    with redirect_stdout(output):
+        exec(kubernetes.GUEST, {'b':{'request':operation.model_dump()}, 'json':json,
+             'subprocess':SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired)})
+    return json.loads(output.getvalue()), calls
+
+
+def test_guest_inventory_returns_safe_summaries():
+    result, calls = guest_operation(kubernetes.Operation())
+    assert result['nodes'][0]['ready'] == 'True'
+    pod = result['pods'][0]
+    assert pod['restartable'] and pod['ready'] == 1 and pod['restarts'] == 2
+    assert pod['containers'] == [{'name':'web','running':True}]
+    assert 'do-not-return' not in json.dumps(result)
+
+
+def test_guest_delete_precondition_and_restart_semantics():
+    operation = kubernetes.Operation(action='restart', name='pod', uid='abc', confirm_name='pod')
+    result, calls = guest_operation(operation)
+    assert 'recreation requested' in result['message']
+    args, kw = calls[-1]
+    assert args[-5:] == ['delete','--raw','/api/v1/namespaces/default/pods/pod','-f','-']
+    assert json.loads(kw['input'])['preconditions'] == {'uid':'abc'}
+    result, calls = guest_operation(operation.model_copy(update={'uid':'different'}))
+    assert 'changed' in result['error'] and len(calls) == 1
+    standalone = {'metadata':{'name':'pod','namespace':'default','uid':'abc'}, 'spec':{}, 'status':{}}
+    result, calls = guest_operation(operation, standalone)
+    assert 'Standalone and Job pods' in result['error'] and len(calls) == 1
+    standalone['metadata']['annotations'] = {'kubernetes.io/config.mirror':'hash'}
+    result, calls = guest_operation(operation.model_copy(update={'action':'delete'}), standalone)
+    assert 'Static mirror' in result['error'] and len(calls) == 1
+
+
+def test_pod_exec_validates_running_container_and_uses_literal_arguments():
+    from app.guest_terminal import kubernetes_command
+    operation = kubernetes.Operation(action='exec-check', name='pod', uid='abc', container='web')
+    assert guest_operation(operation)[0] == {'ready':True}
+    assert 'running container' in guest_operation(operation.model_copy(update={'container':'missing'}))[0]['error']
+    args = kubernetes_command(operation)
+    assert '--reuid=vmm-kube' in args
+    assert args[args.index('/usr/local/bin/k3s'):] == ['/usr/local/bin/k3s','kubectl','exec','--stdin','--tty','--namespace','default','pod','--container','web','--','/bin/sh']
+    assert '-c' not in args
+
+
+def test_terminal_validates_pod_and_preserves_transport(env, ready_cluster, monkeypatch):
+    identity, node = ready_cluster
+    headers = env.login()
+    calls = []
+    monkeypatch.setattr(env.agent, 'guest', lambda *args, **kw: {'ready':True})
+    async def bridge(ws, *args, **kw):
+        calls.append(kw)
+        await ws.accept()
+        await ws.send_json({'type':'ready'})
+        await ws.close()
+    monkeypatch.setattr(main.guest_terminal, 'bridge', bridge)
+    path = f'/api/devops/agent/{node.id}/terminal?csrf={headers["X-CSRF-Token"]}&pod=pod&namespace=default&uid=abc&container=web&shell=/bin/sh'
+    with env.client.websocket_connect(path, headers={'Origin':'http://testserver'}) as ws:
+        assert ws.receive_json()['type'] == 'ready'
+    assert calls[0]['pod'].container == 'web'
+    assert calls[0]['mode'] == 'kubernetes'
+    with pytest.raises(Exception):
+        with env.client.websocket_connect(path.replace('container=web', 'container=bad;command'), headers={'Origin':'http://testserver'}): pass
+    assert len(calls) == 1
+
+
+def test_devops_entitlement_covers_api_agent_proxy_and_websockets(env, monkeypatch):
+    headers = env.login()
+    assert env.client.get('/api/me').json()['features']['devops']['enabled']
+    monkeypatch.setenv('VM_MANAGER_DEVOPS_ENABLED', 'false')
+    assert not env.client.get('/api/me').json()['features']['devops']['enabled']
+    for path in ('/api/devops/options', '/api/devops/clusters', '/api/devops/agent/options',
+                 f'/api/cluster/hosts/{HOST}/proxy/devops/agent/options'):
+        assert env.client.get(path).status_code == 403
+    assert env.client.post('/api/devops/clusters', headers=headers, json=request().model_dump()).status_code == 403
+    for path in (f'/api/devops/agent/{HOST}/terminal', f'/api/cluster/hosts/{HOST}/proxy/devops/agent/{HOST}/terminal'):
+        with pytest.raises(Exception):
+            with env.client.websocket_connect(path, headers={'Origin':'http://testserver'}): pass
+    with env.store.db() as db:
+        assert db.execute('SELECT COUNT(*) FROM devops_clusters').fetchone()[0] == 0
+    monkeypatch.delenv('VM_MANAGER_DEVOPS_ENABLED')
+    assert features.catalog()['devops']['enabled']
 
 
 def test_delete_restart_is_recoverable_and_deleted_names_can_be_reused(env):

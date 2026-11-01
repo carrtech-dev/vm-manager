@@ -12,7 +12,7 @@ import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, model_validator
 
-from . import devops_guest
+from . import devops_guest, kubernetes
 from .hypervisor import HypervisorError, HypervisorNotFound
 from .task_output import emit
 
@@ -282,6 +282,18 @@ class Agent:
             if status in ('queued', 'deleting'):
                 db.execute("UPDATE devops_nodes SET task_id='' WHERE id=?", (identity,))
 
+    def manage(self, identity, user, operation):
+        record, spec, _ = self.owned(identity)
+        if spec.role != 'master' or record['status'] != 'installed':
+            raise HTTPException(409, 'An installed master is required')
+        result = self.guest(identity, 'manage', request=operation.model_dump())
+        if result.get('error'):
+            raise HTTPException(409, result['error'])
+        if operation.action != 'inventory':
+            self.store.audit(user['username'], 'devops.pod.' + operation.action if operation.resource == 'pod' else 'devops.node.' + operation.action,
+                             spec.name, operation.namespace + '/' + operation.name)
+        return result
+
     def prepare(self, identity, user, install):
         with self.lock:
             record = self.record(identity)
@@ -429,6 +441,7 @@ class Manager:
             if action == 'delete': return self.agent.delete(identity, user)
             if action in ('token', 'status', 'kubeconfig'): return self.agent.guest(identity, action)
             if action == 'record': return self.agent.record(identity)
+            if action == 'manage': return self.agent.manage(identity, user, kubernetes.Operation.model_validate(body))
             raise HypervisorError('Unknown DevOps request')
         host = self.cluster.host(host_id)
         try:

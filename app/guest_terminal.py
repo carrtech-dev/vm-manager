@@ -66,7 +66,17 @@ def terminal_message(raw):
     raise ValueError('Unknown terminal message')
 
 
-async def bridge(ws, incus, vm_name, authorize, audit, auth_interval=20, mode="login"):
+def kubernetes_command(pod=None):
+    command = ['/usr/bin/setpriv', '--reuid=vmm-kube', '--regid=vmm-kube', '--init-groups',
+               '/usr/bin/env', 'HOME=/home/vmm-kube', 'KUBECONFIG=/home/vmm-kube/.kube/config',
+               'K3S_CONFIG_FILE=/dev/null']
+    if pod:
+        return command + ['/usr/local/bin/k3s', 'kubectl', 'exec', '--stdin', '--tty', '--namespace', pod.namespace,
+                          pod.name, '--container', pod.container, '--', pod.shell]
+    return command + ['PS1=kubectl> ', '/bin/bash', '--noprofile', '--norc', '-i']
+
+
+async def bridge(ws, incus, vm_name, authorize, audit, auth_interval=20, mode="login", pod=None):
     operation = None
     data_socket = control = None
     pending = []
@@ -83,9 +93,7 @@ async def bridge(ws, incus, vm_name, authorize, audit, auth_interval=20, mode="l
                    if mode == 'login' else
                    ['/bin/sh', '-c', 'if [ -x /bin/bash ]; then exec /bin/bash -l; else exec /bin/sh -l; fi'])
         if mode == 'kubernetes':
-            command = ['/usr/bin/setpriv', '--reuid=vmm-kube', '--regid=vmm-kube', '--init-groups',
-                       '/usr/bin/env', 'HOME=/home/vmm-kube', 'KUBECONFIG=/home/vmm-kube/.kube/config',
-                       'K3S_CONFIG_FILE=/dev/null', 'PS1=kubectl> ', '/bin/bash', '--noprofile', '--norc', '-i']
+            command = kubernetes_command(pod)
         operation = await asyncio.to_thread(incus.request, 'POST',
             '/1.0/instances/' + quote(vm_name) + '/exec', {
                 'command': command,

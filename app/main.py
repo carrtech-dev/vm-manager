@@ -50,6 +50,7 @@ from . import guest_terminal
 from . import backups
 from . import templates
 from . import devops
+from . import features, kubernetes
 from . import cluster as federation
 from . import patching
 from .power import PowerInterrupted, PowerRequests
@@ -268,6 +269,8 @@ async def security_headers(request: Request, call_next):
     if request.url.path.startswith("/api/") and request.url.path != "/api/login":
         try:
             user = session(request)
+            if features.devops_path(request.url.path):
+                features.require_devops()
             if request.method not in ("GET", "HEAD", "OPTIONS") and not user.get('peer'):
                 if not secrets.compare_digest(
                     request.headers.get("X-CSRF-Token", ""), user["csrf"]
@@ -368,7 +371,7 @@ def login(body: Login, request: Request, response: Response):
 
 @app.get("/api/me")
 def me(user=Depends(require())):
-    return {k: user[k] for k in ("id", "username", "role", "csrf")}
+    return {**{k: user[k] for k in ("id", "username", "role", "csrf")}, 'features': features.catalog()}
 
 
 @app.post("/api/logout")
@@ -561,7 +564,8 @@ def get_inventory(user=Depends(require())):
     return dict(result, external_storage=external, external_storage_error=external_error,
                 storage_blocks=blocks, storage_defaults=storage.defaults(store),
                 storage_error=error, backup_plans=backups.plans(store), vm_backups=backups.catalog(store),
-                vm_templates=templates.catalog(store), patching=patching.catalog(store), devops=devops.catalog(store))
+                vm_templates=templates.catalog(store), patching=patching.catalog(store),
+                features=features.catalog(), devops=devops.catalog(store) if features.catalog()['devops']['enabled'] else [])
 
 
 @app.get('/api/storage/sources')
@@ -2645,6 +2649,18 @@ def devops_kubeconfig(identity: str, user=Depends(require('operate'))):
     return {'kubeconfig': config, 'name': record['name']}
 
 
+@app.get('/api/devops/clusters/{identity}/resources')
+def devops_resources(identity: str, user=Depends(require())):
+    return kubernetes.manage(devops_manager, store, identity, user, kubernetes.Operation())
+
+
+@app.post('/api/devops/clusters/{identity}/manage')
+def devops_manage(identity: str, body: kubernetes.Operation, user=Depends(require())):
+    if body.action in ('delete', 'restart', 'exec-check') and 'operate' not in ROLES.get(user['role'], set()):
+        raise HTTPException(403, 'Your role does not permit this action')
+    return kubernetes.manage(devops_manager, store, identity, user, body)
+
+
 @app.get('/api/devops/agent/options')
 def devops_agent_options(user=Depends(require())):
     return devops_agent.options()
@@ -2685,10 +2701,18 @@ def devops_agent_read(identity: str, action: str, user=Depends(require('operate'
     return result
 
 
+@app.post('/api/devops/agent/{identity}/manage')
+def devops_agent_manage(identity: str, body: kubernetes.Operation, user=Depends(require())):
+    if body.action in ('delete', 'restart', 'exec-check') and 'operate' not in ROLES.get(user['role'], set()):
+        raise HTTPException(403, 'Your role does not permit this action')
+    return devops_agent.manage(identity, user, body)
+
+
 @app.websocket('/api/devops/agent/{identity}/terminal')
 async def devops_terminal(ws: WebSocket, identity: str):
     try:
         def authorize():
+            features.require_devops()
             current = session(ws)
             if 'operate' not in ROLES.get(current['role'], set()):
                 raise HTTPException(403, 'Cluster terminal requires an operator')
@@ -2702,9 +2726,18 @@ async def devops_terminal(ws: WebSocket, identity: str):
                 not secrets.compare_digest(ws.query_params.get('csrf', ''), user['csrf'])):
             raise HTTPException(403, 'Invalid terminal session')
         _, spec, _ = devops_agent.owned(identity)
+        pod = None
+        if ws.query_params.get('pod'):
+            try:
+                pod = kubernetes.Operation(action='exec-check', name=ws.query_params['pod'],
+                    namespace=ws.query_params.get('namespace', 'default'), uid=ws.query_params.get('uid', ''),
+                    container=ws.query_params.get('container', ''), shell=ws.query_params.get('shell', '/bin/sh'))
+            except ValueError:
+                raise HTTPException(400, 'Invalid pod terminal target')
+            await asyncio.to_thread(devops_agent.manage, identity, user, pod)
         await guest_terminal.bridge(ws, incus, spec.name, authorize,
             lambda: store.audit(user['username'], 'devops.terminal.open', spec.name),
-            CONSOLE_AUTH_INTERVAL, mode='kubernetes')
+            CONSOLE_AUTH_INTERVAL, mode='kubernetes', pod=pod)
     except (HTTPException, HypervisorError):
         await ws.close(code=4403)
 

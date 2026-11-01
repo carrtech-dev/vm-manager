@@ -2,6 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {state, apiURL} from '../app/static/core.js';
 import {renderDevops, nodeFields} from '../app/static/devops.js';
+import {resourceTables} from '../app/static/kubernetes.js';
 
 test('DevOps deployments stay on coordinator when the inventory host changes', () => {
   globalThis.location = {search:'?host=remote'};
@@ -39,4 +40,30 @@ test('DevOps task output uses the coordinator despite a retained host query', ()
   globalThis.location={search:'?host=remote',hash:'#devops'};
   try {assert.equal(apiURL('/tasks/one/output'),'/api/tasks/one/output');}
   finally {delete globalThis.location;}
+});
+
+test('graphical resources filter namespaces, escape metadata and restrict pod controls', () => {
+  const data = {nodes:[{name:'<master>',ready:'True',roles:['control-plane'],addresses:[],version:'v1'}],
+    pods:[{name:'<pod>',namespace:'default',status:'Running',ready:1,restarts:2,containers:[{name:'web',running:true}],node:'master',ip:'1.2.3.4',owner:'ReplicaSet/app',restartable:true,deletable:true},
+      {name:'other',namespace:'system',status:'Pending',ready:0,restarts:0,containers:[],node:'',owner:'',restartable:false,deletable:true}]};
+  state.user={role:'viewer'};
+  let html=resourceTables(data,'default');
+  assert.match(html,/&lt;master&gt;/);
+  assert.match(html,/&lt;pod&gt;/);
+  assert.match(html,/data-kube-action="pod-describe"/);
+  assert.doesNotMatch(html,/data-kube-action="(?:terminal|restart|delete)"/);
+  assert.doesNotMatch(html,/>other</);
+  state.user={role:'operator'};
+  html=resourceTables(data,'system');
+  assert.match(html,/data-kube-action="restart"[^>]*disabled/);
+  assert.match(html,/data-kube-action="terminal"[^>]*disabled/);
+  assert.match(html,/data-kube-action="delete"/);
+  assert.match(resourceTables(data,'','nothing'),/No matching pods/);
+});
+
+test('disabled DevOps renders no tools and ready clusters offer graphical management to viewers', () => {
+  state.user={role:'viewer',features:{devops:{enabled:false}}};
+  assert.doesNotMatch(renderDevops(),/data-action=/);
+  state.user={role:'viewer'};
+  assert.match(renderDevops(),/data-action="devops-manage"/);
 });

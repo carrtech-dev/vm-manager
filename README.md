@@ -794,6 +794,17 @@ use independent physical hosts for independent failure domains.
 
 ## DevOps: Kubernetes clusters
 
+DevOps is included and enabled by default. The server-owned feature registry in
+`app/features.py` is the shared entitlement boundary for all DevOps tools. Set
+`VM_MANAGER_DEVOPS_ENABLED=false` in the service's environment and restart
+`vm-manager` to hide DevOps and reject its APIs, credentials, agent calls and
+terminal connections, including linked-host forwarding. Apply this on every
+manager where DevOps should be unavailable. Existing clusters, workloads and
+deployment records are retained and continue running; re-enable with `true`.
+This is the foundation for a future separately installed, licensed DevOps add-on;
+licence validation, purchase, activation and package installation are not yet
+implemented. A future licence provider can replace the bundled grant centrally.
+
 Open **DevOps → Deploy Kubernetes cluster**. Enter a DNS-style cluster name,
 choose **1, 3 or 5 masters** and **0–20 workers**, then select the VM Manager host,
 vCPU count, memory, system disk, storage pool and network for **each VM**. Masters
@@ -837,6 +848,31 @@ networks. Bridge node addresses receive Incus DHCP reservations; shared-LAN
 addresses need reservations in your LAN DHCP server. Keep these addresses stable.
 
 The DevOps page shows deployment milestones, per-node results and task output.
+Once Ready, choose **Manage cluster** for live node and pod tables, all-namespace
+or individual-namespace filtering, search and **Describe** details. The view
+refreshes every 15 seconds while the resource list is visible; refresh failures
+are explicit and retain the last successful results. Node readiness, roles,
+addresses and Kubernetes versions are shown alongside pod phase/waiting reason,
+container readiness, restarts, scheduling node, IP and controlling workload.
+
+Viewers can list and describe resources. Operators/administrators can **Delete**
+pods, **Restart** controller-managed pods and open a **Terminal** in a selected
+running container using `/bin/sh` or `/bin/bash` (the image must include that
+shell). Delete and restart require typing the pod name. Both use graceful deletion
+with a Kubernetes UID precondition, so a refreshed pod with the same name is
+not accidentally deleted. Restart requests deletion and lets an existing
+ReplicaSet, StatefulSet, DaemonSet or ReplicationController create its replacement;
+it does not claim the replacement is ready. Standalone and Job pods cannot be
+restarted here, static mirror pods cannot be deleted here, and controller-owned
+pods may be recreated after ordinary deletion. These operations can interrupt
+workloads and lose temporary pod data. Terminal targets are checked again on
+connect, preserve existing session/CSRF/origin checks and use the dedicated
+non-root Kubernetes guest account. Describe, mutations and terminal opens are
+audited without recording shell input/output. All requests use the owning
+master's linked host when needed; the manager does not store kubeconfig copies.
+This initial graphical view covers nodes and pods; deployment authoring, storage
+and ingress management remain future work.
+
 Once Ready, open **kubectl terminal** inside VM Manager. It uses the first
 master's kubeconfig from a dedicated guest account without sudo; it grants
 Kubernetes cluster administrator access. `kubectl get nodes` and

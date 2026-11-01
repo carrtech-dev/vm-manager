@@ -348,6 +348,7 @@ function render() {
   $("#app").innerHTML =
     `<div class="app-shell"><aside class="sidebar" aria-label="Resource navigation"><a class="brand" href="#overview"><strong>▣ CARRTECH</strong><small>VM MANAGER</small></a><div class="resource-search"><input id="resource-search" aria-label="Search resources" placeholder="⌕  Search resources" value="${esc(state.search)}"></div><div class="nav-heading">WORKSPACE</div><nav>${navItems
       .filter((n) => n[0] !== "users" || can("admin"))
+      .filter((n) => n[0] !== "devops" || inv.features?.devops?.enabled !== false)
       .map(
         ([key, icon, label]) =>
           `<a class="nav-link ${active === key ? "active" : ""}" href="#${key}"><span class="nav-symbol" aria-hidden="true">${icon}</span>${label}${key === "vms" ? `<span class="nav-count">${inv.vms.filter(matchesOrganization).length}</span>` : ""}</a>`,
@@ -1748,7 +1749,7 @@ async function refresh(force = false) {
       await refreshClusterTree();
       if (can("admin")) state.clusterKeys = await api("/cluster/keys");
     }
-    if (page === "devops") state.devops = await api("/devops/clusters");
+    if (page === "devops") state.devops = inventory.features?.devops?.enabled === false ? {clusters:[]} : await api("/devops/clusters");
     normalizeOrganizationFilters();
     updateResourceTree();
     if (state.page === "vm" && state.tab === "snapshots") await refreshSnapshots(state.vm, false);
