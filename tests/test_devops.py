@@ -299,6 +299,8 @@ def guest_operation(operation, pod=None):
             output = {'items':[{'metadata':{'name':'master','uid':'node'},'status':{'conditions':[{'type':'Ready','status':'True'}]}}]}
         elif 'pods' in args:
             output = {'items':[pod]}
+        elif 'deployments,services,ingresses,namespaces' in args:
+            output = {'items': []}
         elif 'get' in args:
             output = pod
         else:
@@ -465,3 +467,49 @@ def test_delete_tracks_its_own_task_instead_of_the_completed_install(env):
     assert record['status'] == 'deleting' and record['task_id'] == result['task_id']
     env.jobs[-1].fn()
     assert env.agent.record(node.id)['status'] == 'deleted'
+
+
+def test_workload_authoring_roles_validation_generated_manifest_and_audit(env, ready_cluster, monkeypatch):
+    identity, node = ready_cluster
+    calls = []
+    monkeypatch.setattr(env.agent, 'guest', lambda *args, **kw: calls.append(kw['request']) or {'message':'created'})
+    endpoint = f'/api/devops/clusters/{identity}/manage'
+    body = {'action':'create', 'resource':'deployment', 'name':'web', 'workload':{'image':'nginx:stable-alpine','replicas':2},
+            'manifest':{'kind':'Secret','data':{'private':'evil'}}}
+    viewer = env.login('viewer')
+    assert env.client.post(endpoint, headers=viewer, json=body).status_code == 403
+    operator = env.login()
+    assert env.client.post(endpoint, json=body).status_code == 403
+    assert env.client.post(endpoint, headers=operator, json=body).status_code == 200
+    manifest = calls[-1]['manifest']
+    assert manifest['kind'] == 'Deployment'
+    assert manifest['spec']['replicas'] == 2
+    assert 'evil' not in json.dumps(manifest)
+    assert manifest['metadata']['labels']['app.kubernetes.io/managed-by'] == 'vm-manager'
+    invalid = dict(body, workload={'image':'nginx; touch /bad'})
+    assert env.client.post(endpoint, headers=operator, json=invalid).status_code == 422
+    with env.store.db() as db:
+        assert db.execute("SELECT COUNT(*) FROM audit WHERE action='devops.deployment.create'").fetchone()[0] == 1
+
+
+def test_workload_guest_create_does_not_overwrite_and_remove_requires_current_uid():
+    from app.kube_workloads import Workload, manifest, CLASS
+    operation = kubernetes.Operation(action='create', resource='service', name='web',
+        workload=Workload(selector='web', service_type='LoadBalancer', port=8080, target_port=80))
+    # Production injects a generated manifest only after request validation.
+    generated = manifest('service', 'web', 'default', operation.workload)
+    assert generated['spec']['loadBalancerClass'] == CLASS
+    assert generated['spec']['ports'][0]['targetPort'] == 80
+    for changes in ({'action':'remove','uid':'old','confirm_name':'wrong'}, {'action':'update','uid':'abc'}):
+        with pytest.raises(ValidationError): kubernetes.Operation.model_validate(operation.model_dump() | changes)
+    resource = {'metadata':{'name':'web','namespace':'default','uid':'abc','labels':{'app.kubernetes.io/managed-by':'vm-manager'}}, 'spec':{}}
+    remove = kubernetes.Operation(action='remove', resource='service', name='web', uid='abc', confirm_name='web')
+    result, calls = guest_operation(remove, resource)
+    assert 'Deletion requested' in result['message']
+    assert calls[-1][0][-3:] == ['/api/v1/namespaces/default/services/web', '-f', '-']
+    assert json.loads(calls[-1][1]['input'])['preconditions']['uid'] == 'abc'
+    result,calls = guest_operation(remove.model_copy(update={'uid':'stale'}), resource)
+    assert 'changed' in result['error'] and len(calls) == 1
+    resource['metadata']['labels'] = {}
+    result,calls = guest_operation(remove, resource)
+    assert 'Only resources' in result['error'] and len(calls) == 1

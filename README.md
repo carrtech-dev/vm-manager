@@ -875,8 +875,8 @@ connect, preserve existing session/CSRF/origin checks and use the dedicated
 non-root Kubernetes guest account. Describe, mutations and terminal opens are
 audited without recording shell input/output. All requests use the owning
 master's linked host when needed; the manager does not store kubeconfig copies.
-This initial graphical view covers nodes and pods; deployment authoring, storage
-and ingress management remain future work.
+Deployment authoring, Services and Ingress are also available as described below;
+advanced storage authoring remains available through kubectl.
 
 Once Ready, open **kubectl terminal** inside VM Manager. It uses the first
 master's kubeconfig from a dedicated guest account without sudo; it grants
@@ -906,8 +906,8 @@ exact cluster name and permanently removes its owned VMs/disks/workloads;
 managed snapshots are removed, while independent backups and networks are retained.
 Active backups/patches, incomplete restores and attached external storage block
 deletion. Node configuration backups are taken before deletion. Failed deletion can be retried. Cluster upgrades, scaling,
-workload deployment, storage replication and Kubernetes datastore backups are
-not automated by this initial service.
+storage replication and Kubernetes datastore backups are
+not automated by this service.
 
 Every participating manager needs this DevOps release. Upgrade linked managers
 with the established `scripts/deploy.py --host ...` procedure before selecting
@@ -927,3 +927,131 @@ then removes its VMs and account. It retains networks for inspection/reuse.
 Failures retain VMs for diagnosis by default; `--resume-id` retries a retained
 acceptance deployment and `--cleanup-on-failure` opts into deletion on failure.
 Use only hosts with sufficient free CPU, memory and guest-expanded disk space.
+
+### Container deployment, Services and Ingress
+
+**DevOps → Manage cluster** includes Deployments, Services and Ingresses alongside
+nodes and pods. Operators can create a Deployment from a container image, set
+replicas and resource requests, update its image/replica count, and create
+Services and Ingress rules in an existing namespace. Deployment labels use
+`app: <deployment-name>`; Service selectors use the same label. The built-in
+Traefik ingress class is `traefik`. An optional TLS Secret must already exist in
+the namespace. Private registry credentials, environment Secrets and persistent
+volumes can be configured through kubectl. Creation never overwrites an existing
+object. Image updates and deletions verify the current UID; graphical editing
+and deletion are limited to objects labelled as managed by VM Manager. Deleting
+a Deployment retains related Services, Ingresses and storage.
+
+### Managed load balancer
+
+Open **DevOps → Manage load balancer** (`/#devops/load-balancer`). An administrator
+can **Launch load balancer** with one click. The app manages digest-pinned Caddy
+and HAProxy containers on this manager's host using the existing privileged
+local broker, without granting the web service access to the Docker socket.
+Docker must already be installed and running. Configuration changes are queued
+as audited tasks, validated before reload, and reconciled after restarts. Caddy's
+management API listens only on host loopback; HAProxy uses graceful master-worker
+reloads. Existing services using a requested port are retained and the task
+reports a conflict. The edge is one host, not a redundant VIP or HA pair.
+
+Caddy shares **443** using hostname routing. Three publication methods are
+available per hostname:
+
+- **Let’s Encrypt:** automatic issuance and renewal, with a contact email.
+  Configure public DNS and firewall/NAT forwarding so TCP 443 reaches this host.
+  TLS-ALPN validation avoids taking over an existing service on port 80.
+- **Supplied certificate:** paste a PEM certificate chain and matching private
+  key. Expired certificates and hostname mismatches are rejected. Edit the route
+  to replace the pair; leaving both fields blank retains the stored pair.
+- **Cloudflare Tunnel:** public TLS terminates at Cloudflare; one shared tunnel
+  carries traffic to the load balancer's loopback HTTP listener. Caddy makes all
+  application-routing decisions. Cloudflare's tunnel configuration has one
+  transport origin, without per-application routing rules.
+
+Routes can balance across IPv4:port HTTP upstreams or a Kubernetes HTTP Service
+with NodePorts. To publish cluster Ingress rules, target **kube-system/traefik,
+port 80**, and use the same hostname as the Ingress. The edge terminates HTTPS;
+Traefik handles the Kubernetes Ingress paths. Node addresses and NodePorts must
+be reachable from the edge host; macvlan guests cannot reach their own parent
+host, and host-to-guest macvlan isolation also needs a separately configured
+network path. Direct VM Manager access remains on **8443** for recovery.
+
+On the established installation, launch creates protected VM Manager routes for
+LAN HTTPS and the existing public hostname. It backs up the original tunnel
+configuration, verifies the proxy origin, switches the existing connector to
+Caddy, verifies public health, and restores the old origin if verification fails.
+The dedicated tunnel is reused; unrelated applications' tunnels are untouched.
+Do not stop the edge while its tunnel is pointing at it. To recover manually,
+restore `/var/lib/vm-manager-edge/tunnel-origin.json` to
+`/opt/carrtech/vm-manager/tunnel/config.yml` preserving its owner/mode, then restart
+`vm-manager-tunnel-1`. The LAN 8443 endpoint remains available throughout.
+
+For automatic tunnel/DNS management, use **Cloudflare connection** and supply
+an API **token**, account ID and zone ID. Scope it to Account Cloudflare Tunnel
+Edit and Zone DNS Edit/Zone Read. The app reuses the established tunnel, or
+creates one remotely managed tunnel on a new installation. Additional hostname
+CNAME records point to this same tunnel. Existing conflicting DNS records are
+never overwritten; deletion removes only DNS records created and tracked by
+this app. Existing records and the shared tunnel are retained. Token replacement
+is supported; the connected account cannot be changed under an existing tunnel.
+Cloudflare must have certificate coverage for the chosen hostname (deeper
+subdomains may require additional Cloudflare certificate coverage).
+
+**Connect cluster** enables the native Service controller. Create a Service with:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  type: LoadBalancer
+  loadBalancerClass: vmm.carrtech.dev/edge
+  selector:
+    app: web
+  ports:
+    - port: 8080
+      targetPort: 80
+      protocol: TCP
+```
+
+Services created in the graphical form select this class automatically. K3s's
+built-in ServiceLB remains responsible for its own classless Services. This
+controller discovers Services through their owning masters, configures HAProxy
+listeners to node IPs/NodePorts, and publishes the edge host's IPv4 address in
+`status.loadBalancer` only after successful application. It uses the authenticated
+VM Manager REST API and the Kubernetes API via the existing owned guest channel;
+no cluster-admin kubeconfig or new bearer secret is copied into the manager.
+Reconciliation runs every 15 seconds. Changes and deletion from ordinary kubectl
+clients are picked up automatically. A cluster connection requires the current
+release on its owning manager, including linked hosts.
+
+TCP external ports **1024–65535** are supported, with `externalTrafficPolicy:
+Cluster` and allocated NodePorts. UDP, source-IP preservation, allocation of
+additional public/VIP addresses and `allocateLoadBalancerNodePorts: false` are
+not supported. Ports 80, 443, 8443, 18080 and 20191 are reserved; port conflicts
+remain pending with an explanation on the load balancer screen. Share web HTTPS
+through hostname routes. Cluster disconnect removes TCP listeners and clears
+the controller's Service addresses; hostname routes remain separately managed.
+A temporarily unreachable cluster retains its last successful routes and reports
+a degraded state; confirmed resource deletion withdraws its listeners.
+
+The read-only inventory endpoint is `/api/devops/load-balancer`; launch,
+reconcile, routes, cluster bindings and Cloudflare settings are under that prefix.
+Mutations require an administrator, session/CSRF checks and the DevOps entitlement.
+Operators can author cluster workloads; viewers can inspect resources and edge
+status. Private keys and API/tunnel tokens are omitted from inventory and task
+logs. Settings are stored in the private manager database; runtime certificates,
+Caddy renewal state and the original tunnel configuration live in root-only
+`/var/lib/vm-manager-edge`. Deployment takes an additional private `.edge.tar.gz`
+backup alongside the SQLite backup. Keep both when recovering an edge installation.
+
+`scripts/edge_check.py` is an opt-in live check on the manager host, requiring
+`--state`, `--url`, `--certificate` and an explicitly selected `--cluster-id`.
+Use a Ready cluster with room for one disposable nginx pod and a reachable Traefik
+NodePort. Add `--launch` only when starting the managed edge and switching the
+established VM Manager tunnel is intended. It creates a temporary administrator
+and uniquely named Deployment, Service, Ingress and manual certificate route,
+verifies native TCP traffic and trusted HTTPS/SNI through the Ingress, and removes
+its resources/account. It restores the cluster's prior controller binding and
+retains the launched edge. `--port` selects a free TCP listener (default 18088).

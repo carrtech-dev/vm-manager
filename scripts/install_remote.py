@@ -140,6 +140,11 @@ if (state / "manager.sqlite3").exists():
     ):
         source.backup(destination)
     backup.chmod(0o600)
+    edge_state = Path('/var/lib/vm-manager-edge')
+    if edge_state.exists():
+        with tarfile.open(backup.with_suffix('.edge.tar.gz'), 'w:gz') as edge_archive:
+            edge_archive.add(edge_state, arcname='vm-manager-edge')
+        backup.with_suffix('.edge.tar.gz').chmod(0o600)
     if (storage_state / "blocks.json").exists():
         registry_backup = backup.with_suffix(".storage.json")
         shutil.copyfile(storage_state / "blocks.json", registry_backup)

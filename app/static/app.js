@@ -1,3 +1,4 @@
+import {mountEdgeScreen} from "./load-balancer.js";
 import {
   state,
   copyValue,
@@ -350,6 +351,7 @@ function render() {
   }
   const managedCluster = state.page === "devops" && state.devops?.clusters?.find(c => c.id === state.devopsCluster);
   // Preserve filters, pending confirmations and live terminals across app polling.
+  if (renderedClusterId === "load-balancer" && state.page === "devops" && state.devopsCluster === "load-balancer" && state.inventory.features?.devops?.enabled !== false && state.user.features?.devops?.enabled !== false) return;
   if (renderedClusterId && renderedClusterId === managedCluster?.id && managedCluster.status === "ready" &&
       state.inventory.features?.devops?.enabled !== false && state.user.features?.devops?.enabled !== false) return;
   stopClusterScreen();
@@ -377,6 +379,11 @@ function render() {
   if (clusterRoot && managedCluster) {
     disposeClusterScreen = mountClusterScreen(clusterRoot, managedCluster);
     renderedClusterId = managedCluster.id;
+  }
+  const edgeRoot = $("#edge-screen");
+  if (edgeRoot) {
+    disposeClusterScreen = mountEdgeScreen(edgeRoot);
+    renderedClusterId = "load-balancer";
   }
   refreshMonitoring();
   if ($("#resource-tree")) $("#resource-tree").scrollTop = treeScroll;

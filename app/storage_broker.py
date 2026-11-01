@@ -157,6 +157,9 @@ def delete(block_id):
 
 def dispatch(request):
     operation = request.get("operation")
+    if isinstance(operation, str) and operation.startswith('edge_'):
+        from . import edge_runtime
+        return edge_runtime.dispatch(operation, request)
     if operation == 'patch_guest':
         from . import patching
         return patching.dispatch(request)
@@ -203,7 +206,7 @@ class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         self.request.settimeout(200)
         try:
-            request = json.loads(self.rfile.readline(16385))
+            request = json.loads(self.rfile.readline(2 * 1024 * 1024 + 1))
             response = {"result": dispatch(request)}
         except (KeyError, ValueError, TypeError):
             response = {"error": "Invalid storage request"}

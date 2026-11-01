@@ -269,7 +269,7 @@ class Agent:
         try:
             result = subprocess.run(['incus', '--force-local', '--project', 'default', 'exec', spec.name,
                 '--mode=non-interactive', '--', '/usr/bin/python3', '-c', devops_guest.SCRIPT],
-                input=json.dumps(dict(body, action=action)), capture_output=True, text=True, timeout=20)
+                input=json.dumps(dict(body, action=action)), capture_output=True, text=True, timeout=100 if action == 'manage' else 20)
             if result.returncode:
                 raise HypervisorError('Guest agent command unavailable; inspect the node VM')
             return json.loads(result.stdout)
@@ -286,11 +286,14 @@ class Agent:
         record, spec, _ = self.owned(identity)
         if spec.role != 'master' or record['status'] != 'installed':
             raise HTTPException(409, 'An installed master is required')
-        result = self.guest(identity, 'manage', request=operation.model_dump())
+        body = operation.model_dump()
+        if operation.action == 'create':
+            body['manifest'] = kubernetes.kube_workloads.manifest(operation.resource, operation.name, operation.namespace, operation.workload)
+        result = self.guest(identity, 'manage', request=body)
         if result.get('error'):
             raise HTTPException(409, result['error'])
-        if operation.action != 'inventory':
-            self.store.audit(user['username'], 'devops.pod.' + operation.action if operation.resource == 'pod' else 'devops.node.' + operation.action,
+        if operation.action not in ('inventory', 'edge-inventory', 'edge-status'):
+            self.store.audit(user['username'], 'devops.' + operation.resource + '.' + operation.action,
                              spec.name, operation.namespace + '/' + operation.name)
         return result
 
@@ -445,7 +448,7 @@ class Manager:
             raise HypervisorError('Unknown DevOps request')
         host = self.cluster.host(host_id)
         try:
-            with httpx.Client(verify=self.cluster.tls(host), trust_env=False, timeout=30) as client:
+            with httpx.Client(verify=self.cluster.tls(host), trust_env=False, timeout=110 if path.endswith('/manage') else 30) as client:
                 response = client.request('GET' if body is None else 'POST', host['url'] + '/api/devops/agent/' + path,
                                           headers=self.cluster.headers(host, user), json=body)
                 if response.status_code == 404:

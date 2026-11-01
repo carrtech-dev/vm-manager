@@ -1,6 +1,8 @@
 """Narrow Kubernetes operations, routed through an owned K3s master."""
 from typing import Literal
 
+from . import kube_workloads
+
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, model_validator
 
@@ -8,18 +10,33 @@ NAME = r'^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$'
 
 
 class Operation(BaseModel):
-    action: Literal['inventory', 'describe', 'delete', 'restart', 'exec-check'] = 'inventory'
-    resource: Literal['node', 'pod'] = 'pod'
+    action: Literal['inventory', 'describe', 'delete', 'restart', 'exec-check', 'create', 'update', 'remove', 'edge-inventory', 'edge-status'] = 'inventory'
+    resource: Literal['node', 'pod', 'deployment', 'service', 'ingress'] = 'pod'
     namespace: str = Field(default='default', min_length=1, max_length=63, pattern=r'^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$')
     name: str = Field(default='', max_length=253, pattern=r'^$|' + NAME)
     uid: str = Field(default='', max_length=128, pattern=r'^[a-zA-Z0-9-]*$')
     container: str = Field(default='', max_length=63, pattern=r'^$|' + NAME)
     shell: Literal['/bin/sh', '/bin/bash'] = '/bin/sh'
     confirm_name: str = ''
+    workload: kube_workloads.Workload | None = None
+    statuses: list[kube_workloads.ServiceStatus] = Field(default_factory=list, max_length=200)
 
     @model_validator(mode='after')
     def valid_target(self):
-        if self.action != 'inventory' and not self.name:
+        if self.action in ('create', 'update', 'remove'):
+            if self.resource not in ('deployment', 'service', 'ingress') or len(self.name) > 63:
+                raise ValueError('Choose a Deployment, Service or Ingress with a name of up to 63 characters')
+            if self.action != 'create' and not self.uid:
+                raise ValueError('Select the current resource UID')
+            if self.action == 'remove' and self.confirm_name != self.name:
+                raise ValueError('Type the resource name to confirm')
+            if self.action in ('create', 'update'):
+                if not self.workload:
+                    raise ValueError('Workload settings are required')
+                kube_workloads.manifest(self.resource, self.name, self.namespace, self.workload)
+            if self.action == 'update' and self.resource != 'deployment':
+                raise ValueError('Only Deployment updates are supported')
+        if self.action not in ('inventory', 'edge-inventory', 'edge-status') and not self.name:
             raise ValueError('Select a resource')
         if self.action in ('delete', 'restart', 'exec-check'):
             if self.resource != 'pod' or not self.uid:
@@ -59,10 +76,16 @@ def owner(p):
 def restartable(p):
     return owner(p).get('kind') in ('ReplicaSet', 'StatefulSet', 'DaemonSet', 'ReplicationController') and not p['metadata'].get('annotations', {}).get('kubernetes.io/config.mirror')
 try:
-    if r['action'] == 'inventory':
+    if r['action'] == 'edge-inventory':
+        result = workload_inventory()
+    elif r['action'] == 'edge-status':
+        result = edge_status()
+    elif r['action'] in ('create', 'update', 'remove'):
+        result = workload_mutation()
+    elif r['action'] == 'inventory':
         nodes = get('nodes')['items']
         pods = json.loads(kube(['get', 'pods', '--all-namespaces', '-o', 'json']))['items']
-        result = {'nodes': [], 'pods': []}
+        result = dict(workload_inventory(), nodes=[], pods=[])
         for n in nodes:
             m, s = n['metadata'], n.get('status', {})
             ready = next((c['status'] for c in s.get('conditions', []) if c['type'] == 'Ready'), 'Unknown')
@@ -86,7 +109,7 @@ try:
                 'restartable': bool(restartable(p) and not m.get('deletionTimestamp')),
                 'deletable': not bool(m.get('annotations', {}).get('kubernetes.io/config.mirror') or m.get('deletionTimestamp'))})
     elif r['action'] == 'describe':
-        result = {'text': kube(['describe', r['resource'], r['name']] + (['--namespace', r['namespace']] if r['resource'] == 'pod' else []))}
+        result = {'text': kube(['describe', r['resource'], r['name']] + (['--namespace', r['namespace']] if r['resource'] != 'node' else []))}
     else:
         p = get('pod', r['name'], r['namespace'])
         if p['metadata']['uid'] != r['uid']:
@@ -109,3 +132,5 @@ try:
 except (ValueError, subprocess.TimeoutExpired) as exc:
     print(json.dumps({'error': str(exc)}))
 '''
+
+GUEST = GUEST.replace('try:\n    if r[', kube_workloads.GUEST + '\ntry:\n    if r[')

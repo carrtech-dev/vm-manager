@@ -50,7 +50,7 @@ from . import guest_terminal
 from . import backups
 from . import templates
 from . import devops
-from . import features, kubernetes
+from . import features, kubernetes, edge
 from . import cluster as federation
 from . import patching
 from .power import PowerInterrupted, PowerRequests
@@ -69,6 +69,7 @@ cluster = federation.Cluster(store)
 backups.initialize(store)
 patching.initialize(store)
 devops.initialize(store)
+edge.initialize(store)
 incus, libvirt = Incus(), Libvirt()
 history = monitoring.History(store)
 snapshots = Snapshots(store, incus, libvirt)
@@ -95,14 +96,22 @@ async def backup_lifespan(application):
             except Exception:
                 logging.exception('Monitoring collection failed')
             await asyncio.sleep(max(0, 10 - (time.monotonic() - started)))
+    async def edge_loop():
+        while True:
+            try:
+                await asyncio.to_thread(edge_manager.tick)
+            except Exception:
+                logging.exception('Load balancer reconciliation failed')
+            await asyncio.sleep(15)
+    edge_worker = asyncio.create_task(edge_loop())
     scheduler = asyncio.create_task(loop())
     monitor = asyncio.create_task(monitor_loop())
     try:
         yield
     finally:
-        for worker in (scheduler, monitor):
+        for worker in (scheduler, monitor, edge_worker):
             worker.cancel()
-        await asyncio.gather(scheduler, monitor, return_exceptions=True)
+        await asyncio.gather(scheduler, monitor, edge_worker, return_exceptions=True)
 
 
 app = FastAPI(
@@ -216,6 +225,7 @@ patch_manager = patching.Manager(store, lambda *args, **kwargs: task(*args, **kw
 devops_agent = devops.Agent(store, incus, lambda *args, **kwargs: task(*args, **kwargs),
                             remove=lambda vm_name, actor: remove_devops_vm(vm_name, actor))
 devops_manager = devops.Manager(store, devops_agent, cluster, lambda *args, **kwargs: task(*args, **kwargs))
+edge_manager = edge.Manager(store, devops_manager, lambda *args, **kwargs: task(*args, **kwargs))
 
 
 def session(request):
@@ -2609,6 +2619,41 @@ def delete_template(template_id: str, body: Confirm, user=Depends(require('opera
                 resources={'template:' + template_id})
 
 
+@app.get('/api/devops/load-balancer')
+def edge_catalog(user=Depends(require())):
+    return edge_manager.catalog()
+
+
+@app.post('/api/devops/load-balancer/launch')
+def edge_launch(user=Depends(require('users'))):
+    return edge_manager.launch(user)
+
+
+@app.post('/api/devops/load-balancer/reconcile')
+def edge_reconcile(user=Depends(require('users'))):
+    return edge_manager.queue(user, lambda settings: None)
+
+
+@app.post('/api/devops/load-balancer/routes')
+def edge_route(body: edge.Route, user=Depends(require('users'))):
+    return edge_manager.route(user, body)
+
+
+@app.delete('/api/devops/load-balancer/routes/{identity}')
+def edge_remove_route(identity: str, body: dict, user=Depends(require('users'))):
+    return edge_manager.remove(user, identity, body.get('confirm_name'))
+
+
+@app.put('/api/devops/load-balancer/clusters/{identity}')
+def edge_bind(identity: str, body: edge.Binding, user=Depends(require('users'))):
+    return edge_manager.bind(user, identity, body.enabled)
+
+
+@app.put('/api/devops/load-balancer/cloudflare')
+def edge_cloudflare(body: edge.Cloudflare, user=Depends(require('users'))):
+    return edge_manager.cloudflare(user, body)
+
+
 @app.get('/api/devops/options')
 def devops_options(user=Depends(require())):
     return devops_manager.options(user)
@@ -2656,7 +2701,7 @@ def devops_resources(identity: str, user=Depends(require())):
 
 @app.post('/api/devops/clusters/{identity}/manage')
 def devops_manage(identity: str, body: kubernetes.Operation, user=Depends(require())):
-    if body.action in ('delete', 'restart', 'exec-check') and 'operate' not in ROLES.get(user['role'], set()):
+    if body.action not in ('inventory', 'describe', 'edge-inventory') and 'operate' not in ROLES.get(user['role'], set()):
         raise HTTPException(403, 'Your role does not permit this action')
     return kubernetes.manage(devops_manager, store, identity, user, body)
 
@@ -2703,7 +2748,7 @@ def devops_agent_read(identity: str, action: str, user=Depends(require('operate'
 
 @app.post('/api/devops/agent/{identity}/manage')
 def devops_agent_manage(identity: str, body: kubernetes.Operation, user=Depends(require())):
-    if body.action in ('delete', 'restart', 'exec-check') and 'operate' not in ROLES.get(user['role'], set()):
+    if body.action not in ('inventory', 'describe', 'edge-inventory') and 'operate' not in ROLES.get(user['role'], set()):
         raise HTTPException(403, 'Your role does not permit this action')
     return devops_agent.manage(identity, user, body)
 
