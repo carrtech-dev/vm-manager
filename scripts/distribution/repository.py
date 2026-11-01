@@ -80,7 +80,8 @@ def main():
         '-o', 'APT::FTPArchive::Release::Valid-Until=' + valid,
         'release', 'dists/stable'], cwd=apt)
     release_path = apt / 'dists/stable/Release'
-    release_path.write_bytes(release)
+    # apt-ftparchive versions do not all emit Valid-Until from configuration.
+    release_path.write_bytes(("Valid-Until: " + valid + "\n").encode() + release)
     sign(args.signing_key, release_path, release_path.with_name('InRelease'), clearsign=True)
     sign(args.signing_key, release_path, release_path.with_name('Release.gpg'))
     run('createrepo_c', '--update', '--retain-old-md', '10', str(rpm))

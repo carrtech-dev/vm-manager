@@ -133,7 +133,7 @@ docker run --rm --entrypoint python3 -e GNUPGHOME=/keys \
 ```
 
 Always run one publisher at a time. A repository retains old packages and
-content-addressed metadata so active update clients continue to work. Metadata
+content-addressed metadata so active update clients continue to work. APT metadata
 expires after 90 days; refresh/sign/publish it before expiry even if the app has
 not changed (use an empty artifacts directory). Packages are immutable. New files
 are uploaded before APT's InRelease. DNF clients can need a retry during the brief
