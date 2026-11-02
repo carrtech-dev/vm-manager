@@ -20,7 +20,7 @@ import urllib.request
 import psutil
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .hypervisor import HypervisorError, Incus, Libvirt, name
+from .hypervisor import HypervisorError, Incus, name
 
 RECORD = Path('/var/lib/vm-manager-storage/setup.json')
 CONFIG = Path('/etc/vm-manager/vm-manager.conf')
@@ -163,7 +163,7 @@ def discover():
     except Exception:
         pass
     try:
-        Libvirt().cli('list', '--all', '--name')
+        command('virsh', '-c', 'qemu:///system', 'list', '--all', '--name', timeout=5)
         result['libvirt'] = True
     except Exception:
         pass
