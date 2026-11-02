@@ -56,7 +56,10 @@ export function setupView(status, current, step, admin = true) {
 export function renderFirstRun() {
   if (!state.setup?.required && !state.setupScreen) return false;
   const root = document.querySelector('#app');
+  const changedStep = root.dataset.setupStep !== phase;
+  root.dataset.setupStep = phase;
   root.innerHTML = setupView(state.setup, draft, phase, can('admin'));
+  if (changedStep) root.querySelector('.setup-screen').scrollIntoView({block: 'start'});
   const error = message => { const target = root.querySelector('#setup-error'); target.textContent = message; target.hidden = false; };
   root.querySelector('#setup-continue')?.addEventListener('click', event => {
     event.preventDefault();
