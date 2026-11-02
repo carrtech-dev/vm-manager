@@ -89,7 +89,7 @@ def test_cluster_setup_skips_hypervisor_install_and_survives_restart(tmp_path, m
     monkeypatch.setattr(setup, 'install_components', lambda p: pytest.fail('cluster mode must not install hypervisors'))
     monkeypatch.setattr(setup, 'provision', lambda p: pytest.fail('cluster mode must not create resources'))
     monkeypatch.setattr(setup, 'configure', lambda p: None)
-    monkeypatch.setattr(setup, 'command', lambda *a: '')
+    monkeypatch.setattr(setup, 'command', lambda *a, **kw: '')
     setup.save({'status': 'running', 'plan': {'mode': 'cluster'}})
     setup.execute(setup.SetupPlan(mode='cluster', confirmed=True))
     assert setup.status()['status'] == 'completed'
@@ -132,3 +132,88 @@ def test_incompatible_hypervisor_with_existing_instances_is_preserved(monkeypatc
     monkeypatch.setattr(setup, 'command', lambda *args: pytest.fail('existing hypervisor must not be changed'))
     with pytest.raises(HypervisorError, match='will not replace it or migrate its database'):
         setup.install_components(plan())
+
+
+def test_start_uses_dedicated_unit_and_retains_recovery_intent(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup, 'RECORD', tmp_path / 'setup.json')
+    monkeypatch.setattr(setup, 'worker_active', lambda: False)
+    monkeypatch.setattr(setup, 'validate_host', lambda p: None)
+    monkeypatch.setattr(setup, 'failed_scriptlet_packages', lambda previous: ['fontconfig'])
+    calls = []
+    monkeypatch.setattr(setup, 'command', lambda *args, **kw: calls.append(args))
+    result = setup.start(plan().model_dump())
+    assert result['status'] == 'running'
+    assert calls == [('systemctl', 'start', 'vm-manager-setup.service')]
+    assert setup.load()['repair_packages'] == ['fontconfig']
+    assert setup.load()['plan']['confirmed'] is True
+    monkeypatch.setattr(setup, 'worker_active', lambda: True)
+    with pytest.raises(HypervisorError, match='already running'):
+        setup.start(plan().model_dump())
+
+
+def test_status_reloads_worker_result_before_marking_interrupted(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup, 'RECORD', tmp_path / 'setup.json')
+    setup.save({'status': 'running'})
+    def finished():
+        setup.save({'status': 'completed'})
+        return False
+    monkeypatch.setattr(setup, 'worker_active', finished)
+    assert setup.status()['status'] == 'completed'
+    assert setup.load()['status'] == 'completed'
+
+
+def test_worker_start_failure_remains_recoverable(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup, 'RECORD', tmp_path / 'setup.json')
+    monkeypatch.setattr(setup, 'worker_active', lambda: False)
+    monkeypatch.setattr(setup, 'validate_host', lambda p: None)
+    def fail(*args, **kwargs):
+        raise HypervisorError('Unit could not be started')
+    monkeypatch.setattr(setup, 'command', fail)
+    with pytest.raises(HypervisorError, match='Unit could not'):
+        setup.start(plan().model_dump())
+    assert setup.load()['status'] == 'failed'
+    assert setup.load()['plan']['network_address'] == '10.210.0.1/24'
+
+
+def test_scriptlet_recovery_is_bounded_to_failed_setup_and_safe_names(tmp_path, monkeypatch):
+    import os
+    monkeypatch.setattr(setup, 'RECORD', tmp_path / 'setup.json')
+    monkeypatch.setattr(setup, 'DNF_LOG', tmp_path / 'dnf.rpm.log')
+    record = {'status': 'failed', 'started': 1793628000, 'error': 'dnf failed: Transaction failed'}  # 14:00 UTC
+    setup.save(record)
+    os.utime(setup.RECORD, (1793628060, 1793628060))
+    setup.DNF_LOG.write_text(
+        '2026-11-02T13:59:59+0000 ERROR Error in POSTIN scriptlet in rpm package unrelated-before\n'
+        '2026-11-02T14:00:10+0000 ERROR Error in POSTIN scriptlet in rpm package fontconfig\n'
+        '2026-11-02T14:00:20+0000 ERROR Error in PREIN scriptlet in rpm package incus\n'
+        '2026-11-02T14:00:25+0000 ERROR Error in POSTIN scriptlet in rpm package --bad\n'
+        '2026-11-02T14:00:30+0000 ERROR Error in POSTIN scriptlet in rpm package fontconfig;evil\n'
+        '2026-11-02T14:01:01+0000 ERROR Error in POSTIN scriptlet in rpm package unrelated-after\n')
+    assert setup.failed_scriptlet_packages(record) == ['fontconfig', 'incus']
+
+
+def test_retry_reinstalls_failed_post_scripts_and_installs_missing_pre_scripts_normally(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup, 'RECORD', tmp_path / 'setup.json')
+    setup.save({'status': 'running', 'repair_packages': ['fontconfig', 'incus']})
+    calls = []
+    def command(*args, **kwargs):
+        calls.append(args)
+        return 'fontconfig\nother\n' if args[0] == 'rpm' else ''
+    monkeypatch.setattr(setup, 'command', command)
+    setup.repair_dependencies()
+    assert calls[-1] == ('dnf', '-y', 'reinstall', 'fontconfig')
+    assert setup.load()['repair_packages'] == []
+    assert setup.load()['repaired_packages'] == ['fontconfig']
+
+
+def test_failed_repair_keeps_pending_packages_for_next_retry(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup, 'RECORD', tmp_path / 'setup.json')
+    setup.save({'status': 'running', 'repair_packages': ['fontconfig']})
+    def command(*args, **kwargs):
+        if args[0] == 'rpm':
+            return 'fontconfig\n'
+        raise HypervisorError('repository temporarily unavailable')
+    monkeypatch.setattr(setup, 'command', command)
+    with pytest.raises(HypervisorError, match='temporarily unavailable'):
+        setup.repair_dependencies()
+    assert setup.load()['repair_packages'] == ['fontconfig']

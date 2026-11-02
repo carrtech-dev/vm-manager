@@ -45,6 +45,7 @@ def stage(root, version, revision, public_key, url, kind):
                            ('vm-manager', '/usr/bin/vm-manager'),
                            ('ufw-profile', '/etc/ufw/applications.d/vm-manager'),
                            ('vm-manager.service', '/usr/lib/systemd/system/vm-manager.service'),
+                           ('vm-manager-setup.service', '/usr/lib/systemd/system/vm-manager-setup.service'),
                            ('vm-manager.conf', '/etc/vm-manager/vm-manager.conf')]:
         put(root, target, (ROOT / 'packaging' / source).read_text(), 0o755 if target.endswith('.py') or target == '/usr/bin/vm-manager' else 0o644)
     broker = (ROOT / 'scripts/vm-manager-storage.service').read_text().replace(
@@ -82,7 +83,7 @@ if test -f /usr/libexec/vm-manager-maintain.py; then
 fi
 '''
 STOP = '''if test -d /run/systemd/system; then
-    systemctl stop vm-manager.service vm-manager-storage.service
+    systemctl stop vm-manager-setup.service vm-manager.service vm-manager-storage.service
     systemctl disable vm-manager.service vm-manager-storage.service
 fi
 /usr/bin/python3 /usr/libexec/vm-manager-maintain.py remove
@@ -133,6 +134,7 @@ Description: CarrTech self-hosted virtual machine manager
         spec = temp / 'vm-manager.spec'
         files = ['/usr/lib/vm-manager', '/usr/libexec/vm-manager-maintain.py', '/usr/libexec/vm-manager-serve.py',
                  '/usr/lib/systemd/system/vm-manager.service', '/usr/lib/systemd/system/vm-manager-storage.service',
+                 '/usr/lib/systemd/system/vm-manager-setup.service',
                  '/usr/libexec/vm_manager_access.py', '/usr/bin/vm-manager',
                  '%config(noreplace) /etc/ufw/applications.d/vm-manager',
                  '/usr/share/keyrings/vm-manager.asc', '/usr/share/doc/vm-manager',

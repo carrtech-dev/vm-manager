@@ -40,6 +40,8 @@ def pre_upgrade():
     if Path('/opt/carrtech/vm-manager/current').exists():
         raise SystemExit('Source deployment detected. Migrate explicitly before installing packages.')
     if systemd():
+        if subprocess.run(['systemctl', 'is-active', '--quiet', 'vm-manager-setup.service']).returncode == 0:
+            raise SystemExit('Host setup is running; wait for it to finish before upgrading VM Manager')
         run('systemctl', 'stop', 'vm-manager.service', 'vm-manager-storage.service')
     database = STATE / 'manager.sqlite3'
     if database.exists():

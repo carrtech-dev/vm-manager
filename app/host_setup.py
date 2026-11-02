@@ -1,12 +1,16 @@
-"""First-run host provisioning, executed only by the privileged local broker.
+"""First-run host provisioning, started by the privileged local broker in a dedicated system service.
 
 The HTTP process supplies a validated plan, never shell commands, repository URLs
 or filesystem paths. Intent and progress survive browser disconnects and restarts.
 """
+import datetime
+import fcntl
 import grp
 import ipaddress
 import json
+import logging
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -40,7 +44,8 @@ priority=50
 includepkgs=incus* cowsql* raft*
 '''
 _lock = threading.RLock()
-_active = False
+WORKER_UNIT = 'vm-manager-setup.service'
+DNF_LOG = Path('/var/log/dnf.rpm.log')
 
 
 class SetupPlan(BaseModel):
@@ -104,7 +109,12 @@ def command(*args, timeout=1800):
                             env={**os.environ, 'DEBIAN_FRONTEND': 'noninteractive',
                                  'NEEDRESTART_MODE': 'l', 'LC_ALL': 'C'})
     if result.returncode:
-        raise HypervisorError(f'{args[0]} failed: ' + (result.stderr or result.stdout)[-2500:])
+        output = result.stderr or result.stdout
+        logging.error('Host setup command %s failed:\n%s\n%s', args[0], result.stdout, result.stderr)
+        cause = next((line.strip() for line in output.splitlines()
+                      if 'failed to exec scriptlet interpreter' in line), '')
+        detail = cause + '\nSee journalctl -u vm-manager-setup.service for the full package error.' if cause else output[-2500:]
+        raise HypervisorError(f'{args[0]} failed: ' + detail)
     return result.stdout.strip()
 
 
@@ -173,9 +183,13 @@ def discover():
 def status():
     with _lock:
         record = load()
-        if record['status'] == 'running' and not _active:
-            record.update(status='failed', error='Setup was interrupted. Review the saved plan and retry; existing resources are retained.')
-            save(record)
+        if record['status'] == 'running' and not worker_active():
+            # The worker may have finished between reading the record and checking
+            # its unit. Never overwrite its final success/failure with stale state.
+            record = load()
+            if record['status'] == 'running':
+                record.update(status='failed', error='Setup was interrupted. Review the saved plan and retry; existing resources are retained.')
+                save(record)
         result = dict(record, required=record['status'] != 'completed')
     if result['required'] and result['status'] != 'running':
         values = access().settings()
@@ -346,13 +360,13 @@ def configure(plan):
 
 
 def execute(plan):
-    global _active
     try:
         progress('Checking host addresses and the confirmed setup plan')
         validate_host(plan)
         if plan.mode == 'local':
             if not Path('/dev/kvm').exists():
                 raise HypervisorError('KVM is unavailable. Enable hardware or nested virtualization before configuring local hosting, or choose cluster management only.')
+            repair_dependencies()
             install_components(plan)
             validate_host(plan)  # Package services can introduce additional networks.
             provision(plan)
@@ -370,24 +384,98 @@ def execute(plan):
         with _lock:
             record = load()
             step = (record.get('steps') or [{'message': 'Setup'}])[-1]['message']
-            record.update(status='failed', error=(step + ': ' + str(exc))[-3000:])
+            record.update(status='failed', failed=time.time(), error=(step + ': ' + str(exc))[-3000:])
             save(record)
-    finally:
-        with _lock:
-            _active = False
+
+
+def worker_active():
+    state = command('systemctl', 'show', WORKER_UNIT, '--property=ActiveState', '--value', timeout=5)
+    return state in ('active', 'activating', 'reloading', 'deactivating')
+
+
+def failed_scriptlet_packages(record):
+    """Recover only failures in this setup attempt, from the root-owned RPM log.
+
+    DNF records failed POST scripts as installed, so another install alone does
+    not finish their configuration. Old 1.0.3 records have no failure timestamp;
+    their last atomic write supplies that upper bound. No package names come
+    from the browser or from arbitrary text in the error banner.
+    """
+    packages = set(record.get('repair_packages', []))
+    if record.get('status') != 'failed' or 'dnf failed' not in record.get('error', '') or not DNF_LOG.exists():
+        return sorted(packages)
+    start, end = record.get('started', 0), record.get('failed', RECORD.stat().st_mtime)
+    with DNF_LOG.open('rb') as stream:
+        stream.seek(max(0, DNF_LOG.stat().st_size - 8 * 1024 * 1024))
+        lines = stream.read().decode(errors='replace').splitlines()
+    for line in lines:
+        stamp, _, message = line.partition(' ')
+        if 'ERROR Error in ' not in message:
+            continue
+        try:
+            at = datetime.datetime.fromisoformat(stamp).timestamp()
+        except ValueError:
+            continue
+        match = re.search(r'ERROR Error in .* scriptlet in rpm package ([A-Za-z0-9][A-Za-z0-9+_.-]*)$', message)
+        if start <= at <= end and match:
+            packages.add(match[1])
+    return sorted(packages)
+
+
+def repair_dependencies():
+    record = load()
+    packages = record.get('repair_packages', [])
+    if not packages:
+        return
+    if (not isinstance(packages, list) or len(packages) > 1000 or
+            any(not isinstance(p, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9+_.-]*', p) for p in packages)):
+        raise HypervisorError('Invalid saved package recovery state')
+    installed = set(command('rpm', '-qa', '--queryformat', '%{NAME}\n').splitlines())
+    repair = sorted(set(packages) & installed)
+    if repair:
+        progress(f'Repairing {len(repair)} packages left partly configured by the previous failed installation')
+        command('dnf', '-y', 'reinstall', *repair)
+    with _lock:
+        record = load()
+        record.update(repaired_packages=repair, repair_packages=[])
+        save(record)
 
 
 def start(body):
-    global _active
     plan = SetupPlan.model_validate(body)
     with _lock:
-        if _active or load()['status'] == 'completed':
+        previous = load()
+        if previous['status'] == 'completed' or worker_active():
             raise HypervisorError('Host setup is already running or completed')
         validate_host(plan)
-        save({'status': 'running', 'plan': plan.model_dump(), 'steps': [], 'started': time.time()})
-        _active = True
-        threading.Thread(target=execute, args=(plan,), daemon=True).start()
+        recovery = failed_scriptlet_packages(previous)
+        save({'status': 'running', 'plan': plan.model_dump(), 'steps': [],
+              'started': time.time(), 'repair_packages': recovery})
+        try:
+            # Type=exec returns once the independent worker has started. Package
+            # scripts must not inherit the broker's NoNewPrivileges restriction.
+            command('systemctl', 'start', WORKER_UNIT, timeout=30)
+        except Exception as exc:
+            record = load()
+            record.update(status='failed', error='Could not start host setup worker: ' + str(exc))
+            save(record)
+            raise
     return {'status': 'running', 'required': True}
+
+
+def run_pending():
+    if os.geteuid() != 0 or os.environ.get('VM_MANAGER_FIRST_RUN') != '1':
+        raise HypervisorError('Host setup worker requires root and the native package service')
+    # Keep concurrent direct worker invocations from applying the same plan.
+    with RECORD.with_suffix('.worker.lock').open('a') as lease:
+        os.chmod(lease.name, 0o600)
+        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        record = load()
+        if record['status'] != 'running':
+            raise HypervisorError('No confirmed setup plan is waiting to run')
+        plan = SetupPlan.model_validate(record['plan'])
+        execute(plan)
+    return load()['status'] == 'completed'
 
 
 def dispatch(operation, body=None):
@@ -398,3 +486,9 @@ def dispatch(operation, body=None):
     if operation == 'setup_start':
         return start(body)
     raise HypervisorError('Unsupported setup operation')
+
+
+if __name__ == '__main__':
+    if sys.argv[1:] != ['--run']:
+        raise SystemExit('Host setup is started through the native package setup service')
+    raise SystemExit(0 if run_pending() else 1)

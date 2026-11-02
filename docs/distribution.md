@@ -151,10 +151,23 @@ manager that needs to manage the other's resources. A private NAT VM network is
 sufficient for single-host use. Cross-host workloads need mutually routed VM
 subnets or a shared network; the wizard does not configure upstream routers.
 
-The main service runs as `vm-manager`; the storage/setup broker runs as root
-through its local group-restricted socket. Host provisioning accepts a fixed,
-validated setup plan from a local administrator with CSRF protection. Cluster
-credentials cannot run host setup, and the web service itself remains unprivileged.
+The main service runs as `vm-manager`; the storage broker runs as root through
+its local group-restricted socket. It validates the administrator's confirmed
+setup plan and starts `vm-manager-setup.service`, a separate on-demand worker.
+The web service and storage broker retain their existing restrictions. The worker
+uses the normal host package-manager context so RPM can perform the SELinux
+transitions required by installation scripts. SELinux stays enforcing. Host setup
+requires a local administrator with CSRF protection; cluster credentials cannot
+run it. Restarting the web service or storage broker does not cancel the worker.
+
+If setup failed on 1.0.3 with scriptlet errors such as `/bin/sh: Operation not
+permitted`, upgrade VM Manager and select **Review and retry**. Keep the saved
+setup record and DNF logs. Retry identifies scriptlet failures belonging to the
+previous attempt, reinstalls the affected packages that DNF already marked as
+installed, and installs missing dependencies normally. It preserves accounts, TLS,
+VM data and the selected network settings. Do not delete the application data or
+disable SELinux to work around this error. Detailed worker output is available
+with `sudo journalctl -u vm-manager-setup.service`.
 
 ## Lifecycle and recovery
 
@@ -274,8 +287,14 @@ disposable supported host. Its `prepare` phase verifies HTTPS login and changes
 the temporary admin password, `verify-upgrade` verifies preservation after an
 APT/DNF upgrade, and `verify-removed` verifies uninstall retention. It deliberately
 requires `/root/vmm-distribution-disposable` and must never run on production data.
+Rocky/AlmaLinux acceptance requires **SELinux enforcing**; disabled/permissive
+cloud images must be prepared and rebooted with enforcing SELinux before testing.
+`verify-setup` also checks that the broker retains `NoNewPrivileges=yes` while
+the isolated package setup worker uses the normal host execution context.
 
 Version 1.0.2 adds automatic host firewall access, install-time browser URLs,
 `vm-manager status`, and concise monitoring notices when a hypervisor is unavailable.
 
 Version 1.0.3 adds the first-sign-in host setup wizard, confirmed VM gateway/subnet and host settings, hypervisor installation, and durable setup progress/retry.
+
+Version 1.0.4 runs host setup in a dedicated system service compatible with enforcing SELinux, and repairs packages left partly configured by a failed 1.0.3 setup.

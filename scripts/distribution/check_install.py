@@ -13,6 +13,7 @@ import hashlib
 import http.cookiejar
 import json
 import os
+import platform
 from pathlib import Path
 import pwd
 import secrets
@@ -52,6 +53,8 @@ def main():
     if os.geteuid() or not marker.exists() or marker.stat().st_uid != 0:
         raise SystemExit('Requires root and explicit disposable-host marker; NEVER use production data')
     os.umask(0o077)
+    if platform.freedesktop_os_release().get('ID') in ('rocky', 'almalinux'):
+        assert subprocess.check_output(['getenforce'], text=True).strip() == 'Enforcing', 'RPM acceptance requires SELinux enforcing; disabled/permissive testing cannot validate package scriptlets'
     if args.phase == 'prepare':
         assert not RECORD.exists(), 'Already prepared; do not reset account data'
         credentials = STATE / 'initial-admin.txt'
@@ -80,6 +83,8 @@ def main():
             request = client()
             login = request('/api/login', {'username': 'admin', 'password': record['password']})
             setup = request('/api/setup')
+            assert subprocess.check_output(['systemctl', 'show', 'vm-manager-storage', '--property=NoNewPrivileges', '--value'], text=True).strip() == 'yes'
+            assert subprocess.check_output(['systemctl', 'show', 'vm-manager-setup', '--property=NoNewPrivileges', '--value'], text=True).strip() == 'no'
             assert setup['status'] == 'completed' and not setup['required'], setup
             inventory = request('/api/inventory')
             assert not inventory['warnings'], inventory['warnings']

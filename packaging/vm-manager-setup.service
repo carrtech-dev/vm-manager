@@ -1,0 +1,17 @@
+[Unit]
+Description=CarrTech VM Manager first-run host setup
+After=network-online.target
+
+[Service]
+Type=exec
+User=root
+Group=root
+WorkingDirectory=/usr/lib/vm-manager
+Environment=VM_MANAGER_FIRST_RUN=1
+ExecStart=/var/lib/vm-manager-runtime/venv/bin/python -m app.host_setup --run
+UMask=0077
+# RPM scriptlets must perform normal SELinux domain transitions. This worker
+# accepts only the validated plan in the root-owned setup record; it has no IPC
+# listener and is started on demand by the restricted storage broker.
+NoNewPrivileges=no
+TimeoutStopSec=30
