@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field, field_validator
 from .hypervisor import Incus, Libvirt, HypervisorError, name, run, bytes_size
 from .security import Store, ROLES, hash_password, verify_password, token_hash
 from . import monitoring
+from . import host_setup
 from . import organization
 from . import storage
 from . import external_storage
@@ -335,6 +336,27 @@ def health():
     }
 
 
+def setup_state():
+    if os.environ.get('VM_MANAGER_FIRST_RUN') != '1':
+        return {'required': False}
+    return storage.broker('setup_status')
+
+
+@app.get('/api/setup')
+def get_setup(user=Depends(require())):
+    return setup_state()
+
+
+@app.post('/api/setup')
+def start_setup(body: host_setup.SetupPlan, user=Depends(require('users'))):
+    if user.get('peer') or os.environ.get('VM_MANAGER_FIRST_RUN') != '1':
+        raise HTTPException(403, 'Setup requires a local administrator on a native package installation')
+    result = storage.broker('setup_start', body=body.model_dump())
+    store.audit(user['username'], 'host.setup.started', body.mode)
+    invalidate()
+    return result
+
+
 @app.post("/api/login")
 def login(body: Login, request: Request, response: Response):
     peer = request.client.host
@@ -425,6 +447,8 @@ def inventory():
         if cache["data"] and time.monotonic() - cache["at"] < 5:
             return cache["data"]
         vms, nets, pools, isos, warnings = [], [], [], [], []
+        setup = setup_state() if os.environ.get('VM_MANAGER_FIRST_RUN') == '1' else {}
+        plan = setup.get('plan', {}) if setup.get('status') == 'completed' else {}
         for label, fn, destination in [
             ("Incus VMs", incus.vms, vms),
             ("libvirt VMs", libvirt.vms, vms),
@@ -433,6 +457,8 @@ def inventory():
             ("Storage", incus.pools, pools),
             ("ISO volumes", incus.isos, isos),
         ]:
+            if setup.get('required') or plan.get('mode') == 'cluster' or (plan.get('mode') == 'local' and not plan.get('libvirt', True) and label.startswith('libvirt')):
+                continue
             try:
                 destination.extend(fn())
             except Exception as exc:
@@ -1783,8 +1809,12 @@ def monitor_tick():
                     source='Host CPU · all logical CPUs'),
                dict(metric='memory', label='Memory usage', value=memory.total - memory.available,
                     total=memory.total, source='Host memory · excludes available cache')]
+    setup = setup_state() if os.environ.get('VM_MANAGER_FIRST_RUN') == '1' else {}
+    plan = setup.get('plan', {})
+    incus_enabled = not setup.get('required') and plan.get('mode') != 'cluster'
+    libvirt_enabled = incus_enabled and plan.get('libvirt', True)
     try:
-        pools = [p for p in monitor_incus.pools() if not p['name'].startswith('vmm-block-')]
+        pools = [p for p in (monitor_incus.pools() if incus_enabled else []) if not p['name'].startswith('vmm-block-')]
         spaces = [p.get('resources', {}).get('space', {}) for p in pools]
         complete = bool(spaces) and all(p.get('total', 0) > 0 and 'used' in p for p in spaces)
         samples.append(dict(metric='disk', label='Disk space',
@@ -1796,13 +1826,15 @@ def monitor_tick():
     history.write('host', samples)
     vms = []
     for label, driver in (('Incus inventory', monitor_incus), ('libvirt inventory', monitor_libvirt)):
+        if not (incus_enabled if driver is monitor_incus else libvirt_enabled):
+            continue
         try:
             vms.extend(driver.vms())
             monitor_backend_recovered(label)
         except Exception as error:
             monitor_backend_failed(label, error)
     try:
-        media = {(iso.get('pool'), iso['name']) for iso in monitor_incus.isos()}
+        media = {(iso.get('pool'), iso['name']) for iso in (monitor_incus.isos() if incus_enabled else [])}
         for vm in vms:
             vm['iso_sources'] = media
         monitor_backend_recovered('Incus installation media')

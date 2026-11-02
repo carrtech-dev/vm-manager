@@ -25,7 +25,7 @@ function consolePage(provider = "incus") {
   const document = { activeElement: { tagName: "IFRAME" }, addEventListener() {} };
   const context = createContext({
     ...core, renderEmbeddedConsole, hostPicker, renderClusterTree, document, window: { addEventListener() {} }, setInterval() {},
-    bindCopyButtons() {}, refreshMonitoring() {},
+    bindCopyButtons() {}, refreshMonitoring() {}, renderFirstRun() {return false;}, checkFirstRun: async () => false, resetFirstRun() {},
     $: selector => ({ "#app": app, "#modal": modal, "#resource-tree": tree })[selector] || null,
     api: async path => {
       if (path === '/cluster/inventory') return { hosts: [{id:'',name:'host',status:'online',host:nextInventory.host,vms:nextInventory.vms}, {id:'other',name:'other',host:{name:'other-host'},status:'online',vms:[{id:'incus:remote',name:'remote',status:'running',provider:'incus'}]}] };

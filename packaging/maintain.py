@@ -56,7 +56,7 @@ def pre_upgrade():
                 if path.exists():
                     # Do not archive mounted VM/backup data, only broker registries/secrets.
                     if path.name == 'vm-manager-storage':
-                        for name in ('blocks.json', 'external.json'):
+                        for name in ('blocks.json', 'external.json', 'setup.json'):
                             if (path / name).exists():
                                 archive.add(path / name, arcname='var/lib/vm-manager-storage/' + name)
                     else:
@@ -164,6 +164,7 @@ def configure():
         else:
             raise SystemExit('VM Manager health check failed. Inspect journalctl -u vm-manager; backups and previous venv retained.')
     network.show_status(values, verify=systemd())
+    print('Sign in as an administrator to complete the first-time host setup wizard.')
 
 
 if __name__ == '__main__':

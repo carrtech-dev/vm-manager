@@ -2,7 +2,9 @@
 """Acceptance checks INSIDE A DISPOSABLE package test host, never production.
 
 Run `prepare` after initial install, `verify-upgrade` after an actual APT/DNF
-upgrade, and `verify-removed` after uninstall. Requires an explicit root-owned
+upgrade, `verify-setup` after completing the browser wizard, and `verify-removed`
+after uninstall. The setup phase creates, starts, stops and deletes a uniquely
+named disposable VM for local-host mode. Requires an explicit root-owned
 /root/vmm-distribution-disposable marker to avoid touching real account data.
 Changes only the disposable host's initial admin password; never prints it.
 """
@@ -18,6 +20,8 @@ import sqlite3
 import ssl
 import stat
 import subprocess
+import time
+import uuid
 import urllib.request
 
 STATE = Path('/var/lib/vm-manager')
@@ -42,7 +46,7 @@ def client():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('phase', choices=('prepare', 'verify-upgrade', 'verify-removed'))
+    parser.add_argument('phase', choices=('prepare', 'verify-setup', 'verify-upgrade', 'verify-removed'))
     args = parser.parse_args()
     marker = Path('/root/vmm-distribution-disposable')
     if os.geteuid() or not marker.exists() or marker.stat().st_uid != 0:
@@ -72,7 +76,46 @@ def main():
             assert [list(r) for r in db.execute('SELECT id,username,password,role FROM users')] == record['accounts']
         assert not (STATE / 'initial-admin.txt').exists()
         assert hashlib.sha256(Path('/etc/vm-manager/tls/server.key').read_bytes()).hexdigest() == record['tls']
-        if args.phase == 'verify-upgrade':
+        if args.phase == 'verify-setup':
+            request = client()
+            login = request('/api/login', {'username': 'admin', 'password': record['password']})
+            setup = request('/api/setup')
+            assert setup['status'] == 'completed' and not setup['required'], setup
+            inventory = request('/api/inventory')
+            assert not inventory['warnings'], inventory['warnings']
+            if setup['plan']['mode'] == 'cluster':
+                assert not inventory['vms'] and not inventory['pools']
+                print('Cluster-only setup verified: no local hypervisor probes; account and TLS preserved')
+                return
+            plan = setup['plan']
+            assert any(p['name'] == plan['pool'] for p in inventory['pools'])
+            network = next(n for n in inventory['networks'] if n['name'] == plan['network'] and n['provider'] == 'incus')
+            if plan['create_network']:
+                assert network['config']['ipv4.address'] == plan['network_address']
+                assert network['config']['ipv4.nat'] == 'true'
+            assert list(Path('/etc/vm-manager').glob('vm-manager.conf.before-setup-*'))
+            vm_name = 'setup-check-' + uuid.uuid4().hex[:10]
+            def task(path, body, method='POST'):
+                task_id = request(path, body, method, login['csrf'])['task_id']
+                deadline = time.monotonic() + 180
+                while time.monotonic() < deadline:
+                    row = next(t for t in request('/api/tasks') if t['id'] == task_id)
+                    if row['status'] not in ('running', 'queued'):
+                        assert row['status'] == 'completed', row['message']
+                        return
+                    time.sleep(1)
+                raise AssertionError('VM acceptance task timed out; inspect disposable resources')
+            task('/api/vms', {'name': vm_name, 'pool': plan['pool'], 'network': plan['network'],
+                             'cpu': 1, 'memory_gib': 0.5, 'disk_gib': 4})
+            path = '/api/vms/incus:' + vm_name
+            task(path + '/action', {'action': 'start'})
+            time.sleep(2)
+            vm = next(v for v in request('/api/inventory')['vms'] if v['name'] == vm_name)
+            assert vm['status'] == 'running'
+            task(path + '/action', {'action': 'stop', 'confirm_name': vm_name})
+            task(path, {'confirm_name': vm_name}, 'DELETE')
+            print('Local-host setup verified: warning-free inventory, confirmed NAT subnet, VM create/start/force-stop/delete through HTTPS; accounts and TLS preserved')
+        elif args.phase == 'verify-upgrade':
             assert list(Path('/var/lib/vm-manager-runtime/backups').glob('*.tar.gz'))
             request = client()
             login = request('/api/login', {'username': 'admin', 'password': record['password']})

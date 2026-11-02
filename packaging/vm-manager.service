@@ -7,6 +7,7 @@ Wants=network-online.target vm-manager-storage.service
 User=vm-manager
 Group=vm-manager
 WorkingDirectory=/usr/lib/vm-manager
+Environment=VM_MANAGER_FIRST_RUN=1
 Environment=VM_MANAGER_DATA=/var/lib/vm-manager
 Environment=TMPDIR=/var/lib/vm-manager/tmp
 EnvironmentFile=/etc/vm-manager/vm-manager.conf

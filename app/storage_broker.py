@@ -157,6 +157,9 @@ def delete(block_id):
 
 def dispatch(request):
     operation = request.get("operation")
+    if operation in ("setup_status", "setup_start"):
+        from . import host_setup
+        return host_setup.dispatch(operation, request.get("body"))
     if isinstance(operation, str) and operation.startswith('edge_'):
         from . import edge_runtime
         return edge_runtime.dispatch(operation, request)

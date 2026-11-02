@@ -78,7 +78,10 @@ def bytes_size(value):
 
 class Incus:
     def __init__(self, timeout=190):
-        self.socket = os.environ.get("INCUS_SOCKET", "/var/lib/incus/unix.socket")
+        self.socket = os.environ.get("INCUS_SOCKET") or next(
+            (path for path in ("/run/incus/unix.socket", "/var/lib/incus/unix.socket") if Path(path).exists()),
+            "/var/lib/incus/unix.socket",
+        )
         self.timeout = timeout
 
     def request(self, method, path, data=None, wait=True, etag=None):

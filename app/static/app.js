@@ -1,3 +1,4 @@
+import {checkFirstRun, renderFirstRun, resetFirstRun} from "./setup.js";
 import {mountEdgeScreen} from "./load-balancer.js";
 import {
   state,
@@ -344,6 +345,7 @@ function render() {
     renderLogin();
     return;
   }
+  if (renderFirstRun()) return;
   if (!state.inventory) {
     $("#app").innerHTML =
       '<div class="initial-loading">Loading host resources…</div>';
@@ -400,6 +402,7 @@ function updateResourceTree() {
   tree.scrollTop = scroll;
 }
 async function refreshClusterTree() {
+  if (state.setupScreen) return;
   if (clusterBusy || !state.user) return;
   clusterBusy = true;
   const user = state.user;
@@ -1769,6 +1772,7 @@ async function refresh(force = false) {
   busy = true;
   const page = state.page;
   try {
+    if (await checkFirstRun(() => refresh(true))) return;
     state.clusterHosts = await api("/cluster/hosts");
     const inventory = await api("/inventory", "GET", null, {local: ["cluster", "users", "account", "devops"].includes(page)});
     if (page !== state.page) return;
@@ -1810,7 +1814,7 @@ async function refresh(force = false) {
   }
 }
 async function refreshTasks() {
-  if (taskBusy || !state.user) return;
+  if (taskBusy || !state.user || state.setupScreen) return;
   taskBusy = true;
   try {
     state.tasks = await api("/tasks");
@@ -2228,6 +2232,7 @@ window.addEventListener("hashchange", async () => {
   await refresh(true);
 });
 window.addEventListener("session-expired", () => {
+  resetFirstRun();
   state.user = null;
   selectedVMs.clear();
   clearOperationSelection();

@@ -17,7 +17,7 @@ export const state = {
 };
 export const selectedHost = () => /^#devops(?:\/|$)/.test(globalThis.location?.hash || '') ? '' : new URLSearchParams(globalThis.location?.search || '').get('host') || '';
 export const apiURL = (path, host = selectedHost()) => {
-  const local = /^\/(me|login|logout|password|users|cluster|devops)(\/|\?|$)/.test(path);
+  const local = /^\/(me|login|logout|password|users|cluster|devops|setup)(\/|\?|$)/.test(path);
   return '/api' + (host && !local ? '/cluster/hosts/' + encodeURIComponent(host) + '/proxy' : '') + path;
 };
 export const hostURL = (url) => {

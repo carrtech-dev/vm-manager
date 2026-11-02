@@ -50,6 +50,7 @@ def stage(root, version, revision, public_key, url, kind):
     broker = (ROOT / 'scripts/vm-manager-storage.service').read_text().replace(
         '/opt/carrtech/vm-manager/current/.venv', '/var/lib/vm-manager-runtime/venv').replace(
         '/opt/carrtech/vm-manager/current', BASE)
+    broker = broker.replace('[Service]\n', '[Service]\nEnvironment=VM_MANAGER_FIRST_RUN=1\n')
     put(root, '/usr/lib/systemd/system/vm-manager-storage.service', broker)
     put(root, '/usr/share/keyrings/vm-manager.asc', public_key.read_text())
     put(root, '/usr/share/doc/vm-manager/README.md', (ROOT / 'docs/distribution.md').read_text())
@@ -118,7 +119,6 @@ Architecture: amd64
 Maintainer: CarrTech <support@carrtech.dev>
 Homepage: https://github.com/carrtech-dev/vm-manager
 Depends: iproute2, python3 (>= 3.13), python3 (<< 3.14), python3-venv, python3-libvirt, openssl, ca-certificates, systemd, passwd, util-linux, acl, cifs-utils, smbclient, fuse3, rclone, libvirt-clients
-Recommends: incus
 Description: CarrTech self-hosted virtual machine manager
  HTTPS console for existing Incus and libvirt hosts.
 ''')

@@ -1999,3 +1999,41 @@ def test_terminal_only_reports_logout_after_guest_completion(client, monkeypatch
     if transport != 'broken':
         assert ('GET', '/1.0/operations/logout/wait?timeout=5&project=default') in calls
     assert sum(method == 'POST' for method, _ in calls) == 1
+
+
+def test_first_run_requires_local_administrator_and_csrf(client, monkeypatch):
+    from app import main
+    body = {'mode': 'cluster', 'confirmed': True}
+    assert client.get('/api/setup').status_code == 401
+    monkeypatch.setenv('VM_MANAGER_FIRST_RUN', '1')
+    calls = []
+    monkeypatch.setattr(main.storage, 'broker', lambda op, **kw: calls.append((op, kw)) or {'required': True, 'status': 'pending'})
+    for role in ('viewer', 'operator'):
+        headers = login(client, role)
+        assert client.get('/api/setup').status_code == 200
+        assert client.post('/api/setup', headers=headers, json=body).status_code == 403
+    headers = login(client)
+    assert client.post('/api/setup', json=body).status_code == 403
+    assert client.post('/api/setup', headers=headers, json={**body, 'command': 'bad'}).status_code == 422
+    assert client.post('/api/setup', headers=headers, json={**body, 'confirmed': False}).status_code == 422
+    assert client.post('/api/setup', headers=headers, json=body).status_code == 200
+    assert calls[-1][0] == 'setup_start'
+    with store.db() as db:
+        assert db.execute("SELECT 1 FROM audit WHERE action='host.setup.started'").fetchone()
+    monkeypatch.delenv('VM_MANAGER_FIRST_RUN')
+    assert client.get('/api/setup').json() == {'required': False}
+    assert client.post('/api/setup', headers=headers, json=body).status_code == 403
+
+
+def test_cluster_only_inventory_does_not_probe_local_hypervisors(client, monkeypatch):
+    from app import main
+    monkeypatch.setenv('VM_MANAGER_FIRST_RUN', '1')
+    monkeypatch.setattr(main, 'setup_state', lambda: {'status': 'completed', 'plan': {'mode': 'cluster'}})
+    def unexpected():
+        pytest.fail('cluster-only mode must not probe local hypervisors')
+    for driver, methods in [(main.incus, ('vms', 'networks', 'pools', 'isos')), (main.libvirt, ('vms', 'networks'))]:
+        for method in methods:
+            monkeypatch.setattr(driver, method, unexpected)
+    login(client)
+    invalidate()
+    assert client.get('/api/inventory').json()['warnings'] == []

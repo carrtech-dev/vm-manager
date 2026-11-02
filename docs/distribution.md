@@ -2,11 +2,12 @@
 
 The initial supported targets are **Debian 13 amd64** (DEB, Python 3.13) and
 **Rocky/AlmaLinux 10 x86_64** (RPM, Python 3.12). Other distributions/architectures
-are not yet validated. The web interface works immediately after installation.
-Install/configure Incus and/or libvirt when you want to manage VMs on this host;
-the package never initializes a hypervisor or changes physical networks.
-RPM hosts need EPEL's `rclone` for external S3 storage, and an appropriate Incus
-repository if Incus is not already installed. Enable the host's normal OS repos.
+are not yet validated. The web interface starts immediately after installation.
+On the first administrator sign-in, a setup wizard configures the host after
+showing a plan for confirmation. Package installation alone does not install
+hypervisors or create a VM network. Enable the host's normal OS repositories;
+local-host setup requires internet access to download hypervisor packages.
+RPM hosts need EPEL's `rclone` separately for optional external S3 storage.
 
 ## Install and update
 
@@ -93,9 +94,67 @@ Change the password in Account after first login; that removes the initial
 credentials file. Upgrades never reset accounts or recreate credentials when
 accounts exist. No default password or private key is shipped in either package.
 
-The main service runs as `vm-manager`; the existing storage broker runs as root
-through its local restricted socket. If Incus/libvirt is installed after the
-package, reconfigure/reinstall the package to refresh service group membership.
+## First-time setup
+
+Sign in using the initial administrator account. New native installations,
+including older packages upgraded without a saved setup result, open the setup
+wizard before loading the resource dashboard. Operators and viewers see a notice
+that an administrator must complete setup. Existing source deployments keep their
+established installation procedure.
+
+1. Choose **Host virtual machines** or **Manage a cluster only**. Local hosting
+   installs Incus and QEMU/KVM, with optional libvirt discovery/management.
+   Hardware virtualization (`/dev/kvm`) must be available; enable nested
+   virtualization when installing inside a VM. Cluster-only mode requires no local
+   hypervisor, storage pool, or VM network.
+2. Confirm the required **listen address** (`VM_MANAGER_HOST`) in
+   `/etc/vm-manager/vm-manager.conf`: use `0.0.0.0` for all IPv4 interfaces, `::`
+   for IPv6, or a local interface address. Confirm whether the active firewall
+   should permit HTTPS (`VM_MANAGER_MANAGE_FIREWALL`). Optionally set
+   `VM_MANAGER_PUBLIC_URL` for NAT/reverse-proxy access. Other configuration
+   options, including selected firewall zones, are preserved.
+3. For local hosting, select an existing Incus storage pool/managed bridge, or
+   choose to create them. A new directory storage pool uses the host filesystem;
+   advanced live backups require a suitable snapshot-capable storage driver.
+   **Enter and confirm the VM bridge gateway address and subnet prefix**, for
+   example `10.210.0.1/24`. The wizard does not silently choose an address. Use a
+   private IPv4 subnet that does not overlap LAN, VPN or other host routes. It
+   creates a private NAT bridge only after confirmation, and does not reconfigure
+   physical interfaces or replace existing networks/pools.
+4. Review the complete plan and explicitly authorize the changes. On
+   Rocky/AlmaLinux 10, this includes enabling EPEL, CRB, the signed
+   [current Incus RPM repository](https://github.com/cofob/incus-rpm-repo),
+   and `ligenix/enterprise-qemu-spice` for a QEMU build with SPICE support.
+   VM Manager bundles the Incus repository's public key (fingerprint
+   `06FB41B7A8B4AAD8E9820FAC3BA91725C212825F`) and enables both package and metadata
+   signature verification. The older Incus 6.23 COPR build cannot start VMs on
+   current EL10 QEMU because it requests the removed `kvm64` CPU model; setup
+   installs a current stable build containing the upstream compatibility fix. The latter repository is restricted to QEMU
+   packages, `spice-server` and their `virglrenderer`/`libiscsi` dependencies; unrelated packages continue using the existing
+   repositories. These are community packages, shown in the review before approval.
+   APT/DNF resolves dependencies and verifies package signatures. Setup starts
+   the services, refreshes service-account access, verifies both hypervisors as
+   `vm-manager`, saves the confirmed settings and restarts the web service.
+
+Progress and failures are retained on the host, so closing the browser does not
+cancel setup. A failed or interrupted run offers **Review and retry**; completed
+steps and existing VM resources are retained. Correct the reported cause before
+retrying. Configuration backups are kept beside `vm-manager.conf`; setup intent
+and completion are retained in the root-owned
+`/var/lib/vm-manager-storage/setup.json` and package-upgrade backups. Successful
+setup is not repeated on subsequent sign-ins or package upgrades.
+
+After setup, open **Cluster** to link another VM Manager using its incoming key
+and public TLS certificate. Hosts can manage local VMs and participate in a
+federated cluster simultaneously. Trust links are directional; add links on each
+manager that needs to manage the other's resources. A private NAT VM network is
+sufficient for single-host use. Cross-host workloads need mutually routed VM
+subnets or a shared network; the wizard does not configure upstream routers.
+
+The main service runs as `vm-manager`; the storage/setup broker runs as root
+through its local group-restricted socket. Host provisioning accepts a fixed,
+validated setup plan from a local administrator with CSRF protection. Cluster
+credentials cannot run host setup, and the web service itself remains unprivileged.
 
 ## Lifecycle and recovery
 
@@ -218,3 +277,5 @@ requires `/root/vmm-distribution-disposable` and must never run on production da
 
 Version 1.0.2 adds automatic host firewall access, install-time browser URLs,
 `vm-manager status`, and concise monitoring notices when a hypervisor is unavailable.
+
+Version 1.0.3 adds the first-sign-in host setup wizard, confirmed VM gateway/subnet and host settings, hypervisor installation, and durable setup progress/retry.

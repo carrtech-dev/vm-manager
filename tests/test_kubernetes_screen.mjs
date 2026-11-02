@@ -18,7 +18,7 @@ function screen() {
   let html='', draws=0, mounts=0, stops=0, root=null;
   const app = {set innerHTML(value) {html=value;draws++;root=value.includes('id="kubernetes-screen"') ? {} : null;}};
   const location = {hash:'#devops/'+cluster.id};
-  const context = createContext({...core, renderDevops, hostPicker, renderClusterTree, location,
+  const context = createContext({...core, renderFirstRun() {return false;}, checkFirstRun: async () => false, resetFirstRun() {}, renderDevops, hostPicker, renderClusterTree, location,
     document:{activeElement:{tagName:'IFRAME'},addEventListener(){}},window:{addEventListener(){}},setInterval(){},
     bindCopyButtons(){},refreshMonitoring(){},mountClusterScreen(){mounts++;return () => {stops++;};},
     $: selector => ({'#app':app,'#modal':{open:false},'#kubernetes-screen':root,'#resource-tree':{scrollTop:0,innerHTML:''}})[selector] || null,

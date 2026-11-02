@@ -116,6 +116,8 @@ def main():
         'Installation, credentials and update instructions</a></p>'
         '<p>The installer prints browser URLs and opens HTTPS in active firewalld/UFW. '
         'Show access details with <code>sudo vm-manager status</code>.</p>'
+        '<p>First sign-in opens host setup: choose local hosting or cluster management, '
+        'confirm the VM network gateway/subnet and listen address, then approve the installation plan.</p>'
         '<p>After installation, use <code>apt update &amp;&amp; apt upgrade</code> or '
         '<code>dnf update</code>. Read initial credentials with '
         '<code>sudo cat /var/lib/vm-manager/initial-admin.txt</code>.</p></html>')
