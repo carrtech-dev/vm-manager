@@ -201,9 +201,10 @@ def test_retry_reinstalls_failed_post_scripts_and_installs_missing_pre_scripts_n
         return 'fontconfig\nother\n' if args[0] == 'rpm' else ''
     monkeypatch.setattr(setup, 'command', command)
     setup.repair_dependencies()
+    assert ('dnf', '-y', 'install', 'incus') in calls
     assert calls[-1] == ('dnf', '-y', 'reinstall', 'fontconfig')
     assert setup.load()['repair_packages'] == []
-    assert setup.load()['repaired_packages'] == ['fontconfig']
+    assert setup.load()['repaired_packages'] == ['fontconfig', 'incus']
 
 
 def test_failed_repair_keeps_pending_packages_for_next_retry(tmp_path, monkeypatch):

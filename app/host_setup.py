@@ -432,12 +432,18 @@ def repair_dependencies():
         raise HypervisorError('Invalid saved package recovery state')
     installed = set(command('rpm', '-qa', '--queryformat', '%{NAME}\n').splitlines())
     repair = sorted(set(packages) & installed)
+    missing = sorted(set(packages) - installed)
+    if missing:
+        progress(f'Completing installation of {len(missing)} packages whose previous installation scripts failed')
+        # DNF can consider the top-level package installed even when a failed
+        # dependency PRE script prevented its files from being installed.
+        command('dnf', '-y', 'install', *missing)
     if repair:
         progress(f'Repairing {len(repair)} packages left partly configured by the previous failed installation')
         command('dnf', '-y', 'reinstall', *repair)
     with _lock:
         record = load()
-        record.update(repaired_packages=repair, repair_packages=[])
+        record.update(repaired_packages=sorted(set(packages)), repair_packages=[])
         save(record)
 
 
