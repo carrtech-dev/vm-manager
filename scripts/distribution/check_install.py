@@ -80,6 +80,8 @@ def main():
         assert not (STATE / 'initial-admin.txt').exists()
         assert hashlib.sha256(Path('/etc/vm-manager/tls/server.key').read_bytes()).hexdigest() == record['tls']
         if args.phase == 'verify-setup':
+            if platform.freedesktop_os_release().get('ID') in ('rocky', 'almalinux'):
+                subprocess.run(['dnf', 'check'], check=True)
             request = client()
             login = request('/api/login', {'username': 'admin', 'password': record['password']})
             setup = request('/api/setup')
