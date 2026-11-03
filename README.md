@@ -944,6 +944,16 @@ a Deployment retains related Services, Ingresses and storage.
 
 ### Managed load balancer
 
+The screen has four tabs: **Overview** shows status and a network diagram;
+**Hostname routes** maps web addresses to applications; **Kubernetes** explains
+automatic TCP Service integration; and **Cloudflare** manages the optional shared
+tunnel. Each section includes setup steps and expandable technical help. The
+diagram follows configured requests from client to destination, distinguishing
+direct HTTPS, Cloudflare's tunnel/local HTTP origin and Kubernetes TCP listeners.
+Pending TCP listeners show their reason. The diagram describes configuration;
+it is not a live connectivity test. Background refreshes retain the selected tab
+and open help.
+
 Open **DevOps → Manage load balancer** (`/#devops/load-balancer`). An administrator
 can **Launch load balancer** explicitly for hostname routing, but Kubernetes needs
 no setup clicks: Ready DevOps clusters connect automatically, and the first
